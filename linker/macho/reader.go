@@ -122,7 +122,6 @@ func readSLEB128(data []byte, off int) (int64, int, error) {
 		result |= int64(b&0x7F) << shift
 		shift += 7
 		if b&0x80 == 0 {
-			// Sign extend if necessary
 			if shift < 64 && (b&0x40) != 0 {
 				result |= -(1 << shift)
 			}

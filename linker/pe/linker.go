@@ -88,6 +88,21 @@ func (l *Linker) AddCachedDylib(name string, symbols []string) {
 	l.shared = append(l.shared, &SharedLib{Name: name, Soname: name, Exports: exports})
 }
 
+// AddFramework registers a dyld-shared-cache-only Apple framework by its
+// bare name (e.g. "Foundation", "UIKit", "CoreGraphics") — no need to spell
+// out the "<Name>.framework/<Name>" path yourself. Internally this builds
+// that path and delegates to AddCachedDylib, so the framework's exports are
+// pre-registered for symbol resolution rather than relying on the blunt
+// "first stub lib absorbs leftover undefineds" fallback in SymbolTable.Ingest.
+//
+// findInstallPath (builder.go) rewrites any Soname containing ".framework/"
+// to "/System/Library/Frameworks/<path>" at emit time, so the resulting
+// LC_LOAD_DYLIB install path comes out correct automatically.
+func (l *Linker) AddFramework(name string, symbols []string) {
+	path := name + ".framework/" + name
+	l.AddCachedDylib(path, symbols)
+}
+
 func (l *Linker) Link() ([]byte, error) {
 	if !l.Supported() {
 		return nil, fmt.Errorf("macho: no codegen backend registered for %s (blank-import its subpackage)", l.target.Arch)

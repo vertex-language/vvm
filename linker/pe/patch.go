@@ -20,6 +20,24 @@ type BaseRelocCollector interface {
 	BaseRelocSites() []BaseRelocSite
 }
 
+// CoreBaseSetter is an optional extension a Patcher can implement to receive
+// the output type's core layout base VA after construction. That value
+// (0x400000 for OutputExec, 0 otherwise) is a per-link property, not a
+// per-arch one, so it can't be threaded through the registry's
+// func(Target) Patcher factory signature — Linker.Link injects it via this
+// interface immediately after building the patcher.
+type CoreBaseSetter interface {
+	SetCoreBase(uint64)
+}
+
+// IATLayoutSetter is the PLTPatcher analogue of CoreBaseSetter: the IAT slot
+// layout is computed at Link() time from the actual set of PLT symbols
+// gathered for this link, so — like CoreBaseSetter — it can't flow through
+// the factory's Target parameter alone.
+type IATLayoutSetter interface {
+	SetIATLayout(*IATLayout)
+}
+
 // PatchAll applies every relocation from every input object to the merged
 // output section data. Must be called after AssignLayout and ResolveSymbolAddresses.
 func PatchAll(layout *Layout, symtab *SymbolTable, objects []*Object, patcher Patcher) error {

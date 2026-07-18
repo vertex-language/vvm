@@ -34,10 +34,7 @@ type peSection struct {
 func emitPE(req *EmitRequest) ([]byte, error) {
 	imgBase := imageBaseFor(req.OutputType)
 	coreBase := coreBaseVA(req.OutputType)
-	machine := uint16(imageMachineAMD64)
-	if req.Arch == ArchARM64 {
-		machine = imageMachineARM64
-	}
+	machine := req.Target.Arch.machine()
 
 	// ── 1. Every allocatable section, in layout-assigned address order ────
 	var sects []*peSection
@@ -178,17 +175,17 @@ func emitPE(req *EmitRequest) ([]byte, error) {
 	le64(ws+0, imgBase)
 	le32(ws+8, uint32(peSectAlign))
 	le32(ws+12, uint32(peFileAlign))
-	le16(ws+16, 6)
-	le16(ws+18, 1) // MinorOSVersion: 6.1 = Windows 7 minimum
+	le16(ws+16, req.MajorOSVersion)
+	le16(ws+18, req.MinorOSVersion)
 	le16(ws+20, 0)
 	le16(ws+22, 0)
-	le16(ws+24, 6)
-	le16(ws+26, 1) // MinorSubsystemVersion: 6.1 = Windows 7 minimum
+	le16(ws+24, req.MajorSubsystemVersion)
+	le16(ws+26, req.MinorSubsystemVersion)
 	le32(ws+28, 0)
 	le32(ws+32, sizeOfImage)
 	le32(ws+36, sizeOfHeaders)
 	le32(ws+40, 0)
-	le16(ws+44, imageSubsystemWindowsCUI)
+	le16(ws+44, uint16(req.Subsystem))
 	le16(ws+46, uint16(dllChars))
 	le64(ws+48, 0x100000)
 	le64(ws+56, 0x1000)

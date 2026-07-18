@@ -3,6 +3,8 @@ package pe
 // ── Machine types ─────────────────────────────────────────────────────────────
 
 const (
+	imageMachineI386  = uint16(0x014C)
+	imageMachineARMNT = uint16(0x01C4)
 	imageMachineAMD64 = uint16(0x8664)
 	imageMachineARM64 = uint16(0xAA64)
 )
@@ -39,18 +41,34 @@ const (
 const (
 	dirExport    = 0
 	dirImport    = 1
+	dirException = 3
 	dirBaseReloc = 5
-	dirException = 3  // ← add this
 	dirIAT       = 12
 	dirCount     = 16
 )
 
 // ── Subsystem ─────────────────────────────────────────────────────────────────
 
+// Subsystem mirrors the IMAGE_SUBSYSTEM_* values in winnt.h exactly.
+type Subsystem uint16
+
 const (
-	imageSubsystemWindowsGUI = uint16(2)
-	imageSubsystemWindowsCUI = uint16(3)
+	SubsystemWindowsGUI           Subsystem = 2
+	SubsystemWindowsCUI           Subsystem = 3
+	SubsystemEFIApplication       Subsystem = 10
+	SubsystemEFIBootServiceDriver Subsystem = 11
+	SubsystemEFIRuntimeDriver     Subsystem = 12
+	SubsystemEFIROM               Subsystem = 13
 )
+
+// defaultSubsystem picks WindowsCUI/EFIApplication from Target.OS, unless
+// overridden by Linker.SetSubsystem.
+func defaultSubsystem(t Target) Subsystem {
+	if t.OS == OSUEFI {
+		return SubsystemEFIApplication
+	}
+	return SubsystemWindowsCUI
+}
 
 // ── DLL characteristics ───────────────────────────────────────────────────────
 
@@ -71,45 +89,49 @@ const (
 )
 
 // ── AMD64 COFF relocation types ───────────────────────────────────────────────
+// Exported: this is the single source of truth, used both by object.go's
+// addend-stripping (in-package) and by the x64 subpackage's Patcher (out of
+// package) — no duplicate unexported copies.
 
 const (
-	relAMD64Absolute = uint32(0x0000)
-	relAMD64Addr64   = uint32(0x0001)
-	relAMD64Addr32   = uint32(0x0002)
-	relAMD64Addr32NB = uint32(0x0003)
-	relAMD64Rel32    = uint32(0x0004)
-	relAMD64Rel32_1  = uint32(0x0005)
-	relAMD64Rel32_2  = uint32(0x0006)
-	relAMD64Rel32_3  = uint32(0x0007)
-	relAMD64Rel32_4  = uint32(0x0008)
-	relAMD64Rel32_5  = uint32(0x0009)
-	relAMD64Section  = uint32(0x000A)
-	relAMD64SecRel   = uint32(0x000B)
-	relAMD64SecRel7  = uint32(0x000C)
-	relAMD64Token    = uint32(0x000D)
+	RelAMD64Absolute = uint32(0x0000)
+	RelAMD64Addr64   = uint32(0x0001)
+	RelAMD64Addr32   = uint32(0x0002)
+	RelAMD64Addr32NB = uint32(0x0003)
+	RelAMD64Rel32    = uint32(0x0004)
+	RelAMD64Rel32_1  = uint32(0x0005)
+	RelAMD64Rel32_2  = uint32(0x0006)
+	RelAMD64Rel32_3  = uint32(0x0007)
+	RelAMD64Rel32_4  = uint32(0x0008)
+	RelAMD64Rel32_5  = uint32(0x0009)
+	RelAMD64Section  = uint32(0x000A)
+	RelAMD64SecRel   = uint32(0x000B)
+	RelAMD64SecRel7  = uint32(0x000C)
+	RelAMD64Token    = uint32(0x000D)
 )
 
 // ── ARM64 COFF relocation types ───────────────────────────────────────────────
+// Exported for the same reason as the AMD64 block above.
 
 const (
-	relARM64Absolute      = uint32(0x0000)
-	relARM64Addr32        = uint32(0x0001)
-	relARM64Addr32NB      = uint32(0x0002)
-	relARM64Branch26      = uint32(0x0003)
-	relARM64PagebaseRel21 = uint32(0x0004)
-	relARM64Rel21         = uint32(0x0005)
-	relARM64PageOffset12A = uint32(0x0006)
-	relARM64PageOffset12L = uint32(0x0007)
-	relARM64SecRel        = uint32(0x0008)
-	relARM64SecRelLow12A  = uint32(0x0009)
-	relARM64SecRelHigh12A = uint32(0x000A)
-	relARM64SecRelLow12L  = uint32(0x000B)
-	relARM64Token         = uint32(0x000C)
-	relARM64Section       = uint32(0x000D)
-	relARM64Addr64        = uint32(0x000E)
-	relARM64Branch19      = uint32(0x000F)
-	relARM64Branch14      = uint32(0x0010)
-	relARM64Rel32         = uint32(0x0011)
+	RelARM64Absolute      = uint32(0x0000)
+	RelARM64Addr32        = uint32(0x0001)
+	RelARM64Addr32NB      = uint32(0x0002)
+	RelARM64Branch26      = uint32(0x0003)
+	RelARM64PagebaseRel21 = uint32(0x0004)
+	RelARM64Rel21         = uint32(0x0005)
+	RelARM64PageOffset12A = uint32(0x0006)
+	RelARM64PageOffset12L = uint32(0x0007)
+	RelARM64SecRel        = uint32(0x0008)
+	RelARM64SecRelLow12A  = uint32(0x0009)
+	RelARM64SecRelHigh12A = uint32(0x000A)
+	RelARM64SecRelLow12L  = uint32(0x000B)
+	RelARM64Token         = uint32(0x000C)
+	RelARM64Section       = uint32(0x000D)
+	RelARM64Addr64        = uint32(0x000E)
+	RelARM64Branch19      = uint32(0x000F)
+	RelARM64Branch14      = uint32(0x0010)
+	RelARM64Rel32         = uint32(0x0011)
 )
 
 // ── Base relocation entry types ───────────────────────────────────────────────

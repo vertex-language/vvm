@@ -8,39 +8,56 @@ import (
 	"strings"
 )
 
-// 
+// nlist64Entry mirrors the on-disk 64-bit nlist entry.
 type nlist64Entry struct {
-    strx  uint32
-    ntype uint8
-    nsect uint8
-    ndesc uint16
-    value uint64
+	strx  uint32
+	ntype uint8
+	nsect uint8
+	ndesc uint16
+	value uint64
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-func emitMachO(req *emitRequest, arch Arch) ([]byte, error) {
-	e := &emitter{req: req, arch: arch}
+// emitRequest carries all post-link data needed to produce the output binary.
+// It is internal to the package; callers interact only through Linker.Link().
+type emitRequest struct {
+	Target     Target
+	OutputType OutputType
+	Zippered   bool
+	Entry      string
+	Interp     string
+	Soname     string
+	Rpath      string
+	Needed     []string
+	Layout     *Layout
+	Symtab     *SymbolTable
+	PLTSyms    []string
+	StubSize   int // from the registered PLTPatcher for this Target's Arch
+	BaseRelocs []BaseRelocSite
+}
+
+func emitMachO(req *emitRequest) ([]byte, error) {
+	e := &emitter{req: req}
 	return e.emit()
 }
 
 // ── Emitter ───────────────────────────────────────────────────────────────────
 
 type emitter struct {
-	req  *emitRequest
-	arch Arch
+	req *emitRequest
 
 	// classified sections
 	textSecs []*MergedSection
 	dataSecs []*MergedSection
 
 	// segment ranges — filled by computeRanges
-	textVMAddr, textVMSize     uint64
-	textFileOff, textFileSize  uint64
-	dataVMAddr, dataVMSize     uint64
-	dataFileOff, dataFileSize  uint64
-	linkEditFileOff            uint64
-	linkEditVMAddr             uint64
+	textVMAddr, textVMSize    uint64
+	textFileOff, textFileSize uint64
+	dataVMAddr, dataVMSize    uint64
+	dataFileOff, dataFileSize uint64
+	linkEditFileOff           uint64
+	linkEditVMAddr            uint64
 
 	// LINKEDIT blobs — filled by buildLinkEdit
 	rebaseBlob   []byte
@@ -51,24 +68,30 @@ type emitter struct {
 	strBlob      []byte
 
 	// symbol table metadata
-	symbols  []nlist64Entry
-	nLocals  uint32
-	nExtDef  uint32
-	nUndef   uint32
+	symbols      []nlist64Entry
+	nLocals      uint32
+	nExtDef      uint32
+	nUndef       uint32
 	indirectSyms []uint32
-	stubsIST uint32
-	gotIST   uint32
+	stubsIST     uint32
+	gotIST       uint32
 
 	// LINKEDIT offsets — filled by computeLinkEditOffsets
-	rebaseOff   uint64
-	bindOff     uint64
-	exportOff   uint64
-	symOff      uint64
-	indirectOff uint64
-	strOff      uint64
-	codeSignOff uint64
+	rebaseOff    uint64
+	bindOff      uint64
+	exportOff    uint64
+	symOff       uint64
+	indirectOff  uint64
+	strOff       uint64
+	codeSignOff  uint64
 	codeSignSize uint64
 	linkEditSize uint64
+
+	// offset within the load-command stream where the 16 raw UUID bytes
+	// start (i.e. right after LC_UUID's cmd+cmdsize fields). Filled by
+	// buildLCs, consumed by serialize to patch in the content-derived UUID
+	// once the rest of the binary is known.
+	uuidLCOffset int
 }
 
 func (e *emitter) emit() ([]byte, error) {
@@ -116,9 +139,9 @@ func (e *emitter) classifySections() {
 	// Sort by VAddr so computeRanges correctly identifies the highest-addressed
 	// section as `last`. PLT stubs are injected after MergeSections and end up
 	// at the tail of Layout.Sections regardless of their actual VAddr, so
-	// without sorting, `last` would be __stubs (at ~0x1000040c0) rather than
-	// __const (at 0x100008000), causing textVMSize to be computed too small
-	// and dyld to reject the binary with "section end beyond segment end".
+	// without sorting, `last` would be __stubs rather than e.g. __const,
+	// causing textVMSize to be computed too small and dyld to reject the
+	// binary with "section end beyond segment end".
 	sort.Slice(e.textSecs, func(i, j int) bool {
 		return e.textSecs[i].VAddr < e.textSecs[j].VAddr
 	})
@@ -140,8 +163,6 @@ func (e *emitter) computeRanges() {
 		}
 		last := e.textSecs[len(e.textSecs)-1]
 		e.textFileOff = 0
-		
-		// Fix: Align the segment sizes to page boundaries (4096 bytes)
 		e.textFileSize = alignUp64(last.FileOffset+last.Size, layoutPageSize)
 		e.textVMSize = alignUp64(last.VAddr+last.Size-e.textVMAddr, layoutPageSize)
 	}
@@ -161,8 +182,6 @@ func (e *emitter) computeRanges() {
 				}
 			}
 		}
-		
-		// Fix: Align DATA segment sizes as well
 		e.dataVMSize = alignUp64(lastVM-e.dataVMAddr, layoutPageSize)
 		if lastFile > e.dataFileOff {
 			e.dataFileSize = alignUp64(lastFile-e.dataFileOff, layoutPageSize)
@@ -177,7 +196,7 @@ func (e *emitter) computeRanges() {
 		afterFile = e.textFileOff + e.textFileSize
 		afterVM = e.textVMAddr + e.textVMSize
 	}
-	
+
 	e.linkEditFileOff = alignUp64(afterFile, layoutPageSize)
 	e.linkEditVMAddr = alignUp64(afterVM, layoutPageSize)
 }
@@ -356,12 +375,18 @@ func (e *emitter) strName(strx uint32) string {
 
 func (e *emitter) computeLinkEditOffsets() {
 	off := e.linkEditFileOff
-	e.rebaseOff = off; off = alignUp64(off+uint64(len(e.rebaseBlob)), 8)
-	e.bindOff   = off; off = alignUp64(off+uint64(len(e.bindBlob)), 8)
-	e.exportOff = off; off = alignUp64(off+uint64(len(e.exportBlob)), 8)
-	e.symOff    = off; off = alignUp64(off+uint64(len(e.symBlob)), 8)
-	e.indirectOff = off; off = alignUp64(off+uint64(len(e.indirectBlob)), 8)
-	e.strOff    = off; off += uint64(len(e.strBlob))
+	e.rebaseOff = off
+	off = alignUp64(off+uint64(len(e.rebaseBlob)), 8)
+	e.bindOff = off
+	off = alignUp64(off+uint64(len(e.bindBlob)), 8)
+	e.exportOff = off
+	off = alignUp64(off+uint64(len(e.exportBlob)), 8)
+	e.symOff = off
+	off = alignUp64(off+uint64(len(e.symBlob)), 8)
+	e.indirectOff = off
+	off = alignUp64(off+uint64(len(e.indirectBlob)), 8)
+	e.strOff = off
+	off += uint64(len(e.strBlob))
 
 	isExec := e.req.OutputType != OutputShared
 	if isExec {
@@ -397,7 +422,7 @@ func (e *emitter) buildLCs() ([]byte, error) {
 			r1, r2 := uint32(0), uint32(0)
 			if ms.Name == sectionStubs {
 				r1 = e.stubsIST
-				r2 = uint32(stubEntrySize(e.arch))
+				r2 = uint32(req.StubSize)
 			}
 			sects = append(sects, secHdr{
 				sect: sect, seg: seg,
@@ -407,11 +432,11 @@ func (e *emitter) buildLCs() ([]byte, error) {
 			})
 		}
 		lc = appendSeg64(lc, "__TEXT",
-					e.textVMAddr, e.textVMSize,
-					e.textFileOff, e.textFileSize,
-					VM_PROT_READ|VM_PROT_EXECUTE, // Fix: Read & Execute only
-					VM_PROT_READ|VM_PROT_EXECUTE,
-					sects)
+			e.textVMAddr, e.textVMSize,
+			e.textFileOff, e.textFileSize,
+			VM_PROT_READ|VM_PROT_EXECUTE,
+			VM_PROT_READ|VM_PROT_EXECUTE,
+			sects)
 	}
 
 	// __DATA
@@ -448,10 +473,16 @@ func (e *emitter) buildLCs() ([]byte, error) {
 		e.linkEditFileOff, e.linkEditSize,
 		VM_PROT_READ, VM_PROT_READ, nil)
 
-	// ── non-segment load commands (order matches working Go binary) ───────────
+	// ── non-segment load commands ─────────────────────────────────────────────
 
-	// LC_BUILD_VERSION
-	lc = appendBuildVer(lc)
+	// LC_BUILD_VERSION (one entry normally, two if zippered)
+	entries, err := buildVersionEntries(req.Target, req.Zippered)
+	if err != nil {
+		return nil, err
+	}
+	for _, be := range entries {
+		lc = appendBuildVerEntry(lc, be)
+	}
 
 	// LC_MAIN (exec only)
 	if isExec {
@@ -478,17 +509,26 @@ func (e *emitter) buildLCs() ([]byte, error) {
 		uint32(e.indirectOff), uint32(len(e.indirectSyms)))
 
 	// LC_LOAD_DYLINKER
-	lc = appendDylinker(lc, "/usr/lib/dyld")
+	interp := req.Interp
+	if interp == "" {
+		interp = "/usr/lib/dyld"
+	}
+	lc = appendDylinker(lc, interp)
 
 	// LC_LOAD_DYLIB entries
 	for _, dep := range req.Needed {
 		lc = appendDylib(lc, findInstallPath(dep))
 	}
 
-	// LC_UUID
-	lc = appendUUID(lc)
+	// LC_UUID — placeholder now, patched in serialize() once the rest of the
+	// binary's bytes are known (content-derived, so relinking identical
+	// inputs is reproducible instead of using a random UUID).
+	e.uuidLCOffset = len(lc) + 8 // skip cmd(4) + cmdsize(4)
+	lc = u32(lc, LC_UUID)
+	lc = u32(lc, uint32(uuidCmdSize))
+	lc = append(lc, make([]byte, 16)...)
 
-	// LC_CODE_SIGNATURE (exec only, always last)
+	// LC_CODE_SIGNATURE (exec only, always last) / LC_ID_DYLIB (shared)
 	if isExec {
 		lc = appendCodeSig(lc, uint32(e.codeSignOff), uint32(e.codeSignSize))
 	} else {
@@ -518,9 +558,9 @@ func (e *emitter) serialize(lc []byte) []byte {
 	case OutputExec:
 		filetype = MH_EXECUTE
 		flags = MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL
-		// Fix: Apple Silicon completely forbids non-PIE executables. 
-		// We must force the MH_PIE flag or the kernel will SIGKILL (137) it.
-		if e.arch == ArchARM64 {
+		// Apple Silicon forbids non-PIE executables — force MH_PIE or the
+		// kernel SIGKILLs (137) it, for both plain arm64 and arm64e.
+		if e.req.Target.Arch == ArchARM64 || e.req.Target.Arch == ArchARM64E {
 			flags |= MH_PIE
 		}
 	case OutputPIE:
@@ -531,13 +571,7 @@ func (e *emitter) serialize(lc []byte) []byte {
 		flags = MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL
 	}
 
-	var cputype, cpusubtype int32
-	switch e.arch {
-	case ArchAMD64:
-		cputype, cpusubtype = CPU_TYPE_AMD64, CPU_SUBTYPE_AMD64_ALL
-	case ArchARM64:
-		cputype, cpusubtype = CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL
-	}
+	cputype, cpusubtype := cpuTypeSubtype(e.req.Target)
 
 	totalSize := e.linkEditFileOff +
 		uint64(len(e.rebaseBlob)) +
@@ -554,9 +588,9 @@ func (e *emitter) serialize(lc []byte) []byte {
 
 	// mach_header_64
 	le := binary.LittleEndian
-	le.PutUint32(out[0:],  MH_MAGIC_64)
-	le.PutUint32(out[4:],  uint32(cputype))
-	le.PutUint32(out[8:],  uint32(cpusubtype))
+	le.PutUint32(out[0:], MH_MAGIC_64)
+	le.PutUint32(out[4:], uint32(cputype))
+	le.PutUint32(out[8:], uint32(cpusubtype))
 	le.PutUint32(out[12:], filetype)
 	le.PutUint32(out[16:], ncmds)
 	le.PutUint32(out[20:], sizeofcmds)
@@ -580,14 +614,32 @@ func (e *emitter) serialize(lc []byte) []byte {
 
 	// LINKEDIT blobs
 	fo := e.linkEditFileOff
-	copy(out[fo:], e.rebaseBlob);   fo = alignUp64(fo+uint64(len(e.rebaseBlob)), 8)
-	copy(out[fo:], e.bindBlob);     fo = alignUp64(fo+uint64(len(e.bindBlob)), 8)
-	copy(out[fo:], e.exportBlob);   fo = alignUp64(fo+uint64(len(e.exportBlob)), 8)
-	copy(out[fo:], e.symBlob);      fo = alignUp64(fo+uint64(len(e.symBlob)), 8)
-	copy(out[fo:], e.indirectBlob); fo = alignUp64(fo+uint64(len(e.indirectBlob)), 8)
+	copy(out[fo:], e.rebaseBlob)
+	fo = alignUp64(fo+uint64(len(e.rebaseBlob)), 8)
+	copy(out[fo:], e.bindBlob)
+	fo = alignUp64(fo+uint64(len(e.bindBlob)), 8)
+	copy(out[fo:], e.exportBlob)
+	fo = alignUp64(fo+uint64(len(e.exportBlob)), 8)
+	copy(out[fo:], e.symBlob)
+	fo = alignUp64(fo+uint64(len(e.symBlob)), 8)
+	copy(out[fo:], e.indirectBlob)
+	fo = alignUp64(fo+uint64(len(e.indirectBlob)), 8)
 	copy(out[fo:], e.strBlob)
 
-	// ad-hoc code signature — computed over all bytes before this slot
+	// Patch in the content-derived UUID now that everything up to (but
+	// excluding) the ad-hoc code signature has been written. The hash input
+	// includes the zeroed UUID field itself, which is fine — it's still a
+	// deterministic function of the rest of the binary.
+	hashEnd := totalSize
+	if isExec {
+		hashEnd = e.codeSignOff
+	}
+	uuidAbsOff := machHeaderSize64 + e.uuidLCOffset
+	u := contentUUID(out[:hashEnd])
+	copy(out[uuidAbsOff:uuidAbsOff+16], u[:])
+
+	// ad-hoc code signature — computed over all bytes before this slot,
+	// now including the real (content-derived) UUID.
 	if isExec && e.codeSignSize > 0 {
 		sig := buildAdHocSig(out[:e.codeSignOff], e.textFileSize)
 		copy(out[e.codeSignOff:], sig)
@@ -596,16 +648,32 @@ func (e *emitter) serialize(lc []byte) []byte {
 	return out
 }
 
+// cpuTypeSubtype maps a Target's Arch to the on-disk mach_header cputype /
+// cpusubtype pair.
+func cpuTypeSubtype(t Target) (int32, int32) {
+	switch t.Arch {
+	case ArchX86_64:
+		return CPU_TYPE_AMD64, CPU_SUBTYPE_AMD64_ALL
+	case ArchARM64:
+		return CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL
+	case ArchARM64E:
+		return CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64E
+	case ArchARM64_32:
+		return CPU_TYPE_ARM64_32, CPU_SUBTYPE_ARM64_32_V8
+	}
+	return 0, 0
+}
+
 // ── LC writers ────────────────────────────────────────────────────────────────
 
 type secHdr struct {
-	sect, seg    string
-	addr, size   uint64
-	off, align   uint32
-	reloff       uint32
-	nreloc       uint32
-	flags        uint32
-	r1, r2       uint32
+	sect, seg  string
+	addr, size uint64
+	off, align uint32
+	reloff     uint32
+	nreloc     uint32
+	flags      uint32
+	r1, r2     uint32
 }
 
 func appendSeg64(buf []byte, name string,
@@ -644,13 +712,13 @@ func appendSeg64(buf []byte, name string,
 	return buf
 }
 
-func appendBuildVer(buf []byte) []byte {
+func appendBuildVerEntry(buf []byte, be buildVersionEntry) []byte {
 	buf = u32(buf, LC_BUILD_VERSION)
 	buf = u32(buf, uint32(buildVersionCmdSize))
-	buf = u32(buf, PLATFORM_MACOS)
-	buf = u32(buf, 0x000C0000) // macOS 12.0
-	buf = u32(buf, 0x000C0000) // SDK 12.0
-	buf = u32(buf, 0)          // ntools
+	buf = u32(buf, be.platform)
+	buf = u32(buf, be.minos)
+	buf = u32(buf, be.sdk)
+	buf = u32(buf, 0) // ntools
 	return buf
 }
 
@@ -668,11 +736,16 @@ func appendDyldInfo(buf []byte,
 	expOff uint64, expSz int) []byte {
 	buf = u32(buf, LC_DYLD_INFO_ONLY)
 	buf = u32(buf, uint32(dyldInfoCmdSize))
-	buf = u32(buf, uint32(rebOff));  buf = u32(buf, uint32(rebSz))
-	buf = u32(buf, uint32(bindOff)); buf = u32(buf, uint32(bindSz))
-	buf = u32(buf, 0);               buf = u32(buf, 0) // weak
-	buf = u32(buf, 0);               buf = u32(buf, 0) // lazy
-	buf = u32(buf, uint32(expOff));  buf = u32(buf, uint32(expSz))
+	buf = u32(buf, uint32(rebOff))
+	buf = u32(buf, uint32(rebSz))
+	buf = u32(buf, uint32(bindOff))
+	buf = u32(buf, uint32(bindSz))
+	buf = u32(buf, 0)
+	buf = u32(buf, 0) // weak
+	buf = u32(buf, 0)
+	buf = u32(buf, 0) // lazy
+	buf = u32(buf, uint32(expOff))
+	buf = u32(buf, uint32(expSz))
 	return buf
 }
 
@@ -689,34 +762,34 @@ func appendSymtab(buf []byte, symoff, nsyms, stroff, strsize uint32) []byte {
 func appendDysymtab(buf []byte, nlocal, nextdef, nundef, indoff, nind uint32) []byte {
 	buf = u32(buf, LC_DYSYMTAB)
 	buf = u32(buf, uint32(dysymtabCmdSize))
-	
+
 	// Local symbols
 	buf = u32(buf, 0)
 	buf = u32(buf, nlocal)
-	
+
 	// Externally defined symbols
 	buf = u32(buf, nlocal)
 	buf = u32(buf, nextdef)
-	
+
 	// Undefined symbols
 	buf = u32(buf, nlocal+nextdef)
 	buf = u32(buf, nundef)
-	
-	// Write exactly 6 unused fields (tocoff, ntoc, modtaboff, nmodtab, extrefsymoff, nextrefsyms)
+
+	// tocoff, ntoc, modtaboff, nmodtab, extrefsymoff, nextrefsyms — unused
 	for i := 0; i < 6; i++ {
 		buf = u32(buf, 0)
 	}
-	
+
 	// Indirect symbol table
 	buf = u32(buf, indoff)
 	buf = u32(buf, nind)
-	
+
 	// External and local relocation entries (unused)
 	buf = u32(buf, 0) // extreloff
 	buf = u32(buf, 0) // nextrel
 	buf = u32(buf, 0) // locreloff
 	buf = u32(buf, 0) // nlocrel
-	
+
 	return buf
 }
 
@@ -749,20 +822,6 @@ func dylibCmd(buf []byte, cmd uint32, name string) []byte {
 	buf = u32(buf, 0x00010000) // compatibility_version
 	buf = append(buf, b...)
 	return pad8(buf)
-}
-
-func appendUUID(buf []byte) []byte {
-	buf = u32(buf, LC_UUID)
-	buf = u32(buf, uint32(uuidCmdSize))
-	
-	// Fix: dyld rejects a completely empty UUID on newer macOS versions.
-	// Providing a dummy/pseudo-random UUID satisfies the loader.
-	uuid := []byte{
-		0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
-		0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
-	}
-	
-	return append(buf, uuid...)
 }
 
 func appendCodeSig(buf []byte, off, size uint32) []byte {
@@ -803,12 +862,12 @@ func countLCs(lc []byte) (ncmds, sizeofcmds uint32) {
 
 func buildAdHocSig(data []byte, execSegFileSize uint64) []byte {
 	const (
-		magic    = uint32(0xFADE0CC0)
-		cdMagic  = uint32(0xFADE0C02)
-		cdVer    = uint32(0x20400)
+		magic     = uint32(0xFADE0CC0)
+		cdMagic   = uint32(0xFADE0C02)
+		cdVer     = uint32(0x20400)
 		flagAdhoc = uint32(0x2)
-		pageSize = 4096
-		sha256Sz = 32
+		pageSize  = 4096
+		sha256Sz  = 32
 	)
 
 	ident := []byte("a.out\x00")
@@ -816,18 +875,18 @@ func buildAdHocSig(data []byte, execSegFileSize uint64) []byte {
 
 	const fixedHdr = 88
 	identOff := uint32(fixedHdr)
-	hashOff  := uint32(fixedHdr + len(ident))
-	cdSize   := uint32(fixedHdr + len(ident) + nPages*sha256Sz)
+	hashOff := uint32(fixedHdr + len(ident))
+	cdSize := uint32(fixedHdr + len(ident) + nPages*sha256Sz)
 
 	cd := make([]byte, cdSize)
 	be := binary.BigEndian
-	be.PutUint32(cd[0:],  cdMagic)
-	be.PutUint32(cd[4:],  cdSize)
-	be.PutUint32(cd[8:],  cdVer)
+	be.PutUint32(cd[0:], cdMagic)
+	be.PutUint32(cd[4:], cdSize)
+	be.PutUint32(cd[8:], cdVer)
 	be.PutUint32(cd[12:], flagAdhoc)
 	be.PutUint32(cd[16:], hashOff)
 	be.PutUint32(cd[20:], identOff)
-	be.PutUint32(cd[24:], 0)             // nSpecialSlots
+	be.PutUint32(cd[24:], 0) // nSpecialSlots
 	be.PutUint32(cd[28:], uint32(nPages))
 	be.PutUint32(cd[32:], uint32(len(data))) // codeLimit
 	cd[36] = sha256Sz
@@ -860,12 +919,12 @@ func buildAdHocSig(data []byte, execSegFileSize uint64) []byte {
 
 	// SuperBlob
 	const superHdr = 12
-	const idxSz   = 8
+	const idxSz = 8
 	superSize := uint32(superHdr + idxSz + len(cd))
 	super := make([]byte, superSize)
 	be.PutUint32(super[0:], magic)
 	be.PutUint32(super[4:], superSize)
-	be.PutUint32(super[8:], 1) // count
+	be.PutUint32(super[8:], 1)  // count
 	be.PutUint32(super[12:], 0) // slot: CSSLOT_CODEDIRECTORY
 	be.PutUint32(super[16:], uint32(superHdr+idxSz))
 	copy(super[superHdr+idxSz:], cd)
@@ -888,7 +947,7 @@ func fixstr(buf []byte, s string, n int) []byte {
 	copy(b, s)
 	return append(buf, b...)
 }
-func align8(n int) int        { return (n + 7) &^ 7 }
+func align8(n int) int { return (n + 7) &^ 7 }
 func pad8(buf []byte) []byte {
 	for len(buf)%8 != 0 {
 		buf = append(buf, 0)

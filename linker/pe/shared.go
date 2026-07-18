@@ -39,7 +39,9 @@ func parseDLL(name string, data []byte) (lib *SharedLib, err error) {
 	optSize   := int(r.u16())
 	r.skip(2)
 
-	if machine != imageMachineAMD64 && machine != imageMachineARM64 {
+	switch machine {
+	case imageMachineAMD64, imageMachineARM64, imageMachineI386, imageMachineARMNT:
+	default:
 		return nil, fmt.Errorf("%s: unsupported machine 0x%04X", name, machine)
 	}
 

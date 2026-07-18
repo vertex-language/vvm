@@ -7,13 +7,15 @@ const (
 	MH_CIGAM_64 = 0xCFFAEDFE // byte-swapped (big-endian host)
 
 	// CPU types (include the 64-bit flag 0x01000000)
-	CPU_TYPE_AMD64 = int32(0x01000007) // CPU_TYPE_X86_64
-	CPU_TYPE_ARM64 = int32(0x0100000C) // CPU_TYPE_ARM | ABI64
+	CPU_TYPE_AMD64    = int32(0x01000007) // CPU_TYPE_X86_64
+	CPU_TYPE_ARM64    = int32(0x0100000C) // CPU_TYPE_ARM | ABI64
+	CPU_TYPE_ARM64_32 = int32(0x0200000C) // CPU_TYPE_ARM | CPU_ARCH_ABI64_32 (watchOS ILP32-on-ARM64)
 
 	// CPU subtypes
-	CPU_SUBTYPE_AMD64_ALL = int32(3)
-	CPU_SUBTYPE_ARM64_ALL = int32(0)
-	CPU_SUBTYPE_ARM64E    = int32(2) // arm64e (PAC)
+	CPU_SUBTYPE_AMD64_ALL   = int32(3)
+	CPU_SUBTYPE_ARM64_ALL   = int32(0)
+	CPU_SUBTYPE_ARM64E      = int32(2) // arm64e (PAC)
+	CPU_SUBTYPE_ARM64_32_V8 = int32(1) // arm64_32, ARMv8-A baseline
 )
 
 // ── File types ────────────────────────────────────────────────────────────────
@@ -39,22 +41,22 @@ const (
 // ── Load command numbers ──────────────────────────────────────────────────────
 
 const (
-	LC_SEGMENT_64         = uint32(0x19)
-	LC_SYMTAB             = uint32(0x02)
-	LC_DYSYMTAB           = uint32(0x0B)
-	LC_LOAD_DYLINKER      = uint32(0x0E)
-	LC_LOAD_DYLIB         = uint32(0x0C)
-	LC_LOAD_WEAK_DYLIB    = uint32(0x18 | 0x80000000)
-	LC_ID_DYLIB           = uint32(0x0D)
-	LC_RPATH              = uint32(0x1C | 0x80000000)
-	LC_UUID               = uint32(0x1B)
-	LC_BUILD_VERSION      = uint32(0x32)
-	LC_SOURCE_VERSION     = uint32(0x2A)
-	LC_MAIN               = uint32(0x28 | 0x80000000)
-	LC_DYLD_INFO_ONLY     = uint32(0x22 | 0x80000000)
-	LC_FUNCTION_STARTS    = uint32(0x26)
-	LC_DATA_IN_CODE       = uint32(0x29)
-	LC_CODE_SIGNATURE     = uint32(0x1D)
+	LC_SEGMENT_64      = uint32(0x19)
+	LC_SYMTAB          = uint32(0x02)
+	LC_DYSYMTAB        = uint32(0x0B)
+	LC_LOAD_DYLINKER   = uint32(0x0E)
+	LC_LOAD_DYLIB      = uint32(0x0C)
+	LC_LOAD_WEAK_DYLIB = uint32(0x18 | 0x80000000)
+	LC_ID_DYLIB        = uint32(0x0D)
+	LC_RPATH           = uint32(0x1C | 0x80000000)
+	LC_UUID            = uint32(0x1B)
+	LC_BUILD_VERSION   = uint32(0x32)
+	LC_SOURCE_VERSION  = uint32(0x2A)
+	LC_MAIN            = uint32(0x28 | 0x80000000)
+	LC_DYLD_INFO_ONLY  = uint32(0x22 | 0x80000000)
+	LC_FUNCTION_STARTS = uint32(0x26)
+	LC_DATA_IN_CODE    = uint32(0x29)
+	LC_CODE_SIGNATURE  = uint32(0x1D)
 )
 
 // ── VM protection bits ────────────────────────────────────────────────────────
@@ -86,10 +88,10 @@ const (
 // ── Section attribute flags (high 24 bits) ────────────────────────────────────
 
 const (
-	S_ATTR_PURE_INSTRUCTIONS  = uint32(0x80000000)
-	S_ATTR_SOME_INSTRUCTIONS  = uint32(0x00000400)
-	S_ATTR_EXT_RELOC          = uint32(0x00000200)
-	S_ATTR_LOC_RELOC          = uint32(0x00000100)
+	S_ATTR_PURE_INSTRUCTIONS = uint32(0x80000000)
+	S_ATTR_SOME_INSTRUCTIONS = uint32(0x00000400)
+	S_ATTR_EXT_RELOC         = uint32(0x00000200)
+	S_ATTR_LOC_RELOC         = uint32(0x00000100)
 )
 
 // ── nlist_64 n_type masks and values ─────────────────────────────────────────
@@ -130,7 +132,7 @@ const (
 	X86_64_RELOC_TLV        = uint32(9)
 )
 
-// ── Relocation types — ARM64 ──────────────────────────────────────────────────
+// ── Relocation types — ARM64 (and ARM64E / ARM64_32, same numbering) ─────────
 
 const (
 	ARM64_RELOC_UNSIGNED            = uint32(0)
@@ -149,10 +151,18 @@ const (
 // ── LC_BUILD_VERSION platforms ────────────────────────────────────────────────
 
 const (
-	PLATFORM_MACOS   = uint32(1)
-	PLATFORM_IOS     = uint32(2)
-	PLATFORM_TVOS    = uint32(3)
-	PLATFORM_WATCHOS = uint32(4)
+	PLATFORM_MACOS             = uint32(1)
+	PLATFORM_IOS               = uint32(2)
+	PLATFORM_TVOS              = uint32(3)
+	PLATFORM_WATCHOS           = uint32(4)
+	PLATFORM_BRIDGEOS          = uint32(5)
+	PLATFORM_MACCATALYST       = uint32(6)
+	PLATFORM_IOSSIMULATOR      = uint32(7)
+	PLATFORM_TVOSSIMULATOR     = uint32(8)
+	PLATFORM_WATCHOSSIMULATOR  = uint32(9)
+	PLATFORM_DRIVERKIT         = uint32(10)
+	PLATFORM_VISIONOS          = uint32(11)
+	PLATFORM_VISIONOSSIMULATOR = uint32(12)
 )
 
 // ── Dyld rebase opcodes ───────────────────────────────────────────────────────
@@ -182,19 +192,19 @@ const (
 
 	BIND_SYMBOL_FLAGS_WEAK_IMPORT = uint8(0x1)
 
-	BIND_OPCODE_DONE                              = uint8(0x00)
-	BIND_OPCODE_SET_DYLIB_ORDINAL_IMM             = uint8(0x10)
-	BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB            = uint8(0x20)
-	BIND_OPCODE_SET_DYLIB_SPECIAL_IMM             = uint8(0x30)
-	BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM      = uint8(0x40)
-	BIND_OPCODE_SET_TYPE_IMM                       = uint8(0x50)
-	BIND_OPCODE_SET_ADDEND_SLEB                    = uint8(0x60)
-	BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB        = uint8(0x70)
-	BIND_OPCODE_ADD_ADDR_ULEB                      = uint8(0x80)
-	BIND_OPCODE_DO_BIND                            = uint8(0x90)
-	BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB              = uint8(0xA0)
-	BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED        = uint8(0xB0)
-	BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB   = uint8(0xC0)
+	BIND_OPCODE_DONE                            = uint8(0x00)
+	BIND_OPCODE_SET_DYLIB_ORDINAL_IMM           = uint8(0x10)
+	BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB          = uint8(0x20)
+	BIND_OPCODE_SET_DYLIB_SPECIAL_IMM           = uint8(0x30)
+	BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM   = uint8(0x40)
+	BIND_OPCODE_SET_TYPE_IMM                    = uint8(0x50)
+	BIND_OPCODE_SET_ADDEND_SLEB                 = uint8(0x60)
+	BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB     = uint8(0x70)
+	BIND_OPCODE_ADD_ADDR_ULEB                   = uint8(0x80)
+	BIND_OPCODE_DO_BIND                         = uint8(0x90)
+	BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB           = uint8(0xA0)
+	BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED     = uint8(0xB0)
+	BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB = uint8(0xC0)
 )
 
 // ── Export symbol flags ───────────────────────────────────────────────────────
@@ -211,19 +221,19 @@ const (
 // ── On-disk struct sizes ──────────────────────────────────────────────────────
 
 const (
-	machHeaderSize64    = 32
-	segCmdSize64        = 72
-	sectSize64          = 80
-	symtabCmdSize       = 24
-	dysymtabCmdSize     = 80
-	dylinkerCmdMinSize  = 12
-	dylibCmdMinSize     = 24
-	entryPointCmdSize   = 24
-	dyldInfoCmdSize     = 48
-	buildVersionCmdSize = 24
+	machHeaderSize64     = 32
+	segCmdSize64         = 72
+	sectSize64           = 80
+	symtabCmdSize        = 24
+	dysymtabCmdSize      = 80
+	dylinkerCmdMinSize   = 12
+	dylibCmdMinSize      = 24
+	entryPointCmdSize    = 24
+	dyldInfoCmdSize      = 48
+	buildVersionCmdSize  = 24
 	sourceVersionCmdSize = 16
-	uuidCmdSize         = 24
-	rpathCmdMinSize     = 12
-	nlist64Size         = 16
-	relocEntrySize      = 8
+	uuidCmdSize          = 24
+	rpathCmdMinSize      = 12
+	nlist64Size          = 16
+	relocEntrySize       = 8
 )

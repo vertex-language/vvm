@@ -18,6 +18,9 @@ type PLTEntry struct {
 
 // PLTPatcher writes arch-specific PLT thunks. PE imports resolve through the
 // IAT in .got.plt and the import directory — there is no ELF-style .rela.plt.
+//
+// A PLTPatcher may additionally implement IATLayoutSetter (see patch.go) to
+// receive the computed slot layout at Link() time.
 type PLTPatcher interface {
 	PatchPLT(plt, gotPLT []byte, pltBase, gotBase uint64, syms []PLTEntry)
 }

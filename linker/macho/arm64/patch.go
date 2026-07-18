@@ -1,8 +1,10 @@
-package macho
+package arm64
 
 import (
 	"encoding/binary"
 	"fmt"
+
+	"github.com/vertex-language/vvm/linker/macho"
 )
 
 // applyARM64 applies one Mach-O AArch64 relocation to data[off:].
@@ -15,18 +17,18 @@ import (
 //
 // ARM64_RELOC_ADDEND is consumed at parse time and folded into A before
 // this function is called.
-func applyARM64(data []byte, off int, relType uint32, P, S uint64, A int64, state *pltState) error {
+func applyARM64(data []byte, off int, relType uint32, P, S uint64, A int64, stubs macho.StubMap) error {
 	rtype := relType & 0xF
 	rlen := (relType >> 8) & 0x3
 	_ = rlen
 
 	switch rtype {
-	case ARM64_RELOC_UNSIGNED:
+	case macho.ARM64_RELOC_UNSIGNED:
 		// Absolute pointer (8-byte).
 		val := uint64(int64(S) + A)
 		return put64(data, off, val)
 
-	case ARM64_RELOC_BRANCH26:
+	case macho.ARM64_RELOC_BRANCH26:
 		// B or BL instruction: 26-bit signed PC-relative offset (in units of 4 bytes).
 		delta := int64(S) + A - int64(P)
 		if delta%4 != 0 {
@@ -38,9 +40,8 @@ func applyARM64(data []byte, off int, relType uint32, P, S uint64, A int64, stat
 		binary.LittleEndian.PutUint32(data[off:], instr)
 		return nil
 
-	case ARM64_RELOC_PAGE21:
+	case macho.ARM64_RELOC_PAGE21:
 		// ADRP: 21-bit page-relative immediate.
-		// Read destination register from existing instruction.
 		instr := binary.LittleEndian.Uint32(data[off:])
 		rd := instr & 0x1F
 		target := uint64(int64(S) + A)
@@ -48,7 +49,7 @@ func applyARM64(data []byte, off int, relType uint32, P, S uint64, A int64, stat
 		binary.LittleEndian.PutUint32(data[off:], newInstr)
 		return nil
 
-	case ARM64_RELOC_PAGEOFF12:
+	case macho.ARM64_RELOC_PAGEOFF12:
 		// ADD or LDR/STR: 12-bit page offset.
 		instr := binary.LittleEndian.Uint32(data[off:])
 		target := uint64(int64(S)+A) & 0xFFF
@@ -59,9 +60,9 @@ func applyARM64(data []byte, off int, relType uint32, P, S uint64, A int64, stat
 		binary.LittleEndian.PutUint32(data[off:], newInstr)
 		return nil
 
-	case ARM64_RELOC_GOT_LOAD_PAGE21:
-		// ADRP for GOT-indirect load.  S is the stub VA; we need the GOT slot.
-		gotVA, ok := state.stubToGOT[S]
+	case macho.ARM64_RELOC_GOT_LOAD_PAGE21:
+		// ADRP for GOT-indirect load. S is the stub VA; we need the GOT slot.
+		gotVA, ok := stubs[S]
 		if !ok {
 			gotVA = S
 		}
@@ -71,9 +72,9 @@ func applyARM64(data []byte, off int, relType uint32, P, S uint64, A int64, stat
 		binary.LittleEndian.PutUint32(data[off:], newInstr)
 		return nil
 
-	case ARM64_RELOC_GOT_LOAD_PAGEOFF12:
+	case macho.ARM64_RELOC_GOT_LOAD_PAGEOFF12:
 		// LDR from GOT slot (8-byte aligned).
-		gotVA, ok := state.stubToGOT[S]
+		gotVA, ok := stubs[S]
 		if !ok {
 			gotVA = S
 		}
@@ -86,16 +87,16 @@ func applyARM64(data []byte, off int, relType uint32, P, S uint64, A int64, stat
 		binary.LittleEndian.PutUint32(data[off:], newInstr)
 		return nil
 
-	case ARM64_RELOC_POINTER_TO_GOT:
+	case macho.ARM64_RELOC_POINTER_TO_GOT:
 		// PC-relative 32-bit pointer to GOT entry.
-		gotVA, ok := state.stubToGOT[S]
+		gotVA, ok := stubs[S]
 		if !ok {
 			gotVA = S
 		}
 		val := int32(int64(gotVA) + A - int64(P))
 		return put32(data, off, uint32(val))
 
-	case ARM64_RELOC_SUBTRACTOR:
+	case macho.ARM64_RELOC_SUBTRACTOR:
 		// Pair reloc; handled in tandem with next reloc at parse time.
 		return nil
 
@@ -116,7 +117,6 @@ func patchPageOff12(instr uint32, byteOffset uint64) (uint32, error) {
 		return (instr & 0xFFC003FF) | (imm12 << 10), nil
 
 	case top8&0xBF == 0x39: // 0x39 (LDRB) or 0x79 (LDRH)
-		// 8-bit or 16-bit load/store — offset is not scaled, use as-is.
 		scale := uint64(1)
 		if top8&0x40 != 0 {
 			scale = 2
@@ -184,4 +184,20 @@ func encodeADRP(rd uint32, PC, target uint64) uint32 {
 func encodeLDR64UnsignedOffset(rt, rn, byteOffset uint32) uint32 {
 	imm12 := (byteOffset >> 3) & 0xFFF
 	return 0xF9400000 | (imm12 << 10) | ((rn & 0x1F) << 5) | (rt & 0x1F)
+}
+
+func put32(data []byte, off int, v uint32) error {
+	if off+4 > len(data) {
+		return fmt.Errorf("reloc patch offset 0x%x out of bounds", off)
+	}
+	binary.LittleEndian.PutUint32(data[off:], v)
+	return nil
+}
+
+func put64(data []byte, off int, v uint64) error {
+	if off+8 > len(data) {
+		return fmt.Errorf("reloc patch offset 0x%x out of bounds", off)
+	}
+	binary.LittleEndian.PutUint64(data[off:], v)
+	return nil
 }

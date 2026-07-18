@@ -6,7 +6,13 @@ import (
 	"strings"
 )
 
-func parseObject(name string, data []byte, targetArch Arch) (*Object, error) {
+// parseObject parses one MH_OBJECT relocatable input for the given link
+// Target. Unlike the pre-v4 version (which took a bare Arch and never
+// actually checked it against the file), this now verifies the file's
+// on-disk cputype/cpusubtype match target.Arch, so a stray x86_64 .o dropped
+// into an arm64 link fails fast with a clear error instead of silently
+// producing garbage relocations.
+func parseObject(name string, data []byte, target Target) (*Object, error) {
 	r := newReader(data, name)
 
 	magic, err := r.U32(0)
@@ -21,12 +27,24 @@ func parseObject(name string, data []byte, targetArch Arch) (*Object, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
+	cpuSubtype, err := r.I32(8)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
 	fileType, err := r.U32(12)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	if fileType != MH_OBJECT {
 		return nil, fmt.Errorf("%s: expected MH_OBJECT, got filetype 0x%X", name, fileType)
+	}
+
+	fileArch, err := archFromCPU(cpuType, cpuSubtype)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	if fileArch != target.Arch {
+		return nil, fmt.Errorf("%s: object is %s, but link target is %s", name, fileArch, target.Arch)
 	}
 
 	ncmds, err := r.U32(16)
@@ -39,7 +57,9 @@ func parseObject(name string, data []byte, targetArch Arch) (*Object, error) {
 	case CPU_TYPE_AMD64:
 		machine = 0x3E // EM_X86_64
 	case CPU_TYPE_ARM64:
-		machine = 0xB7 // EM_AARCH64
+		machine = 0xB7 // EM_AARCH64 (covers both arm64 and arm64e — same ISA)
+	case CPU_TYPE_ARM64_32:
+		machine = 0xB7 // EM_AARCH64; ILP32 data model is tracked separately, not by this field
 	}
 
 	obj := &Object{
@@ -104,9 +124,9 @@ func parseObject(name string, data []byte, targetArch Arch) (*Object, error) {
 				reserved1, _ := r.U32(secOff + 68)
 				reserved2, _ := r.U32(secOff + 72)
 				sections = append(sections, rawSection{
-					segname:   strings.TrimRight(seg2, "\x00"),
-					sectname:  strings.TrimRight(sectname, "\x00"),
-					addr:      addr, size: size,
+					segname:  strings.TrimRight(seg2, "\x00"),
+					sectname: strings.TrimRight(sectname, "\x00"),
+					addr:     addr, size: size,
 					offset: offset, align: align,
 					reloff: reloff, nreloc: nreloc,
 					flags:     flags,
@@ -265,20 +285,22 @@ func parseObject(name string, data []byte, targetArch Arch) (*Object, error) {
 			extern := (rinfo >> 27) & 0x1
 			rtype := (rinfo >> 28) & 0xF
 
-			if cpuType == CPU_TYPE_ARM64 && rtype == ARM64_RELOC_ADDEND {
+			isARM64Family := cpuType == CPU_TYPE_ARM64 || cpuType == CPU_TYPE_ARM64_32
+
+			if isARM64Family && rtype == ARM64_RELOC_ADDEND {
 				pendingAddend = int64(int32(symnum))
 				hasPending = true
 				continue
 			}
 
-			// ARM64 instruction relocations encode nothing useful in the
-			// instruction word — the assembler leaves placeholder bits that
-			// must not be interpreted as an addend. Only ARM64_RELOC_UNSIGNED
-			// (absolute data pointer) actually stores an addend in the bytes.
-			// AMD64 PC-relative relocs store −4 (next-instruction bias) which
-			// the patch functions expect, so we always read those.
-			isARM64InstrReloc := cpuType == CPU_TYPE_ARM64 &&
-				rtype != ARM64_RELOC_UNSIGNED
+			// ARM64-family instruction relocations encode nothing useful in
+			// the instruction word — the assembler leaves placeholder bits
+			// that must not be interpreted as an addend. Only
+			// ARM64_RELOC_UNSIGNED (absolute data pointer) actually stores an
+			// addend in the bytes. AMD64 PC-relative relocs store −4
+			// (next-instruction bias) which the patch functions expect, so we
+			// always read those.
+			isARM64InstrReloc := isARM64Family && rtype != ARM64_RELOC_UNSIGNED
 
 			addend := int64(0)
 			if !isARM64InstrReloc && int(raddr) < len(secData) {

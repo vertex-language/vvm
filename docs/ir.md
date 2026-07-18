@@ -113,6 +113,7 @@ float-literal := "-"? [0-9]+ "." [0-9]+ ("e" "-"? [0-9]+)? | "NaN" | "Inf" | "-I
 string-literal:= "\"" [^"]* "\""
 bool-literal  := "true" | "false"
 
+
 ```
 
 *Note on operand positions:* `field.ptr`, `index.ptr`, and indirect calls consume idents that name compile-time entities (a struct, a field, a type, a `fnsig`). These are ordinary idents in the grammar; the verifier gives them their meaning (§4, §9).
@@ -171,7 +172,7 @@ Modules remain target-independent in their compute sections when no `target-decl
 ## 3. Lexical Structure
 
 * **Identifiers:** Bare names: `[A-Za-z_][A-Za-z0-9_]*`. No sigils.
-* **Keywords:** `module`, `target`, `struct`, `fnsig`, `const`, `global`, `export`, `tls`, `extern`, `link`, `shared`, `static`, `framework`, `fn`, `end`, `zero`, `addr`, `loc`, `align`, attribute names, terminators, and orderings (`relaxed`, `acquire`, `release`, `acqrel`, `seqcst`) are reserved and may not be used as identifiers.
+* **Keywords:** `module`, `target`, `struct`, `fnsig`, `const`, `global`, `export`, `tls`, `extern`, `link`, `shared`, `static`, `framework`, `fn`, `end`, `zero`, `addr`, `loc`, `align`, `syscall`, attribute names, terminators, and orderings (`relaxed`, `acquire`, `release`, `acqrel`, `seqcst`) are reserved and may not be used as identifiers.
 * **Roles by punctuation:** trailing `:` marks a label (and opens a function or extern group); `=` binds a result or initializer; `.` joins an opcode to its type suffix and appears nowhere else outside float literals and link strings.
 * **Literals:** Typed by context — integers (`42`, `-7`), floats (`1.0`, `2.5e3`, `NaN`, `Inf`, `-Inf`), booleans (`true`, `false` as `i1`), `null` (as `ptr`), byte strings (`"bytes\0"`, legal only as `array[i8, N]` initializers, §8), and vector literals (`(0, 4, 1, 5)`). A literal is only legal where the expected type is unambiguous from the opcode suffix or declaration.
 * **Orderings:** Treated contextually as keywords that parse into the `ordering` operand used only by atomic instructions and `fence` (§4).
@@ -271,6 +272,7 @@ Integer↔float conversions are signedness-explicit; there are no signedness-amb
 ### Calls & Control
 
 * `call` (direct: callee is a previously declared `fn`/`extern fn` name) / `call.<fnsig>` (indirect: suffix names a `fnsig`; first operand is the callee `ptr`, remaining operands are checked against the signature's parameter types, and the result type is the signature's return type).
+* **`syscall.<type> sysno, args...`** — Executes a hardware-level system call trap (e.g., `syscall` on x86_64, `svc` on ARM). `sysno` is the system call number and must be a `usize`-width integer. Accepts up to six additional arguments, which must be scalar values (`iN`, `fN`, `ptr`). `type` fixes the return type (typically the target's `usize`-width integer, or `void`). Codegen maps operands to the hardware registers mandated by the target OS's syscall ABI. Acts as a partial optimization barrier (assumed to clobber globally reachable memory and passed pointers). Unsupported natively on `os = none` or `uefi` without an explicitly enabled feature-tier flag; executes a runtime trap if unsupported.
 * **Variadic Calls:** Arguments matching `...` require **manual type promotion** (e.g., `f32` to `f64`, or widening sub-`i32` ints). The IR does zero implicit conversions.
 * **Attributes at call boundaries:** calling a `noreturn` function makes everything after the call unreachable — the block must still end in a terminator, conventionally `unreachable`. A `readonly` function must not write through any pointer reachable from its arguments or globals; violating this from the callee side is UB.
 
@@ -427,6 +429,7 @@ link framework "Gtk"                // framework on a non-Mach-O target
 link shared "SDL2"
 link shared "libSDL2.so"            // duplicate after derivation (ELF)
 
+
 ```
 
 *Future work (deliberately deferred):* `extern global` for data imports (`stderr`, `NSApp`, GTK exported variables); weak linking (`link weak framework "..."` for availability-gated Apple APIs).
@@ -455,6 +458,7 @@ global origin struct Vec2 = (0.0, 0.0)
 global lut array[i32, 256] align 64 = zero
 global banner array[i8, 6] = "hi!\n\0\0"
 global on_tick ptr = addr default_tick_handler   // default_tick_handler declared above
+
 
 ```
 
@@ -500,7 +504,7 @@ Note: `addr` of an `extern fn` requires the function's `extern` group (or anonym
 **Control flow**
 21. **`br_if`** condition operand is `i1`.
 22. **`switch`** operand is `iN`; case literals are unique and representable in the operand's type; first label is the default.
-23. **`trap`/`unreachable**` are terminators; nothing may follow them in a block.
+23. `trap`/`unreachable**` are terminators; nothing may follow them in a block.
 
 **Memory, atomics, calls, vectors**
 24. **Address producers:** `field.ptr`'s struct operand names a declared struct and its field operand names one of that struct's fields; `index.ptr`'s type operand is a sized type and its index operand is a `usize`-width integer.
@@ -512,6 +516,7 @@ Note: `addr` of an `extern fn` requires the function's `extern` group (or anonym
 30. **`noreturn`:** a direct call to a `noreturn` callee must be followed (after any `loc`/comment lines) by `unreachable` or be itself the last instruction before a terminator that is `unreachable` or `trap`.
 31. **`shuffle`:** mask is a vector literal; every index is in `[0, 2M)` for source width M; source and result widths are tier-legal.
 32. **Target Limits:** vectors must fit the selected tier; masked/gather/scatter opcodes require a masking-capable tier (§10.4).
+33. **Syscalls:** `syscall` operands are limited to a maximum of seven (one `sysno` plus up to six arguments); all operands must be scalar types; the `sysno` operand must exactly match the target's address width (`usize`).
 
 ---
 
@@ -521,6 +526,7 @@ Targets are configured via build inputs, or, when the module declares one, via t
 
 ```text
 Target = (arch, os, abi)
+
 
 ```
 
@@ -586,6 +592,7 @@ target x86_64 linux gnu
 
 // ...
 
+
 ```
 
 or, with feature tiers:
@@ -595,6 +602,7 @@ module simd_kernel
 target x86_64 linux gnu [avx2]
 
 // ...
+
 
 ```
 

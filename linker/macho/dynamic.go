@@ -1,26 +1,13 @@
 package macho
 
-import (
-	"encoding/binary"
-	"fmt"
-)
+import "fmt"
 
-// ── Core PLT types ────────────────────────────────────────────────────────────
-
-// PLTEntry pairs a shared symbol with its 0-based stub index.
 type PLTEntry struct {
 	Name string
 	Sym  *TableSymbol
 	Idx  int
 }
 
-// PLTPatcher writes arch-specific PLT stubs.
-type PLTPatcher interface {
-	PatchPLT(plt, gotPLT, relaPLT []byte, pltBase, gotBase uint64, syms []PLTEntry)
-}
-
-// collectPLTSymbols returns every kindShared symbol referenced by at least one
-// object relocation, in stable first-seen order.
 func collectPLTSymbols(symtab *SymbolTable, objects []*Object) []PLTEntry {
 	referenced := make(map[string]bool)
 	for _, obj := range objects {
@@ -32,7 +19,6 @@ func collectPLTSymbols(symtab *SymbolTable, objects []*Object) []PLTEntry {
 			}
 		}
 	}
-
 	var out []PLTEntry
 	seen := make(map[string]bool)
 	for _, obj := range objects {
@@ -51,42 +37,20 @@ func collectPLTSymbols(symtab *SymbolTable, objects []*Object) []PLTEntry {
 	return out
 }
 
-// patchPLT fills PLT stubs and GOT slots via the patcher.
-func patchPLT(pp PLTPatcher, layout *Layout, syms []PLTEntry) error {
-	pltSec, ok1 := layout.SectionByName(sectionStubs)
-	gotSec, ok2 := layout.SectionByName(sectionGOT)
-	if !ok1 || !ok2 {
-		return nil
-	}
-	// Mach-O uses dyld info instead of a rela section; pass nil for the third slice.
-	pp.PatchPLT(pltSec.Data, gotSec.Data, nil, pltSec.VAddr, gotSec.VAddr, syms)
-	return nil
-}
-
-// ── Mach-O stub / GOT constants ───────────────────────────────────────────────
-
-const (
-	stubSizeAMD64 = 6  // jmpq *[rip+offset]
-	stubSizeARM64 = 12 // ADRP + LDR + BR
-	gotEntrySize  = 8  // 64-bit pointer slot
-)
-
 const (
 	sectionStubs = "__TEXT/__stubs"
 	sectionGOT   = "__DATA/__got"
+	gotEntrySize = 8
 )
 
-// injectMachoPLT adds __TEXT/__stubs and __DATA/__got to the layout.
-func injectMachoPLT(arch Arch, layout *Layout, syms []PLTEntry) error {
+// injectMachoPLT adds __TEXT/__stubs and __DATA/__got to the layout, sized
+// per the registered PLTPatcher's stub width for this target.
+func injectMachoPLT(pp PLTPatcher, layout *Layout, syms []PLTEntry) error {
 	n := len(syms)
 	if n == 0 {
 		return nil
 	}
-
-	stubSz := stubSizeAMD64
-	if arch == ArchARM64 {
-		stubSz = stubSizeARM64
-	}
+	stubSz := pp.StubSize()
 
 	stubs := &MergedSection{
 		Name:     sectionStubs,
@@ -106,112 +70,41 @@ func injectMachoPLT(arch Arch, layout *Layout, syms []PLTEntry) error {
 		Size:     uint64(n * gotEntrySize),
 		Align:    8,
 	}
-
-	// Both Sections slice and the name index must be updated together.
 	layout.Sections = append(layout.Sections, stubs, got)
 	layout.secByName[stubs.Name] = stubs
 	layout.secByName[got.Name] = got
 	return nil
 }
 
-// ── PLT patcher ───────────────────────────────────────────────────────────────
-
-type machoPLTPatcher struct {
-	arch  Arch
-	state *pltState
-}
-
-func newMachoPLTPatcher(arch Arch, state *pltState) *machoPLTPatcher {
-	return &machoPLTPatcher{arch: arch, state: state}
-}
-
-func (p *machoPLTPatcher) PatchPLT(
-	pltData, gotData, _ []byte,
-	pltBase, gotBase uint64,
-	syms []PLTEntry,
-) {
-	p.state.pltBase = pltBase
-	p.state.gotBase = gotBase
-
+// patchPLT fills PLT stubs and GOT slots, returning the StubMap that Apply
+// will need for GOT-relative relocations.
+func patchPLT(pp PLTPatcher, layout *Layout, syms []PLTEntry) (StubMap, error) {
+	pltSec, ok1 := layout.SectionByName(sectionStubs)
+	gotSec, ok2 := layout.SectionByName(sectionGOT)
+	if !ok1 || !ok2 {
+		return nil, nil
+	}
+	stubs := pp.PatchPLT(pltSec.Data, gotSec.Data, nil, pltSec.VAddr, gotSec.VAddr, syms)
 	for _, sym := range syms {
-		i := sym.Idx
-		stubVA := pltBase + uint64(i)*stubEntrySize(p.arch)
-		gotVA := gotBase + uint64(i)*gotEntrySize
-
-		p.state.stubToGOT[stubVA] = gotVA
-		sym.Sym.VAddr = stubVA
-
-		stubOff := i * int(stubEntrySize(p.arch))
-		switch p.arch {
-		case ArchAMD64:
-			writeAMD64Stub(pltData[stubOff:], stubVA, gotVA)
-		case ArchARM64:
-			writeARM64Stub(pltData[stubOff:], stubVA, gotVA)
+		if stubVA, ok := stubs[pltSec.VAddr+uint64(sym.Idx)*uint64(pp.StubSize())]; ok {
+			_ = stubVA
 		}
+		sym.Sym.VAddr = pltSec.VAddr + uint64(sym.Idx)*uint64(pp.StubSize())
 	}
+	return stubs, nil
 }
 
-func stubEntrySize(arch Arch) uint64 {
-	if arch == ArchARM64 {
-		return stubSizeARM64
-	}
-	return stubSizeAMD64
-}
+// ── dyld LINKEDIT builders (format-agnostic across arches) ───────────────────
 
-func writeAMD64Stub(buf []byte, stubVA, gotVA uint64) {
-	buf[0] = 0xFF
-	buf[1] = 0x25
-	rel := int32(int64(gotVA) - int64(stubVA+6))
-	binary.LittleEndian.PutUint32(buf[2:], uint32(rel))
-}
+func BuildRebaseInfo() []byte { return []byte{REBASE_OPCODE_DONE} }
 
-func writeARM64Stub(buf []byte, stubVA, gotVA uint64) {
-	const x16 = 16
-	binary.LittleEndian.PutUint32(buf[0:], encodeADRP(x16, stubVA, gotVA))
-	binary.LittleEndian.PutUint32(buf[4:], encodeLDR64UnsignedOffset(x16, x16, uint32(gotVA&0xFFF)))
-	binary.LittleEndian.PutUint32(buf[8:], 0xD61F0200) // BR X16
-}
+func BuildExportTrie() []byte { return []byte{0x00, 0x00} }
 
-// ── Reloc patcher ─────────────────────────────────────────────────────────────
-
-type machoPatcher struct {
-	arch  Arch
-	state *pltState
-}
-
-func newMachoPatcher(arch Arch, state *pltState) *machoPatcher {
-	return &machoPatcher{arch: arch, state: state}
-}
-
-func (p *machoPatcher) Apply(data []byte, off int, relType uint32, P, S uint64, A int64) error {
-	switch p.arch {
-	case ArchAMD64:
-		return applyAMD64(data, off, relType, P, S, A, p.state)
-	case ArchARM64:
-		return applyARM64(data, off, relType, P, S, A, p.state)
-	}
-	return fmt.Errorf("macho: unknown arch %d", p.arch)
-}
-
-// ── dyld LINKEDIT builders ────────────────────────────────────────────────────
-
-// BuildRebaseInfo produces a minimal REBASE opcode stream.
-func BuildRebaseInfo() []byte {
-	return []byte{REBASE_OPCODE_DONE}
-}
-
-// BuildExportTrie produces a minimal empty export trie (for executables).
-func BuildExportTrie() []byte {
-	return []byte{0x00, 0x00} // root: terminal_size=0, child_count=0
-}
-
-// trieEntry is used internally for trie construction.
 type trieEntry struct {
 	name string
 	addr uint64
 }
 
-// BuildExportTrieForSymbols produces an export trie for MH_DYLIB output.
 func BuildExportTrieForSymbols(exports map[string]uint64) []byte {
 	if len(exports) == 0 {
 		return BuildExportTrie()
@@ -223,24 +116,14 @@ func BuildExportTrieForSymbols(exports map[string]uint64) []byte {
 	return buildLinearTrie(entries)
 }
 
-// BuildBindInfo produces the BIND opcode stream that instructs dyld to fill
-// each GOT slot with the address of the corresponding imported symbol.
-func BuildBindInfo(
-	pltSyms []string,
-	gotSec *MergedSection,
-	dataSegIndex uint32,
-	neededLibs []string,
-	req *emitRequest,
-) []byte {
+func BuildBindInfo(pltSyms []string, gotSec *MergedSection, dataSegIndex uint32, neededLibs []string, req *emitRequest) []byte {
 	if len(pltSyms) == 0 || gotSec == nil {
 		return []byte{BIND_OPCODE_DONE}
 	}
-
 	ordinalOf := make(map[string]int, len(neededLibs))
 	for i, s := range neededLibs {
 		ordinalOf[s] = i + 1
 	}
-
 	dataBase := dataSegVMAddr(req)
 
 	var buf []byte
@@ -268,16 +151,12 @@ func BuildBindInfo(
 		buf = append(buf, BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM|0x00)
 		buf = append(buf, []byte(symName)...)
 		buf = append(buf, 0x00)
-
 		buf = append(buf, BIND_OPCODE_SET_TYPE_IMM|BIND_TYPE_POINTER)
 
 		if firstEntry {
 			buf = append(buf, BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB|uint8(dataSegIndex))
 			buf = appendULEB128(buf, segOff)
 		} else {
-			// DO_BIND implicitly advances the cursor by gotEntrySize after
-			// writing each slot, so subtract that from the delta to avoid
-			// skipping one GOT entry per symbol.
 			delta := segOff - prevSegOff - gotEntrySize
 			if delta != 0 {
 				buf = append(buf, BIND_OPCODE_ADD_ADDR_ULEB)
@@ -286,7 +165,6 @@ func BuildBindInfo(
 		}
 		prevSegOff = segOff
 		firstEntry = false
-
 		buf = append(buf, BIND_OPCODE_DO_BIND)
 	}
 
@@ -306,13 +184,10 @@ func dataSegVMAddr(req *emitRequest) uint64 {
 	return 0
 }
 
-// ── Export trie ───────────────────────────────────────────────────────────────
-
 type trieEdge struct {
 	label string
 	child *trieNode
 }
-
 type trieNode struct {
 	edges     []trieEdge
 	hasExport bool
@@ -392,3 +267,5 @@ func serializeTrie(node *trieNode, buf *[]byte) {
 		serializeTrie(e.child, buf)
 	}
 }
+
+var _ = fmt.Sprintf // keep fmt import if unused elsewhere

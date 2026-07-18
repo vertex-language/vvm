@@ -2,17 +2,36 @@ package macho
 
 import "fmt"
 
+// StubMap carries the stub-VA → GOT-VA mapping produced by PatchPLT so that
+// Patcher.Apply can resolve GOT-relative relocations, without any backend
+// holding shared mutable state between the two registry factories.
+type StubMap map[uint64]uint64
+
 // Patcher applies a single relocation to a byte slice.
 type Patcher interface {
-	Apply(data []byte, off int, relType uint32, P, S uint64, A int64) error
+	Apply(data []byte, off int, relType uint32, P, S uint64, A int64, stubs StubMap) error
+}
+
+// PatchFunc adapts a plain function to the Patcher interface.
+type PatchFunc func(data []byte, off int, relType uint32, P, S uint64, A int64, stubs StubMap) error
+
+func (f PatchFunc) Apply(data []byte, off int, relType uint32, P, S uint64, A int64, stubs StubMap) error {
+	return f(data, off, relType, P, S, A, stubs)
+}
+
+// PLTPatcher writes arch-specific PLT stubs and reports their entry size.
+type PLTPatcher interface {
+	StubSize() int
+	PatchPLT(pltData, gotData, relaPLT []byte, pltBase, gotBase uint64, syms []PLTEntry) StubMap
 }
 
 // PatchAll applies every relocation from every input object to the merged
-// output section data. Must be called after AssignLayout and ResolveSymbolAddresses.
-func PatchAll(layout *Layout, symtab *SymbolTable, objects []*Object, p Patcher) error {
+// output section data. Must be called after AssignLayout, ResolveSymbolAddresses,
+// and (if present) the PLT patch phase — stubs is that phase's StubMap, or nil.
+func PatchAll(layout *Layout, symtab *SymbolTable, objects []*Object, p Patcher, stubs StubMap) error {
 	for _, obj := range objects {
 		for _, rel := range obj.Relocs {
-			if err := applyOne(layout, symtab, obj, rel, p); err != nil {
+			if err := applyOne(layout, symtab, obj, rel, p, stubs); err != nil {
 				return fmt.Errorf("%s: %w", obj.Name, err)
 			}
 		}
@@ -20,7 +39,7 @@ func PatchAll(layout *Layout, symtab *SymbolTable, objects []*Object, p Patcher)
 	return nil
 }
 
-func applyOne(layout *Layout, symtab *SymbolTable, obj *Object, rel *ObjectReloc, p Patcher) error {
+func applyOne(layout *Layout, symtab *SymbolTable, obj *Object, rel *ObjectReloc, p Patcher, stubs StubMap) error {
 	if rel.TargetSectionIdx >= len(obj.Sections) {
 		return fmt.Errorf("reloc target section index %d out of range", rel.TargetSectionIdx)
 	}
@@ -58,12 +77,10 @@ func applyOne(layout *Layout, symtab *SymbolTable, obj *Object, rel *ObjectReloc
 	if err != nil {
 		return err
 	}
-	return p.Apply(outSec.Data, patchOff, rel.Type, P, uint64(S), rel.Addend)
+	return p.Apply(outSec.Data, patchOff, rel.Type, P, uint64(S), rel.Addend, stubs)
 }
 
 func resolveRelocSym(rel *ObjectReloc, obj *Object, symtab *SymbolTable, layout *Layout) (int64, error) {
-	// Section-relative relocation (r_extern=0): SecRelNum is the 1-based
-	// Mach-O section index; resolve to that section's output VA + piece offset.
 	if rel.SymIdx == 0 {
 		if rel.SecRelNum == 0 {
 			return 0, nil
@@ -90,13 +107,9 @@ func resolveRelocSym(rel *ObjectReloc, obj *Object, symtab *SymbolTable, layout 
 	}
 	raw := obj.Symbols[rel.SymIdx]
 	if raw == nil || raw.Name == "" {
-		return 0, nil // section-relative
+		return 0, nil
 	}
 
-	// ── FIX: Resolve local symbols directly ──────────────────────────────
-	// Local symbols are skipped during global SymbolTable ingestion. When an
-	// r_extern=1 relocation targets a local symbol (like ARM64 page relocs),
-	// we must resolve its address directly using its internal section offset.
 	if raw.Binding == BindLocal {
 		if raw.SectionIdx > 0 && raw.SectionIdx < len(obj.Sections) {
 			sec := obj.Sections[raw.SectionIdx]
@@ -105,7 +118,6 @@ func resolveRelocSym(rel *ObjectReloc, obj *Object, symtab *SymbolTable, layout 
 				if ok {
 					for _, p := range ms.Pieces {
 						if p.Obj == obj && p.Sec == sec {
-							// Symbol address = final section VA + piece offset + symbol offset
 							return int64(ms.VAddr + p.Offset + raw.Value), nil
 						}
 					}
@@ -118,7 +130,6 @@ func resolveRelocSym(rel *ObjectReloc, obj *Object, symtab *SymbolTable, layout 
 		}
 		return 0, fmt.Errorf("local symbol %q lacks valid section mapping", raw.Name)
 	}
-	// ─────────────────────────────────────────────────────────────────────
 
 	sym := symtab.Lookup(raw.Name)
 	if sym == nil {
