@@ -1,3 +1,4 @@
+// encode.go
 // Package binary implements .vbyte, the frontend boundary (README arrow 1).
 // The format is a tagged, varint-heavy serialization of vir.Module: pre-parsed
 // and portable, with no textual re-lexing needed on load.
@@ -6,16 +7,18 @@ package binary
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"math"
 
 	"github.com/vertex-language/vvm/ir/vir"
 )
 
 // Format header: magic + one format-version byte. Bump the version on any
-// incompatible layout change.
+// incompatible layout change. v2 adds inline-asm body lines (BodyLine) and
+// tracks the ir/vir rename from Fn/Const/Inst-style names.
 var magic = []byte{'V', 'B', 'Y', 'T'}
 
-const version = 1
+const version = 2
 
 // Encode serializes an (assumed verified) module to .vbyte bytes.
 func Encode(m *vir.Module) ([]byte, error) {
@@ -47,19 +50,19 @@ func Encode(m *vir.Module) ([]byte, error) {
 		}
 	}
 
-	w.u(uint64(len(m.FnSigs)))
-	for _, s := range m.FnSigs {
-		w.str(s.Name)
-		w.u(uint64(len(s.Params)))
-		for _, p := range s.Params {
+	w.u(uint64(len(m.FunctionSignatures)))
+	for _, sig := range m.FunctionSignatures {
+		w.str(sig.Name)
+		w.u(uint64(len(sig.Params))) // []Type, not []Param
+		for _, p := range sig.Params {
 			w.typ(p)
 		}
-		w.bool(s.Variadic)
-		w.typ(s.Ret)
+		w.bool(sig.Variadic)
+		w.typ(sig.Ret)
 	}
 
-	w.u(uint64(len(m.Consts)))
-	for _, c := range m.Consts {
+	w.u(uint64(len(m.Constants)))
+	for _, c := range m.Constants {
 		w.str(c.Name)
 		w.typ(c.Type)
 		w.operand(c.Value)
@@ -83,9 +86,9 @@ func Encode(m *vir.Module) ([]byte, error) {
 
 	w.u(uint64(len(m.Externs)))
 	for _, g := range m.Externs {
-		w.str(g.Dep)
-		w.u(uint64(len(g.Fns)))
-		for _, f := range g.Fns {
+		w.str(g.Dependency)
+		w.u(uint64(len(g.Functions)))
+		for _, f := range g.Functions {
 			w.str(f.Name)
 			w.params(f.Params)
 			w.bool(f.Variadic)
@@ -94,8 +97,8 @@ func Encode(m *vir.Module) ([]byte, error) {
 		}
 	}
 
-	w.u(uint64(len(m.Funcs)))
-	for _, f := range m.Funcs {
+	w.u(uint64(len(m.Functions)))
+	for _, f := range m.Functions {
 		w.str(f.Name)
 		w.params(f.Params)
 		w.typ(f.Ret)
@@ -141,7 +144,10 @@ func (w *writer) str(s string) {
 }
 func (w *writer) f64(v float64) { w.u(math.Float64bits(v)) }
 
-// Type tags.
+// ---------------------------------------------------------------------------
+// Types (types.go)
+// ---------------------------------------------------------------------------
+
 const (
 	tagNilType byte = iota
 	tagInt
@@ -178,65 +184,87 @@ func (w *writer) typ(t vir.Type) {
 		w.b(tagArray)
 		w.typ(x.Elem)
 		w.u(uint64(x.Len))
+	default:
+		panic(fmt.Sprintf("vbyte: unknown Type %T", t))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Operands (operand.go)
+// ---------------------------------------------------------------------------
 
 func (w *writer) operand(o vir.Operand) {
 	w.b(byte(o.Kind))
 	switch o.Kind {
-	case vir.OIdent:
+	case vir.OperandIdent:
 		w.str(o.Ident)
-	case vir.OInt:
+	case vir.OperandInt:
 		w.s(o.Int)
-	case vir.OFloat:
+	case vir.OperandFloat:
 		w.f64(o.Float)
-	case vir.OString:
+	case vir.OperandString:
 		w.str(o.Str)
-	case vir.OBool:
+	case vir.OperandBool:
 		w.bool(o.Bool)
-	case vir.ONull:
-	case vir.OType:
+	case vir.OperandNull:
+	case vir.OperandType:
 		w.typ(o.Type)
-	case vir.OOrdering:
-		w.str(o.Ord)
-	case vir.OVecLit:
-		w.u(uint64(len(o.Vec)))
-		for _, v := range o.Vec {
+	case vir.OperandOrdering:
+		w.str(o.Ordering)
+	case vir.OperandVector:
+		w.u(uint64(len(o.Vector)))
+		for _, v := range o.Vector {
 			w.s(v)
 		}
+	default:
+		panic(fmt.Sprintf("vbyte: unknown OperandKind %d", o.Kind))
 	}
 }
 
-// ConstInit tags.
+// ---------------------------------------------------------------------------
+// ConstInit (module.go §8)
+// ---------------------------------------------------------------------------
+
 const (
-	tagInitLit byte = iota
+	tagInitNil byte = iota // ConstInit == nil (unverified/incomplete module)
+	tagInitLiteral
 	tagInitZero
-	tagInitAddr
-	tagInitAgg
-	tagInitBytes
+	tagInitAddressOf
+	tagInitAggregate
+	tagInitByteString
 )
 
 func (w *writer) init(i vir.ConstInit) {
+	if i == nil {
+		w.b(tagInitNil)
+		return
+	}
 	switch x := i.(type) {
-	case vir.InitLit:
-		w.b(tagInitLit)
+	case vir.InitLiteral:
+		w.b(tagInitLiteral)
 		w.operand(x.Value)
 	case vir.InitZero:
 		w.b(tagInitZero)
-	case vir.InitAddr:
-		w.b(tagInitAddr)
+	case vir.InitAddressOf:
+		w.b(tagInitAddressOf)
 		w.str(x.Name)
-	case vir.InitAgg:
-		w.b(tagInitAgg)
+	case vir.InitAggregate:
+		w.b(tagInitAggregate)
 		w.u(uint64(len(x.Elems)))
 		for _, e := range x.Elems {
 			w.init(e)
 		}
-	case vir.InitBytes:
-		w.b(tagInitBytes)
+	case vir.InitByteString:
+		w.b(tagInitByteString)
 		w.str(string(x.Data))
+	default:
+		panic(fmt.Sprintf("vbyte: unknown ConstInit %T", i))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Params / attrs (module.go)
+// ---------------------------------------------------------------------------
 
 func (w *writer) params(ps []vir.Param) {
 	w.u(uint64(len(ps)))
@@ -248,34 +276,119 @@ func (w *writer) params(ps []vir.Param) {
 	}
 }
 
-func (w *writer) attrs(as []vir.FnAttr) {
+func (w *writer) attrs(as []vir.FunctionAttribute) {
 	w.u(uint64(len(as)))
 	for _, a := range as {
 		w.str(string(a))
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Blocks / body lines / instructions (module.go)
+// ---------------------------------------------------------------------------
+
+const (
+	tagBodyInstruction byte = iota
+	tagBodyAsm
+)
+
 func (w *writer) block(b *vir.Block) {
 	w.str(b.Label)
-	w.u(uint64(len(b.Insts)))
-	for _, i := range b.Insts {
-		w.str(i.Result)
-		w.str(i.Op)
-		w.typ(i.Suffix)
-		w.str(i.Sig)
-		w.u(uint64(i.Align))
-		w.u(uint64(len(i.Args)))
-		for _, a := range i.Args {
-			w.operand(a)
-		}
+	w.u(uint64(len(b.Lines)))
+	for _, ln := range b.Lines {
+		w.bodyLine(ln)
 	}
 	w.term(b.Term)
 }
 
-// Terminator tags.
+func (w *writer) bodyLine(ln vir.BodyLine) {
+	switch {
+	case ln.Instruction != nil:
+		w.b(tagBodyInstruction)
+		w.instruction(*ln.Instruction)
+	case ln.Asm != nil:
+		w.b(tagBodyAsm)
+		w.asmBlock(*ln.Asm)
+	default:
+		panic("vbyte: body line has neither Instruction nor Asm set")
+	}
+}
+
+func (w *writer) instruction(i vir.Instruction) {
+	w.str(i.Result)
+	w.str(i.Op)
+	w.typ(i.Suffix)
+	w.str(i.Sig)
+	w.u(uint64(i.Align))
+	w.u(uint64(len(i.Args)))
+	for _, a := range i.Args {
+		w.operand(a)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Inline assembly (module.go §4)
+// ---------------------------------------------------------------------------
+
+func (w *writer) asmBlock(a vir.AsmBlock) {
+	w.str(string(a.Dialect))
+	w.u(uint64(len(a.Bindings)))
+	for _, bind := range a.Bindings {
+		w.asmBinding(bind)
+	}
+	w.u(uint64(len(a.Code)))
+	for _, line := range a.Code {
+		w.asmCodeLine(line)
+	}
+}
+
+func (w *writer) asmBinding(b vir.AsmBinding) {
+	w.str(string(b.Kind))
+	w.str(b.Register)
+	w.u(uint64(len(b.Registers)))
+	for _, r := range b.Registers {
+		w.str(r)
+	}
+	w.str(b.Ident)
+}
+
+func (w *writer) asmCodeLine(l vir.AsmCodeLine) {
+	if l.LabelDeclaration != "" {
+		w.b(1)
+		w.str(l.LabelDeclaration)
+		return
+	}
+	w.b(0)
+	w.str(l.Mnemonic)
+	w.u(uint64(len(l.Operands)))
+	for _, op := range l.Operands {
+		w.asmOperand(op)
+	}
+}
+
+func (w *writer) asmOperand(o vir.AsmOperand) {
+	w.str(string(o.Kind))
+	switch o.Kind {
+	case vir.AsmOperandKindRegister:
+		w.str(o.Register)
+	case vir.AsmOperandKindImmediate:
+		w.operand(o.Immediate)
+	case vir.AsmOperandKindMemory:
+		w.str(o.Memory)
+	case vir.AsmOperandKindLabel:
+		w.str(o.Label)
+	default:
+		panic(fmt.Sprintf("vbyte: unknown AsmOperandKind %q", o.Kind))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Terminators (module.go §5)
+// ---------------------------------------------------------------------------
+
 const (
-	tagBr byte = iota
-	tagBrIf
+	tagBranch byte = iota
+	tagBranchIf
 	tagSwitch
 	tagReturn
 	tagTailCall
@@ -285,11 +398,11 @@ const (
 
 func (w *writer) term(t vir.Terminator) {
 	switch x := t.(type) {
-	case vir.Br:
-		w.b(tagBr)
+	case vir.Branch:
+		w.b(tagBranch)
 		w.str(x.Label)
-	case vir.BrIf:
-		w.b(tagBrIf)
+	case vir.BranchIf:
+		w.b(tagBranchIf)
 		w.operand(x.Cond)
 		w.str(x.Then)
 		w.str(x.Else)
@@ -322,5 +435,7 @@ func (w *writer) term(t vir.Terminator) {
 		w.b(tagTrap)
 	case vir.Unreachable:
 		w.b(tagUnreachable)
+	default:
+		panic(fmt.Sprintf("vbyte: unknown Terminator %T", t))
 	}
 }

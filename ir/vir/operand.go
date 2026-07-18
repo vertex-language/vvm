@@ -1,3 +1,4 @@
+// operand.go
 package vir
 
 import (
@@ -9,64 +10,64 @@ import (
 type OperandKind int
 
 const (
-	OIdent    OperandKind = iota // value / global / const / fn / struct / field name
-	OInt                         // integer literal
-	OFloat                       // float literal (incl. NaN, Inf, -Inf)
-	OString                      // byte-string literal
-	OBool                        // true / false
-	ONull                        // null (ptr)
-	OType                        // a type used in operand position (index.ptr)
-	OOrdering                    // relaxed | acquire | release | acqrel | seqcst
-	OVecLit                      // (0, 4, 1, 5) — shuffle masks, vector consts
+	OperandIdent    OperandKind = iota // value / global / const / fn / struct / field name
+	OperandInt                         // integer literal
+	OperandFloat                       // float literal (incl. NaN, Inf, -Inf)
+	OperandString                      // byte-string literal
+	OperandBool                        // true / false
+	OperandNull                        // null (ptr)
+	OperandType                        // a type used in operand position (index.ptr)
+	OperandOrdering                    // relaxed | acquire | release | acqrel | seqcst
+	OperandVector                      // (0, 4, 1, 5) — shuffle masks, vector consts
 )
 
 type Operand struct {
-	Kind  OperandKind
-	Ident string
-	Int   int64
-	Float float64
-	Str   string
-	Bool  bool
-	Type  Type
-	Ord   string
-	Vec   []int64
+	Kind     OperandKind
+	Ident    string
+	Int      int64
+	Float    float64
+	Str      string
+	Bool     bool
+	Type     Type
+	Ordering string
+	Vector   []int64
 }
 
 // Constructors — the builder-facing spelling of each operand form.
-func V(name string) Operand      { return Operand{Kind: OIdent, Ident: name} }
-func Int(v int64) Operand        { return Operand{Kind: OInt, Int: v} }
-func Flt(v float64) Operand      { return Operand{Kind: OFloat, Float: v} }
-func Str(s string) Operand       { return Operand{Kind: OString, Str: s} }
-func Bl(v bool) Operand          { return Operand{Kind: OBool, Bool: v} }
-func Null() Operand              { return Operand{Kind: ONull} }
-func Ty(t Type) Operand          { return Operand{Kind: OType, Type: t} }
-func Ord(o string) Operand       { return Operand{Kind: OOrdering, Ord: o} }
-func VecLit(v ...int64) Operand  { return Operand{Kind: OVecLit, Vec: v} }
+func Ident(name string) Operand         { return Operand{Kind: OperandIdent, Ident: name} }
+func IntLiteral(v int64) Operand        { return Operand{Kind: OperandInt, Int: v} }
+func FloatLiteral(v float64) Operand    { return Operand{Kind: OperandFloat, Float: v} }
+func StringLiteral(s string) Operand    { return Operand{Kind: OperandString, Str: s} }
+func BoolLiteral(v bool) Operand        { return Operand{Kind: OperandBool, Bool: v} }
+func NullLiteral() Operand              { return Operand{Kind: OperandNull} }
+func TypeOperand(t Type) Operand        { return Operand{Kind: OperandType, Type: t} }
+func OrderingOperand(o string) Operand  { return Operand{Kind: OperandOrdering, Ordering: o} }
+func VectorLiteral(v ...int64) Operand  { return Operand{Kind: OperandVector, Vector: v} }
 
 func (o Operand) String() string {
 	switch o.Kind {
-	case OIdent:
+	case OperandIdent:
 		return o.Ident
-	case OInt:
+	case OperandInt:
 		return strconv.FormatInt(o.Int, 10)
-	case OFloat:
+	case OperandFloat:
 		return formatFloat(o.Float)
-	case OString:
+	case OperandString:
 		return strconv.Quote(o.Str)
-	case OBool:
+	case OperandBool:
 		if o.Bool {
 			return "true"
 		}
 		return "false"
-	case ONull:
+	case OperandNull:
 		return "null"
-	case OType:
+	case OperandType:
 		return o.Type.String()
-	case OOrdering:
-		return o.Ord
-	case OVecLit:
+	case OperandOrdering:
+		return o.Ordering
+	case OperandVector:
 		s := "("
-		for i, v := range o.Vec {
+		for i, v := range o.Vector {
 			if i > 0 {
 				s += ", "
 			}

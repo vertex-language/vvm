@@ -18,15 +18,21 @@ import "github.com/vertex-language/vvm/ir/vir"
 
 ```
 ir/vir/
-├── module.go     Module, Target, Struct, FnSig, Const, Global, ConstInit variants,
-│                 Link, ExternGroup/ExternFn, Func, Block, Inst, Terminator variants
+├── module.go     Module, Target, Struct, FunctionSignature, Constant, Global,
+│                 ConstInit variants, Link, ExternGroup/ExternFunction,
+│                 Function, Block, Instruction, Terminator variants,
+│                 the inline-asm data types (AsmBlock, AsmBinding, AsmOperand, ...)
 ├── types.go      Type interface: IntType, FloatType, PtrType, VoidType, VecType,
 │                 StructType, ArrayType; Equal, IsInt/IsFloat/.../IsValueType
-├── operand.go    Operand, OperandKind, constructors (V, Int, Flt, Str, Bl, Null, Ty, Ord, VecLit)
+├── operand.go    Operand, OperandKind, constructors (Ident, IntLiteral, FloatLiteral,
+│                 StringLiteral, BoolLiteral, NullLiteral, TypeOperand,
+│                 OrderingOperand, VectorLiteral)
 ├── float.go      formatFloat — canonical float-literal text
 ├── targets.go    canonical arch/OS/ABI vocabularies, rejected-alias tables,
-│                 PointerBits, BinFormat, FormatOf
-├── builder.go    NewModule + FuncBuilder — construction API, never checks
+│                 PointerBits, BinFormat/FormatOf, per-arch asm dialect and
+│                 register tables
+├── builder.go    NewModule + FunctionBuilder + AsmBuilder — construction API,
+│                 never checks
 └── verify.go     Verify — the single place invariants are enforced
 ```
 
@@ -40,15 +46,15 @@ ir/vir/
 m := vir.NewModule("add_example")
 m.SetTarget("x86_64", "linux", "gnu")
 
-fmt := m.DeclareGlobal("fmt", vir.ArrayType{Elem: vir.I8, Len: 14},
-    vir.InitBytes{Data: []byte("%d + %d = %d\n\x00")})
+fmtGlobal := m.DeclareGlobal("fmt", vir.ArrayType{Elem: vir.I8, Len: 14},
+    vir.InitByteString{Data: []byte("%d + %d = %d\n\x00")})
 
-fb := m.DeclareFn("main", nil, vir.I32, true)
-a := fb.Emit("a", "mov", vir.I32, vir.Int(7))
-b := fb.Emit("b", "mov", vir.I32, vir.Int(35))
+fb := m.DeclareFunction("main", nil, vir.I32, true)
+a := fb.Emit("a", "mov", vir.I32, vir.IntLiteral(7))
+b := fb.Emit("b", "mov", vir.I32, vir.IntLiteral(35))
 sum := fb.Add("sum", vir.I32, a, b)
-fb.Call("r", "printf", vir.V(fmt.Name), a, b, sum)
-fb.Return(vir.Int(0))
+fb.Call("r", "printf", vir.Ident(fmtGlobal.Name), a, b, sum)
+fb.Return(vir.IntLiteral(0))
 
 if err := vir.Verify(m); err != nil {
     panic(err)
@@ -63,19 +69,19 @@ Nothing above validated anything — `Verify` is the first point at which name c
 
 ### `Module`
 
-Field order mirrors the mandatory section order a `.vir` file must follow: `Target`, `Structs`, `FnSigs`, `Consts`, `Globals`, `Links`, `Externs`, `Funcs`. Nothing downstream (`format/`, `lower/`, `object/`, `objectfile/`, `objectwriter/`) is allowed to touch an unverified `Module`.
+Field order mirrors the mandatory section order a `.vir` file must follow: `Target`, `Structs`, `FunctionSignatures`, `Constants`, `Globals`, `Links`, `Externs`, `Functions`. Nothing downstream (`format/`, `lower/`, `object/`, `objectfile/`, `objectwriter/`) is allowed to touch an unverified `Module`.
 
 ```go
 type Module struct {
-    Name    string
-    Target  *Target // nil for pure-compute modules
-    Structs []*Struct
-    FnSigs  []*FnSig
-    Consts  []*Const
-    Globals []*Global
-    Links   []*Link
-    Externs []*ExternGroup
-    Funcs   []*Func
+    Name               string
+    Target             *Target // nil for pure-compute modules
+    Structs            []*Struct
+    FunctionSignatures []*FunctionSignature
+    Constants          []*Constant
+    Globals            []*Global
+    Links              []*Link
+    Externs            []*ExternGroup
+    Functions          []*Function
 }
 ```
 
@@ -99,25 +105,40 @@ vir.Equal(vir.I32, vir.IntType{Bits: 32}) // true — structural equality
 A tagged union covering every position an operand can appear in: idents, literals, `null`, a type used in operand position (`index.ptr`), atomic orderings, and vector literals.
 
 ```go
-vir.V("x")            // ident
-vir.Int(42)           // integer literal
-vir.Flt(3.14)         // float literal
-vir.Bl(true)          // bool literal
-vir.Null()            // null
-vir.Ty(vir.I32)       // type-in-operand-position
-vir.Ord("acquire")    // atomic ordering
-vir.VecLit(0, 4, 1, 5) // shuffle mask / vector const
+vir.Ident("x")             // ident
+vir.IntLiteral(42)         // integer literal
+vir.FloatLiteral(3.14)     // float literal
+vir.BoolLiteral(true)      // bool literal
+vir.NullLiteral()          // null
+vir.TypeOperand(vir.I32)   // type-in-operand-position
+vir.OrderingOperand("acquire") // atomic ordering
+vir.VectorLiteral(0, 4, 1, 5)  // shuffle mask / vector const
 ```
 
 ### Instructions and terminators
 
-`Inst.Op` holds the bare mnemonic; exactly one of `Inst.Suffix` (a `Type`) or `Inst.Sig` (an `fnsig` name, for indirect `call`/`tailcall`) may be set — the `<op>.<suffix>` split is structural, not string-parsed downstream. Terminators are a separate interface from instructions, so "exactly one terminator, nothing after it" doesn't need to be checked by scanning:
+`Instruction.Op` holds the bare mnemonic; exactly one of `Instruction.Suffix` (a `Type`) or `Instruction.Sig` (an `fnsig` name, for indirect `call`/`tailcall`) may be set — the `<op>.<suffix>` split is structural, not string-parsed downstream. Terminators are a separate interface from instructions, so "exactly one terminator, nothing after it" doesn't need to be checked by scanning:
 
 ```go
 type Terminator interface{ isTerm() }
-// Br, BrIf, Switch, Return, TailCall, Trap, Unreachable
+// Branch, BranchIf, Switch, Return, TailCall, Trap, Unreachable
 
 func Successors(t Terminator) []string // labels a terminator may transfer to
+```
+
+### Inline assembly
+
+An `AsmBlock` is an ordinary body-line (`BodyLine.Asm`), never a terminator. It carries a `Dialect`, a list of `AsmBinding`s (`in`/`out`/`clobber`), and a list of `AsmCodeLine`s (mnemonic instructions or block-scoped label declarations). `AsmBuilder` accumulates a block via `BeginAsm`/`In`/`Out`/`Clobber`/`Code`, and `End` appends the finished block to the enclosing function's current basic block:
+
+```go
+fb.BeginAsm(vir.DialectIntel).
+    In("rdi", "exitCode").
+    Clobber("rcx", "r11").
+    Code(
+        vir.AsmInstructionLine("mov", vir.AsmRegister("rax"), vir.AsmImmediate(vir.IntLiteral(60))),
+        vir.AsmInstructionLine("syscall"),
+    ).
+    End()
 ```
 
 ---
@@ -135,7 +156,8 @@ func Verify(m *Module) error
 3. **Per-section checks** — struct fields, fnsig signatures, const/global initializers (`checkInit` walks `ConstInit` recursively against the declared type), link-to-extern-group correspondence, filename derivation per target `BinFormat`.
 4. **Per-function body shape** — every block terminates, every label is both defined and referenced, `Successors` resolves.
 5. **Type fixation** — each value's type is computed once (`resultType`) and locked in at first assignment; a later assignment with a different type is rejected.
-6. **Definite assignment** — a forward must-analysis (`in`/`out` sets per block, meet-over-predecessors) confirms every read is preceded by an assignment on every path.
+6. **Definite assignment** — a forward must-analysis (`in`/`out` sets per block, meet-over-predecessors) confirms every read is preceded by an assignment on every path. Asm `out` bindings participate in this same analysis.
+7. **Inline assembly structure** — target/dialect consistency, register-table membership and width agreement, binding well-formedness, and asm-local label scoping (`checkAsmBlockStructure`).
 
 ```go
 if err := vir.Verify(m); err != nil {
@@ -152,8 +174,11 @@ A handful of obligations are intentionally incomplete, each marked `TODO` at its
 - Feature-tier tables — `Target.Tiers` entries aren't validated against per-target tier data yet.
 - Deep per-opcode operand-type unification against an instruction's suffix.
 - The `noreturn`→`unreachable` adjacency rule.
-- Shuffle-mask bounds checking for `OVecLit`.
+- Shuffle-mask bounds checking for vector literals.
+- Full per-dialect mnemonic/operand-shape validation for asm lines (§9.38) — only arity/label-scoping is checked structurally today.
+- Full single-entry/single-exit control-flow validation for asm blocks beyond label-reference scoping (§9.40).
 - TLS on `os=none` is rejected outright rather than allowed under a TLS-capable tier, pending the same tier-table work.
+- Only `x86_64`/`x86`, `aarch64`/`aarch64_be`, and `arm`/`armeb` have register tables wired up (`targets.go`); asm blocks on any other architecture are structurally rejected until that data lands.
 
 ---
 
@@ -163,4 +188,4 @@ A handful of obligations are intentionally incomplete, each marked `TODO` at its
 
 **Verification is centralized on purpose.** Every downstream package — lowering, object translation, container-file writing — is written under the assumption that whatever `Module` it receives already passed `Verify`. Putting all of that logic in one place means every consumer gets identical guarantees regardless of whether the module came from `.vir` text, `.vbyte` bytes, or a hand-written builder call.
 
-**The builder never second-guesses you.** `DeclareFn`, `Emit`, `Br`, and friends all just append to the structure. If you want a hand-built module to be usable by anything downstream, you must call `Verify` yourself — nothing does it for you implicitly.
+**The builder never second-guesses you.** `DeclareFunction`, `Emit`, `Branch`, and friends all just append to the structure. If you want a hand-built module to be usable by anything downstream, you must call `Verify` yourself — nothing does it for you implicitly.

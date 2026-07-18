@@ -1,3 +1,4 @@
+// types.go
 package vir
 
 import "fmt"
@@ -8,11 +9,11 @@ type Type interface {
 	isType()
 }
 
-type IntType struct{ Bits int }    // i1, i8, ..., i128
-type FloatType struct{ Bits int }  // f16, f32, f64
-type PtrType struct{}              // untyped pointer
-type VoidType struct{}             // void
-type VecType struct {              // vec[T, N]
+type IntType struct{ Bits int }   // i1, i8, ..., i128
+type FloatType struct{ Bits int } // f16, f32, f64
+type PtrType struct{}             // untyped pointer
+type VoidType struct{}            // void
+type VecType struct {             // vec[T, N]
 	Elem Type
 	Len  int
 }
@@ -99,6 +100,16 @@ func IsAggregate(t Type) bool {
 // IsValueType reports whether t may be the type of a named value.
 func IsValueType(t Type) bool {
 	return !IsAggregate(t) && !IsVoid(t)
+}
+
+// IsScalarType reports whether t is a bare register-class scalar (iN / fN /
+// ptr) — used for syscall operand legality (§9.33).
+func IsScalarType(t Type) bool {
+	switch t.(type) {
+	case IntType, FloatType, PtrType:
+		return true
+	}
+	return false
 }
 
 // ElemOrSelf returns the element type for vectors, t otherwise. Handy for

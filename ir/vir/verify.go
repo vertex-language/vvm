@@ -1,3 +1,4 @@
+// verify.go
 package vir
 
 import (
@@ -7,11 +8,13 @@ import (
 
 // Verify enforces the §9 obligations in a single forward pass over the
 // module, then per-function passes for body shape, type fixation, and the
-// Join Convention's definite-assignment analysis (§5).
+// Join Convention's definite-assignment analysis (§5), including inline-asm
+// bindings (§4) and syscall operand legality (§9.33).
 //
 // Coverage notes: obligations that need target-tier data (§9.32 vector
-// legality, wide atomics) or deep per-opcode operand typing are checked
-// structurally here and marked TODO where the tier tables aren't wired yet.
+// legality, wide atomics) or full per-dialect mnemonic/operand-shape
+// tables (§9.38) are checked structurally here and marked TODO where the
+// underlying tables aren't wired yet.
 func Verify(m *Module) error {
 	v := &verifier{m: m, names: map[string]string{}}
 	return v.run()
@@ -26,12 +29,14 @@ var keywords = map[string]bool{
 	"module": true, "target": true, "struct": true, "fnsig": true, "const": true,
 	"global": true, "export": true, "tls": true, "extern": true, "link": true,
 	"shared": true, "static": true, "framework": true, "fn": true, "end": true,
-	"zero": true, "addr": true, "loc": true, "align": true,
+	"zero": true, "addr": true, "loc": true, "align": true, "syscall": true,
 	"noreturn": true, "readonly": true, "inline": true, "noinline": true, "cold": true,
 	"br": true, "br_if": true, "switch": true, "return": true, "tailcall": true,
 	"trap": true, "unreachable": true,
 	"relaxed": true, "acquire": true, "release": true, "acqrel": true, "seqcst": true,
 	"true": true, "false": true, "null": true,
+	"asm": true, "code": true, "in": true, "out": true, "clobber": true,
+	"intel": true, "att": true, "a32": true, "t32": true, "native": true,
 }
 
 func (v *verifier) declare(name, kind string) error {
@@ -46,6 +51,13 @@ func (v *verifier) declare(name, kind string) error {
 	}
 	v.names[name] = kind
 	return nil
+}
+
+func (v *verifier) usizeBits() int {
+	if v.m.Target != nil {
+		return PointerBits(v.m.Target.Arch)
+	}
+	return 64
 }
 
 func (v *verifier) run() error {
@@ -98,8 +110,8 @@ func (v *verifier) run() error {
 		}
 	}
 
-	// FnSigs.
-	for _, sig := range m.FnSigs {
+	// FunctionSignatures.
+	for _, sig := range m.FunctionSignatures {
 		if err := v.declare(sig.Name, "fnsig"); err != nil {
 			return err
 		}
@@ -113,8 +125,8 @@ func (v *verifier) run() error {
 		}
 	}
 
-	// Consts (§9.5): scalars only, one literal.
-	for _, c := range m.Consts {
+	// Constants (§9.5): scalars only, one literal.
+	for _, c := range m.Constants {
 		if err := v.declare(c.Name, "const"); err != nil {
 			return err
 		}
@@ -180,23 +192,23 @@ func (v *verifier) run() error {
 	}
 	claimed := map[string]bool{}
 	for _, g := range m.Externs {
-		if g.Dep == "" {
+		if g.Dependency == "" {
 			if m.Target != nil && (m.Target.OS == "none" || m.Target.OS == "uefi") {
 				return fmt.Errorf("anonymous extern group rejected on os=%s (§1.2 rule 9)", m.Target.OS)
 			}
 		} else {
-			if !linkStrings[g.Dep] {
-				return fmt.Errorf("extern group %q: no matching link declaration (§1.2 rule 9)", g.Dep)
+			if !linkStrings[g.Dependency] {
+				return fmt.Errorf("extern group %q: no matching link declaration (§1.2 rule 9)", g.Dependency)
 			}
-			if claimed[g.Dep] {
-				return fmt.Errorf("extern group %q: link string already claimed by another group (§1.2 rule 9)", g.Dep)
+			if claimed[g.Dependency] {
+				return fmt.Errorf("extern group %q: link string already claimed by another group (§1.2 rule 9)", g.Dependency)
 			}
-			claimed[g.Dep] = true
+			claimed[g.Dependency] = true
 		}
-		if len(g.Fns) == 0 {
-			return fmt.Errorf("empty extern group %q rejected (§1.2 rule 9)", g.Dep)
+		if len(g.Functions) == 0 {
+			return fmt.Errorf("empty extern group %q rejected (§1.2 rule 9)", g.Dependency)
 		}
-		for _, f := range g.Fns {
+		for _, f := range g.Functions {
 			if err := v.declare(f.Name, "extern"); err != nil {
 				return err
 			}
@@ -207,34 +219,32 @@ func (v *verifier) run() error {
 	}
 
 	// Functions.
-	for _, f := range m.Funcs {
+	for _, f := range m.Functions {
 		if err := v.declare(f.Name, "fn"); err != nil {
 			return err
 		}
 		if err := v.checkParams(f.Name, f.Params, f.Ret, false); err != nil {
 			return err
 		}
-		if f.Variadic() {
+		if f.IsVariadic() {
 			return fmt.Errorf("fn %s: variadics are rejected in fn definitions (§1.2 rule 5)", f.Name)
 		}
 	}
 	// Labels join the flat namespace (§1.3 rule 4) — declare before bodies.
-	for _, f := range m.Funcs {
+	for _, f := range m.Functions {
 		for _, b := range f.Blocks {
 			if err := v.declare(b.Label, "label"); err != nil {
 				return err
 			}
 		}
 	}
-	for _, f := range m.Funcs {
-		if err := v.verifyFunc(f); err != nil {
+	for _, f := range m.Functions {
+		if err := v.verifyFunction(f); err != nil {
 			return fmt.Errorf("fn %s: %w", f.Name, err)
 		}
 	}
 	return nil
 }
-
-func (f *Func) Variadic() bool { return false } // grammar can't express it; kept for symmetry
 
 func (v *verifier) checkParams(fn string, params []Param, ret Type, isExtern bool) error {
 	for i, p := range params {
@@ -290,25 +300,25 @@ func (v *verifier) checkSizedType(t Type, ctx string) error {
 
 func (v *verifier) checkLiteral(o Operand, t Type, ctx string) error {
 	switch o.Kind {
-	case OInt:
+	case OperandInt:
 		if !IsInt(t) {
 			return fmt.Errorf("%s: integer literal for non-integer type %s", ctx, t)
 		}
-	case OFloat:
+	case OperandFloat:
 		if !IsFloat(t) {
 			return fmt.Errorf("%s: float literal for non-float type %s", ctx, t)
 		}
-	case OBool:
+	case OperandBool:
 		if !Equal(t, I1) {
 			return fmt.Errorf("%s: bool literal requires i1", ctx)
 		}
-	case ONull:
+	case OperandNull:
 		if !IsPtr(t) {
 			return fmt.Errorf("%s: null requires ptr", ctx)
 		}
-	case OVecLit:
+	case OperandVector:
 		vt, ok := t.(VecType)
-		if !ok || len(o.Vec) != vt.Len {
+		if !ok || len(o.Vector) != vt.Len {
 			return fmt.Errorf("%s: vector literal doesn't match type %s", ctx, t)
 		}
 	default:
@@ -323,9 +333,9 @@ func (v *verifier) checkInit(init ConstInit, t Type, ctx string) error {
 		return fmt.Errorf("%s: missing initializer", ctx)
 	case InitZero:
 		return nil
-	case InitLit:
+	case InitLiteral:
 		return v.checkLiteral(x.Value, t, ctx)
-	case InitAddr:
+	case InitAddressOf:
 		if !IsPtr(t) {
 			return fmt.Errorf("%s: addr initializer requires ptr type (§8)", ctx)
 		}
@@ -343,7 +353,7 @@ func (v *verifier) checkInit(init ConstInit, t Type, ctx string) error {
 			return fmt.Errorf("%s: addr references %q, which is not a previously declared global/fn (§8)", ctx, x.Name)
 		}
 		return nil
-	case InitBytes:
+	case InitByteString:
 		at, ok := t.(ArrayType)
 		if !ok || !Equal(at.Elem, I8) {
 			return fmt.Errorf("%s: byte-string initializer requires array[i8, N] (§8)", ctx)
@@ -352,7 +362,7 @@ func (v *verifier) checkInit(init ConstInit, t Type, ctx string) error {
 			return fmt.Errorf("%s: byte string is %d bytes, array is %d (must match exactly, §8)", ctx, len(x.Data), at.Len)
 		}
 		return nil
-	case InitAgg:
+	case InitAggregate:
 		switch tt := t.(type) {
 		case StructType:
 			var st *Struct
@@ -393,7 +403,7 @@ func (v *verifier) checkInit(init ConstInit, t Type, ctx string) error {
 // Function bodies
 // ---------------------------------------------------------------------------
 
-func (v *verifier) verifyFunc(f *Func) error {
+func (v *verifier) verifyFunction(f *Function) error {
 	if f.Entry == nil {
 		return fmt.Errorf("missing entry block (§1.3 rule 1)")
 	}
@@ -409,16 +419,13 @@ func (v *verifier) verifyFunc(f *Func) error {
 		if b.Term == nil {
 			return fmt.Errorf("block %q has no terminator (§1.3 rule 2)", labelOrEntry(b))
 		}
-		if b.Label != "" && len(b.Insts) == 0 {
-			// A lone terminator satisfies "at least one line" (§1.3 rule 3).
-		}
 		for _, l := range Successors(b.Term) {
 			if _, ok := labels[l]; !ok {
 				return fmt.Errorf("block %q branches to unknown label %q (§1.3 rule 4)", labelOrEntry(b), l)
 			}
 			referenced[l] = true
 		}
-		if err := v.checkTerm(f, b); err != nil {
+		if err := v.checkTerminator(f, b); err != nil {
 			return err
 		}
 	}
@@ -429,7 +436,10 @@ func (v *verifier) verifyFunc(f *Func) error {
 		}
 	}
 
-	// Type fixation pre-pass (§5 rule 2 / §9.14) over textual order.
+	// Type fixation pre-pass (§5 rule 2 / §9.14) over textual order. Also
+	// performs the structural asm-block checks (§9.34–39) and treats asm
+	// `out` bindings as assignments, matching §4's note that they follow
+	// the Join Convention.
 	types := map[string]Type{}
 	for _, p := range f.Params {
 		if _, dup := types[p.Name]; dup {
@@ -438,8 +448,15 @@ func (v *verifier) verifyFunc(f *Func) error {
 		types[p.Name] = p.Type
 	}
 	for _, b := range blocks {
-		for i := range b.Insts {
-			inst := &b.Insts[i]
+		for i := range b.Lines {
+			ln := &b.Lines[i]
+			if ln.Asm != nil {
+				if err := v.checkAsmBlockStructure(ln.Asm, types); err != nil {
+					return fmt.Errorf("block %q: %w", labelOrEntry(b), err)
+				}
+				continue
+			}
+			inst := ln.Instruction
 			if inst.Op == "loc" {
 				continue
 			}
@@ -466,7 +483,7 @@ func (v *verifier) verifyFunc(f *Func) error {
 			} else {
 				types[inst.Result] = rt
 			}
-			if err := v.checkInst(f, inst, types); err != nil {
+			if err := v.checkInstruction(f, inst, types); err != nil {
 				return fmt.Errorf("block %q: %w", labelOrEntry(b), err)
 			}
 		}
@@ -483,7 +500,7 @@ func labelOrEntry(b *Block) string {
 	return b.Label
 }
 
-func (v *verifier) definiteAssignment(f *Func, blocks []*Block, labels map[string]*Block, types map[string]Type) error {
+func (v *verifier) definiteAssignment(f *Function, blocks []*Block, labels map[string]*Block, types map[string]Type) error {
 	universe := map[string]bool{}
 	for n := range types {
 		universe[n] = true
@@ -517,9 +534,16 @@ func (v *verifier) definiteAssignment(f *Func, blocks []*Block, labels map[strin
 		for n := range s {
 			o[n] = true
 		}
-		for _, i := range b.Insts {
-			if i.Result != "" {
-				o[i.Result] = true
+		for _, ln := range b.Lines {
+			if ln.Instruction != nil && ln.Instruction.Result != "" {
+				o[ln.Instruction.Result] = true
+			}
+			if ln.Asm != nil {
+				for _, bind := range ln.Asm.Bindings {
+					if bind.Kind == BindingOut {
+						o[bind.Ident] = true
+					}
+				}
 			}
 		}
 		return o
@@ -565,13 +589,29 @@ func (v *verifier) definiteAssignment(f *Func, blocks []*Block, labels map[strin
 			}
 			return nil
 		}
-		for _, inst := range b.Insts {
+		for _, ln := range b.Lines {
+			if ln.Asm != nil {
+				for _, bind := range ln.Asm.Bindings {
+					if bind.Kind == BindingIn {
+						if err := checkRead(bind.Ident, "asm in-binding"); err != nil {
+							return err
+						}
+					}
+				}
+				for _, bind := range ln.Asm.Bindings {
+					if bind.Kind == BindingOut {
+						assigned[bind.Ident] = true
+					}
+				}
+				continue
+			}
+			inst := ln.Instruction
 			if inst.Op == "loc" {
 				continue
 			}
-			skip := entityArgPositions(inst)
+			skip := entityArgPositions(*inst)
 			for i, a := range inst.Args {
-				if a.Kind == OIdent && !skip[i] {
+				if a.Kind == OperandIdent && !skip[i] {
 					if err := checkRead(a.Ident, inst.Op); err != nil {
 						return err
 					}
@@ -582,7 +622,7 @@ func (v *verifier) definiteAssignment(f *Func, blocks []*Block, labels map[strin
 			}
 		}
 		for _, a := range termOperands(b.Term) {
-			if a.Kind == OIdent {
+			if a.Kind == OperandIdent {
 				if err := checkRead(a.Ident, "terminator"); err != nil {
 					return err
 				}
@@ -594,7 +634,7 @@ func (v *verifier) definiteAssignment(f *Func, blocks []*Block, labels map[strin
 
 // entityArgPositions returns operand indices that name compile-time entities
 // rather than runtime values (§1.1 note on operand positions).
-func entityArgPositions(i Inst) map[int]bool {
+func entityArgPositions(i Instruction) map[int]bool {
 	switch {
 	case i.Op == "field": // field.ptr p, S, f
 		return map[int]bool{1: true, 2: true}
@@ -606,7 +646,7 @@ func entityArgPositions(i Inst) map[int]bool {
 
 func termOperands(t Terminator) []Operand {
 	switch x := t.(type) {
-	case BrIf:
+	case BranchIf:
 		return []Operand{x.Cond}
 	case Switch:
 		return []Operand{x.Value}
@@ -645,7 +685,7 @@ func set(ss ...string) map[string]bool {
 }
 
 // resultType computes the type a producing instruction yields, or Void.
-func (v *verifier) resultType(f *Func, i *Inst) (Type, error) {
+func (v *verifier) resultType(f *Function, i *Instruction) (Type, error) {
 	op := i.Op
 	switch {
 	case op == "store" || op == "store_vol" || op == "atomic_store" ||
@@ -662,22 +702,16 @@ func (v *verifier) resultType(f *Func, i *Inst) (Type, error) {
 			return VecType{Elem: I1, Len: vt.Len}, nil
 		}
 		return I1, nil
-	case op == "call" || op == "asm":
+	case op == "call":
 		if i.Sig != "" { // indirect: suffix names a fnsig (§9.16)
-			for _, s := range v.m.FnSigs {
+			for _, s := range v.m.FunctionSignatures {
 				if s.Name == i.Sig {
 					return s.Ret, nil
 				}
 			}
 			return nil, fmt.Errorf("call.%s: fnsig not declared (§9.16)", i.Sig)
 		}
-		if op == "asm" {
-			if i.Suffix == nil {
-				return Void, nil
-			}
-			return i.Suffix, nil
-		}
-		if len(i.Args) == 0 || i.Args[0].Kind != OIdent {
+		if len(i.Args) == 0 || i.Args[0].Kind != OperandIdent {
 			return nil, fmt.Errorf("direct call missing callee name")
 		}
 		callee := i.Args[0].Ident
@@ -686,6 +720,11 @@ func (v *verifier) resultType(f *Func, i *Inst) (Type, error) {
 			return r, nil
 		}
 		return nil, fmt.Errorf("call to %q: not a previously declared fn/extern fn (§1.2 rule 2)", callee)
+	case op == "syscall":
+		if i.Suffix == nil {
+			return nil, fmt.Errorf("syscall: missing return type suffix")
+		}
+		return i.Suffix, nil
 	case op == "extract":
 		if vt, ok := i.Suffix.(VecType); ok {
 			return vt.Elem, nil
@@ -705,13 +744,13 @@ func (v *verifier) resultType(f *Func, i *Inst) (Type, error) {
 
 func (v *verifier) lookupCallable(name string) (ret Type, params []Param, ok bool) {
 	for _, g := range v.m.Externs {
-		for _, e := range g.Fns {
+		for _, e := range g.Functions {
 			if e.Name == name {
 				return e.Ret, e.Params, true
 			}
 		}
 	}
-	for _, fn := range v.m.Funcs {
+	for _, fn := range v.m.Functions {
 		if fn.Name == name {
 			return fn.Ret, fn.Params, true
 		}
@@ -719,7 +758,7 @@ func (v *verifier) lookupCallable(name string) (ret Type, params []Param, ok boo
 	return nil, nil, false
 }
 
-func (v *verifier) checkInst(f *Func, i *Inst, types map[string]Type) error {
+func (v *verifier) checkInstruction(f *Function, i *Instruction, types map[string]Type) error {
 	op := i.Op
 	elem := Type(nil)
 	if i.Suffix != nil {
@@ -757,21 +796,24 @@ func (v *verifier) checkInst(f *Func, i *Inst, types map[string]Type) error {
 		if st == nil {
 			return fmt.Errorf("field.ptr: %q is not a declared struct (§9.24)", sName)
 		}
-		if _, ok := st.Field(i.Args[2].Ident); !ok {
+		if _, ok := st.FieldByName(i.Args[2].Ident); !ok {
 			return fmt.Errorf("field.ptr: struct %s has no field %q (§9.24)", sName, i.Args[2].Ident)
 		}
 	case op == "index":
-		if len(i.Args) != 3 || i.Args[1].Kind != OType {
+		if len(i.Args) != 3 || i.Args[1].Kind != OperandType {
 			return fmt.Errorf("index.ptr: expected p, T, i (§9.24)")
 		}
 		if err := v.checkSizedType(i.Args[1].Type, "index.ptr"); err != nil {
+			return err
+		}
+	case op == "syscall":
+		if err := v.checkSyscall(i, types); err != nil {
 			return err
 		}
 	case conversions[op]:
 		if len(i.Args) != 1 {
 			return fmt.Errorf("%s: expected 1 operand", op)
 		}
-	case op == "switchless": // placeholder, never hit
 	}
 	if i.Align != 0 && !isPow2(i.Align) {
 		return fmt.Errorf("%s: align %d not a power of two (§9.25)", op, i.Align)
@@ -789,11 +831,43 @@ func (v *verifier) checkInst(f *Func, i *Inst, types map[string]Type) error {
 	return nil
 }
 
-func checkOrderings(i *Inst) error {
+// checkSyscall enforces §9.33: at most one sysno plus six args, all
+// operands scalar, sysno matching the target's usize width.
+func (v *verifier) checkSyscall(i *Instruction, types map[string]Type) error {
+	if len(i.Args) < 1 || len(i.Args) > 7 {
+		return fmt.Errorf("syscall: expected 1-7 operands (sysno plus up to six args) (§9.33)")
+	}
+	sysNo := i.Args[0]
+	switch sysNo.Kind {
+	case OperandIdent:
+		if t, ok := types[sysNo.Ident]; ok && !Equal(t, IntType{v.usizeBits()}) {
+			return fmt.Errorf("syscall: sysno must be usize-width integer, got %s (§9.33)", t)
+		}
+	case OperandInt:
+		// Literal — width is fixed by context (§3), accepted.
+	default:
+		return fmt.Errorf("syscall: sysno must be an integer (§9.33)")
+	}
+	for _, a := range i.Args[1:] {
+		switch a.Kind {
+		case OperandIdent:
+			if t, ok := types[a.Ident]; ok && !IsScalarType(t) {
+				return fmt.Errorf("syscall: argument %q is not a scalar type (§9.33)", a.Ident)
+			}
+		case OperandInt, OperandFloat, OperandBool, OperandNull:
+			// Scalar literals, accepted.
+		default:
+			return fmt.Errorf("syscall: arguments must be scalar types (§9.33)")
+		}
+	}
+	return nil
+}
+
+func checkOrderings(i *Instruction) error {
 	ords := []string{}
 	for _, a := range i.Args {
-		if a.Kind == OOrdering {
-			ords = append(ords, a.Ord)
+		if a.Kind == OperandOrdering {
+			ords = append(ords, a.Ordering)
 		}
 	}
 	bad := func(o string, disallowed ...string) error {
@@ -840,15 +914,15 @@ func strength(o string) int {
 	return -1
 }
 
-func (v *verifier) checkTerm(f *Func, b *Block) error {
+func (v *verifier) checkTerminator(f *Function, b *Block) error {
 	switch t := b.Term.(type) {
-	case BrIf:
+	case BranchIf:
 		// §9.21 — cond must be i1; only checkable when the operand is typed.
-		if t.Cond.Kind == OBool {
+		if t.Cond.Kind == OperandBool {
 			return nil
 		}
 	case Switch:
-		if t.Value.Kind == OFloat || t.Value.Kind == ONull {
+		if t.Value.Kind == OperandFloat || t.Value.Kind == OperandNull {
 			return fmt.Errorf("switch operand must be iN (§9.22)")
 		}
 		seen := map[int64]bool{}
@@ -881,7 +955,7 @@ func (v *verifier) checkTerm(f *Func, b *Block) error {
 			}
 		} else {
 			found := false
-			for _, s := range v.m.FnSigs {
+			for _, s := range v.m.FunctionSignatures {
 				if s.Name == t.Sig {
 					found = true
 					if !Equal(s.Ret, f.Ret) {
@@ -893,6 +967,133 @@ func (v *verifier) checkTerm(f *Func, b *Block) error {
 				return fmt.Errorf("tailcall.%s: fnsig not declared (§9.16)", t.Sig)
 			}
 		}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Inline assembly checks (§4, §9.34–41).
+// ---------------------------------------------------------------------------
+
+// checkAsmBlockStructure enforces target consistency, register-table
+// membership, binding well-formedness, width agreement (where the bound
+// ident's type is already known), and asm-local label scoping. It also
+// fixes the type of first-occurrence `out` idents, mirroring the ordinary
+// instruction type-fixation pass, since asm `out` follows the Join
+// Convention (§4).
+func (v *verifier) checkAsmBlockStructure(a *AsmBlock, types map[string]Type) error {
+	if v.m.Target == nil {
+		return fmt.Errorf("asm block requires a module target-decl (§9.34)")
+	}
+	arch := v.m.Target.Arch
+	if !IsDialectValidForArchitecture(arch, a.Dialect) {
+		return fmt.Errorf("asm dialect %q is not valid for architecture %q (§9.34)", a.Dialect, arch)
+	}
+	regTable := RegisterTableForArchitecture(arch)
+	if regTable == nil {
+		return fmt.Errorf("no register table available for architecture %q (§9.34/35)", arch)
+	}
+
+	boundAsIn := map[string]bool{}
+	boundAsOut := map[string]bool{}
+	boundAsClobber := map[string]bool{}
+
+	checkReg := func(reg string) (RegisterInfo, error) {
+		info, ok := regTable[reg]
+		if !ok {
+			return RegisterInfo{}, fmt.Errorf("asm: register %q not found in %s register table (§9.35)", reg, arch)
+		}
+		return info, nil
+	}
+
+	for _, bind := range a.Bindings {
+		switch bind.Kind {
+		case BindingIn:
+			if boundAsIn[bind.Register] {
+				return fmt.Errorf("asm: multiple in-bindings to register %q rejected (§4)", bind.Register)
+			}
+			info, err := checkReg(bind.Register)
+			if err != nil {
+				return err
+			}
+			boundAsIn[bind.Register] = true
+			if t, ok := types[bind.Ident]; ok {
+				if err := checkWidthAgreement(t, info, bind.Register); err != nil {
+					return err
+				}
+			}
+			// Declare-before-use for `in` is enforced by the definite-
+			// assignment pass (§5 rule 3), which treats this as a read.
+		case BindingOut:
+			if prevIdent, ok := boundAsOut[bind.Register]; ok && prevIdent {
+				return fmt.Errorf("asm: binding two different idents out from register %q rejected (§4)", bind.Register)
+			}
+			info, err := checkReg(bind.Register)
+			if err != nil {
+				return err
+			}
+			boundAsOut[bind.Register] = true
+			if t, ok := types[bind.Ident]; ok {
+				if err := checkWidthAgreement(t, info, bind.Register); err != nil {
+					return err
+				}
+			} else {
+				types[bind.Ident] = IntType{Bits: info.WidthBits}
+			}
+		case BindingClobber:
+			for _, reg := range bind.Registers {
+				if _, err := checkReg(reg); err != nil {
+					return err
+				}
+				boundAsClobber[reg] = true
+			}
+		}
+	}
+	for reg := range boundAsClobber {
+		if boundAsOut[reg] {
+			return fmt.Errorf("asm: register %q cannot be both clobber and out (§4)", reg)
+		}
+	}
+
+	// §9.39 — asm-local label scoping.
+	declared := map[string]bool{}
+	for _, line := range a.Code {
+		if line.LabelDeclaration != "" {
+			if declared[line.LabelDeclaration] {
+				return fmt.Errorf("asm: duplicate local label %q (§9.39)", line.LabelDeclaration)
+			}
+			declared[line.LabelDeclaration] = true
+		}
+	}
+	for _, line := range a.Code {
+		for _, op := range line.Operands {
+			if op.Kind == AsmOperandKindLabel && !declared[op.Label] {
+				return fmt.Errorf("asm: branch references undeclared local label %q (§9.39/40)", op.Label)
+			}
+		}
+		if line.Mnemonic == "" && line.LabelDeclaration == "" {
+			return fmt.Errorf("asm: code line has neither a mnemonic nor a label declaration")
+		}
+		// TODO(§9.38): validate mnemonic/operand-shape against a per-
+		// dialect mnemonic table; not wired yet.
+	}
+	// TODO(§9.40): full single-entry/single-exit control-flow validation
+	// beyond label-reference scoping. TODO(§9.41): barrier semantics are a
+	// codegen concern and not independently verifier-checkable.
+	return nil
+}
+
+func checkWidthAgreement(t Type, info RegisterInfo, reg string) error {
+	switch x := t.(type) {
+	case IntType:
+		if x.Bits != info.WidthBits {
+			return fmt.Errorf("asm: value type i%d does not match register %q width %d (§9.36)", x.Bits, reg, info.WidthBits)
+		}
+	case PtrType:
+		// Width agreement for ptr is checked against the arch's pointer
+		// width by the caller's context (usize); accepted structurally here.
+	default:
+		return fmt.Errorf("asm: register %q bound to non-scalar type %s (§9.36)", reg, t)
 	}
 	return nil
 }

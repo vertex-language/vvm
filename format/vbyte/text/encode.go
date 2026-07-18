@@ -32,7 +32,9 @@ func Encode(m *vir.Module) ([]byte, error) {
 		}
 		w("struct %s(%s)\n", s.Name, strings.Join(parts, ", "))
 	}
-	for _, s := range m.FnSigs {
+
+	// fnsig params are bare Types — fnsigs never name their parameters.
+	for _, s := range m.FunctionSignatures {
 		parts := make([]string, 0, len(s.Params)+1)
 		for _, p := range s.Params {
 			parts = append(parts, p.String())
@@ -40,11 +42,13 @@ func Encode(m *vir.Module) ([]byte, error) {
 		if s.Variadic {
 			parts = append(parts, "...")
 		}
-		w("fnsig %s(%s) %s\n", s.Name, strings.Join(parts, ", "), s.Ret)
+		w("fnsig %s(%s) %s\n", s.Name, strings.Join(parts, ", "), s.Ret.String())
 	}
-	for _, c := range m.Consts {
-		w("const %s %s = %s\n", c.Name, c.Type, c.Value)
+
+	for _, c := range m.Constants {
+		w("const %s %s = %s\n", c.Name, c.Type.String(), c.Value.String())
 	}
+
 	for _, g := range m.Globals {
 		if g.Export {
 			w("export ")
@@ -53,37 +57,47 @@ func Encode(m *vir.Module) ([]byte, error) {
 		if g.TLS {
 			w("tls ")
 		}
-		w("%s %s", g.Name, g.Type)
+		w("%s %s", g.Name, g.Type.String())
 		if g.Align != 0 {
 			w(" align %d", g.Align)
 		}
 		w(" = %s\n", encodeInit(g.Init))
 	}
+
 	for _, l := range m.Links {
 		w("link %s %q\n", l.Kind, l.Name)
 	}
+
 	for _, g := range m.Externs {
-		if g.Dep == "" {
+		if g.Dependency == "" {
 			w("extern :\n")
 		} else {
-			w("extern %q :\n", g.Dep)
+			w("extern %q :\n", g.Dependency)
 		}
-		for _, f := range g.Fns {
-			w("    fn %s(%s) %s%s\n", f.Name, encodeParams(f.Params, f.Variadic), f.Ret, encodeAttrs(f.Attrs))
+		for _, f := range g.Functions {
+			attrs := encodeAttrs(f.Attrs)
+			params := encodeParams(f.Params, f.Variadic)
+			w("    fn %s(%s) %s%s\n", f.Name, params, f.Ret.String(), attrs)
 		}
 		w("end\n")
 	}
-	for _, f := range m.Funcs {
+
+	for _, f := range m.Functions {
 		if f.Export {
 			w("export ")
 		}
-		w("fn %s(%s) %s%s:\n", f.Name, encodeParams(f.Params, false), f.Ret, encodeAttrs(f.Attrs))
+		w("fn %s(%s) %s%s:\n", f.Name, encodeParams(f.Params, false), f.Ret.String(), encodeAttrs(f.Attrs))
 		for _, blk := range f.AllBlocks() {
 			if blk.Label != "" {
 				w("%s:\n", blk.Label)
 			}
-			for _, i := range blk.Insts {
-				w("    %s\n", encodeInst(i))
+			for _, ln := range blk.Lines {
+				switch {
+				case ln.Instruction != nil:
+					w("    %s\n", encodeInst(ln.Instruction))
+				case ln.Asm != nil:
+					w("%s", indentLines(encodeAsmBlock(ln.Asm), "    "))
+				}
 			}
 			w("    %s\n", encodeTerm(blk.Term))
 		}
@@ -110,7 +124,7 @@ func encodeParams(ps []vir.Param, variadic bool) string {
 	return strings.Join(parts, ", ")
 }
 
-func encodeAttrs(attrs []vir.FnAttr) string {
+func encodeAttrs(attrs []vir.FunctionAttribute) string {
 	s := ""
 	for _, a := range attrs {
 		s += " " + string(a)
@@ -127,13 +141,13 @@ func encodeInit(i vir.ConstInit) string {
 	switch x := i.(type) {
 	case vir.InitZero:
 		return "zero"
-	case vir.InitLit:
+	case vir.InitLiteral:
 		return x.Value.String()
-	case vir.InitAddr:
+	case vir.InitAddressOf:
 		return "addr " + x.Name
-	case vir.InitBytes:
+	case vir.InitByteString:
 		return quoteBytes(x.Data)
-	case vir.InitAgg:
+	case vir.InitAggregate:
 		parts := make([]string, len(x.Elems))
 		for j, e := range x.Elems {
 			parts[j] = encodeInit(e)
@@ -172,7 +186,13 @@ func quoteBytes(data []byte) string {
 	return b.String()
 }
 
-func encodeInst(i vir.Inst) string {
+// encodeInst formats one ordinary body-line instruction. `loc` is a
+// distinct grammar production (space-separated, no operand-list commas)
+// and is special-cased.
+func encodeInst(i *vir.Instruction) string {
+	if i.Op == "loc" {
+		return encodeLoc(i)
+	}
 	var b strings.Builder
 	if i.Result != "" {
 		b.WriteString(i.Result + " = ")
@@ -197,14 +217,22 @@ func encodeInst(i vir.Inst) string {
 	return b.String()
 }
 
+func encodeLoc(i *vir.Instruction) string {
+	parts := make([]string, len(i.Args))
+	for j, a := range i.Args {
+		parts[j] = a.String()
+	}
+	return "loc " + strings.Join(parts, " ")
+}
+
 func encodeTerm(t vir.Terminator) string {
 	switch x := t.(type) {
-	case vir.Br:
+	case vir.Branch:
 		return "br " + x.Label
-	case vir.BrIf:
-		return fmt.Sprintf("br_if %s, %s, %s", x.Cond, x.Then, x.Else)
+	case vir.BranchIf:
+		return fmt.Sprintf("br_if %s, %s, %s", x.Cond.String(), x.Then, x.Else)
 	case vir.Switch:
-		s := fmt.Sprintf("switch %s, %s", x.Value, x.Default)
+		s := fmt.Sprintf("switch %s, %s", x.Value.String(), x.Default)
 		for _, c := range x.Cases {
 			s += fmt.Sprintf(", %d %s", c.Value, c.Label)
 		}
@@ -237,4 +265,83 @@ func encodeTerm(t vir.Terminator) string {
 		return "unreachable"
 	}
 	return "<bad terminator>"
+}
+
+// ---------------------------------------------------------------------------
+// Inline assembly (§4).
+// ---------------------------------------------------------------------------
+
+func encodeAsmBlock(a *vir.AsmBlock) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "asm %s :\n", a.Dialect)
+	for _, bind := range a.Bindings {
+		switch bind.Kind {
+		case vir.BindingIn:
+			fmt.Fprintf(&b, "  in %s = %s\n", regIdent(a.Dialect, bind.Register), bind.Ident)
+		case vir.BindingOut:
+			fmt.Fprintf(&b, "  out %s = %s\n", regIdent(a.Dialect, bind.Register), bind.Ident)
+		case vir.BindingClobber:
+			regs := make([]string, len(bind.Registers))
+			for i, r := range bind.Registers {
+				regs[i] = regIdent(a.Dialect, r)
+			}
+			fmt.Fprintf(&b, "  clobber %s\n", strings.Join(regs, ", "))
+		}
+	}
+	b.WriteString("code:\n")
+	for _, line := range a.Code {
+		if line.LabelDeclaration != "" {
+			fmt.Fprintf(&b, "  %s:\n", line.LabelDeclaration)
+			continue
+		}
+		parts := make([]string, len(line.Operands))
+		for i, op := range line.Operands {
+			parts[i] = encodeAsmOperand(a.Dialect, op)
+		}
+		if len(parts) == 0 {
+			fmt.Fprintf(&b, "  %s\n", line.Mnemonic)
+		} else {
+			fmt.Fprintf(&b, "  %s %s\n", line.Mnemonic, strings.Join(parts, ", "))
+		}
+	}
+	b.WriteString("end\n")
+	return b.String()
+}
+
+// regIdent applies the '%' prefix required for AT&T reg-idents; omitted for
+// Intel/ARM/native dialects (§4 Scoping & Lexical Rules).
+func regIdent(d vir.AsmDialect, reg string) string {
+	if d == vir.DialectATT {
+		return "%" + reg
+	}
+	return reg
+}
+
+func encodeAsmOperand(d vir.AsmDialect, op vir.AsmOperand) string {
+	switch op.Kind {
+	case vir.AsmOperandKindRegister:
+		return regIdent(d, op.Register)
+	case vir.AsmOperandKindImmediate:
+		switch d {
+		case vir.DialectATT:
+			return "$" + op.Immediate.String()
+		case vir.DialectIntel:
+			return op.Immediate.String()
+		default: // a32, t32, native
+			return "#" + op.Immediate.String()
+		}
+	case vir.AsmOperandKindMemory:
+		return op.Memory // stored verbatim (module.go doc comment)
+	case vir.AsmOperandKindLabel:
+		return op.Label
+	}
+	return "<bad asm operand>"
+}
+
+func indentLines(s, prefix string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = prefix + l
+	}
+	return strings.Join(lines, "\n") + "\n"
 }

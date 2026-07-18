@@ -11,7 +11,8 @@ import (
 )
 
 // Decode parses .vir source into an unverified *vir.Module. Section order is
-// enforced here structurally (§1.2); everything else is Verify's job.
+// enforced here structurally (§1.2), as is basic body shape (one terminator
+// per block, nothing after it); everything else is Verify's job.
 func Decode(src []byte) (*vir.Module, error) {
 	p := &parser{}
 	if err := p.lexAll(string(src)); err != nil {
@@ -31,7 +32,7 @@ const (
 	tInt
 	tFloat
 	tString
-	tPunct // one of , ( ) [ ] : = .
+	tPunct // one of , ( ) [ ] : = . % $ # + * !
 	tEllipsis
 )
 
@@ -63,6 +64,12 @@ func (p *parser) lexAll(src string) error {
 	return nil
 }
 
+// lexLine tokenizes both ordinary module-grammar lines and asm-block lines.
+// Asm operands (registers, immediates, memory refs) are "independently
+// lexed" per §4, but we still use this single lexer for them — it just
+// additionally recognizes the punctuation asm syntax needs ('%','$','#',
+// '+','*','!'); the asm-specific *parsing* (readAsmMemory etc.) is what
+// actually gives those characters their dialect-specific meaning.
 func lexLine(s string) ([]tok, error) {
 	var toks []tok
 	i := 0
@@ -121,7 +128,14 @@ func lexLine(s string) ([]tok, error) {
 		case strings.HasPrefix(s[i:], "..."):
 			toks = append(toks, tok{tEllipsis, "..."})
 			i += 3
-		case c == ',' || c == '(' || c == ')' || c == '[' || c == ']' || c == ':' || c == '=' || c == '.':
+		case strings.HasPrefix(s[i:], "-Inf"):
+			// float-literal alt "-Inf" (§1.1); must be checked before the
+			// generic '-'-prefixed-number case below, which requires a digit.
+			toks = append(toks, tok{tIdent, "-Inf"})
+			i += 4
+		case c == ',' || c == '(' || c == ')' || c == '[' || c == ']' || c == ':' ||
+			c == '=' || c == '.' || c == '%' || c == '$' || c == '#' || c == '+' ||
+			c == '*' || c == '!':
 			toks = append(toks, tok{tPunct, string(c)})
 			i++
 		case c == '-' || (c >= '0' && c <= '9'):
@@ -209,6 +223,13 @@ func (c *lc) peek() (tok, bool) {
 	}
 	return c.l.toks[c.i], true
 }
+func (c *lc) peekN(n int) (tok, bool) {
+	idx := c.i + n
+	if idx < 0 || idx >= len(c.l.toks) {
+		return tok{}, false
+	}
+	return c.l.toks[idx], true
+}
 func (c *lc) next() (tok, bool) {
 	t, ok := c.peek()
 	if ok {
@@ -255,6 +276,9 @@ func (p *parser) parseModule() (*vir.Module, error) {
 	name, err := c.expectIdent()
 	if err != nil {
 		return nil, err
+	}
+	if !c.done() {
+		return nil, l.errf("trailing tokens after module header")
 	}
 	m := vir.NewModule(name)
 
@@ -322,7 +346,6 @@ func isGlobalLine(l *line) bool {
 	if f == "global" {
 		return true
 	}
-	// `export global ...` vs `export fn ...`
 	return f == "export" && len(l.toks) > 1 && l.toks[1].kind == tIdent && l.toks[1].text == "global"
 }
 
@@ -356,6 +379,9 @@ func parseTarget(c *lc, m *vir.Module) error {
 			}
 		}
 	}
+	if !c.done() {
+		return c.l.errf("trailing tokens after target declaration")
+	}
 	m.Target = t
 	return nil
 }
@@ -387,10 +413,14 @@ func parseStruct(c *lc, m *vir.Module) error {
 			return err
 		}
 	}
+	if !c.done() {
+		return c.l.errf("trailing tokens after struct declaration")
+	}
 	m.DeclareStruct(name, fields...)
 	return nil
 }
 
+// fnsig params are bare types — fnsigs never name their parameters (§1.1).
 func parseFnSig(c *lc, m *vir.Module) error {
 	c.accept(tIdent, "fnsig")
 	name, err := c.expectIdent()
@@ -428,7 +458,10 @@ func parseFnSig(c *lc, m *vir.Module) error {
 	if err != nil {
 		return err
 	}
-	m.DeclareFnSig(name, params, variadic, ret)
+	if !c.done() {
+		return c.l.errf("trailing tokens after fnsig")
+	}
+	m.DeclareFunctionSignature(name, params, variadic, ret)
 	return nil
 }
 
@@ -449,7 +482,10 @@ func parseConst(c *lc, m *vir.Module) error {
 	if err != nil {
 		return err
 	}
-	m.DeclareConst(name, t, val)
+	if !c.done() {
+		return c.l.errf("trailing tokens after const")
+	}
+	m.DeclareConstant(name, t, val)
 	return nil
 }
 
@@ -483,7 +519,9 @@ func parseGlobal(c *lc, m *vir.Module) error {
 		return c.l.errf("trailing tokens after global initializer")
 	}
 	g := m.DeclareGlobal(name, t, init)
-	g.Export, g.TLS, g.Align = export, tls, align
+	g.Export = export
+	g.TLS = tls
+	g.Align = align
 	return nil
 }
 
@@ -496,11 +534,11 @@ func parseConstInit(c *lc) (vir.ConstInit, error) {
 		if err != nil {
 			return nil, err
 		}
-		return vir.InitAddr{Name: name}, nil
+		return vir.InitAddressOf{Name: name}, nil
 	}
 	if tk, ok := c.peek(); ok && tk.kind == tString {
 		c.next()
-		return vir.InitBytes{Data: []byte(tk.text)}, nil
+		return vir.InitByteString{Data: []byte(tk.text)}, nil
 	}
 	if c.accept(tPunct, "(") {
 		var elems []vir.ConstInit
@@ -517,13 +555,13 @@ func parseConstInit(c *lc) (vir.ConstInit, error) {
 				return nil, err
 			}
 		}
-		return vir.InitAgg{Elems: elems}, nil
+		return vir.InitAggregate{Elems: elems}, nil
 	}
 	o, err := parseOperand(c)
 	if err != nil {
 		return nil, err
 	}
-	return vir.InitLit{Value: o}, nil
+	return vir.InitLiteral{Value: o}, nil
 }
 
 func parseLink(c *lc, m *vir.Module) error {
@@ -535,6 +573,9 @@ func parseLink(c *lc, m *vir.Module) error {
 	tk, ok := c.next()
 	if !ok || tk.kind != tString {
 		return c.l.errf("link expects a string literal")
+	}
+	if !c.done() {
+		return c.l.errf("trailing tokens after link")
 	}
 	m.DeclareLink(vir.LinkKind(kind), tk.text)
 	return nil
@@ -551,6 +592,9 @@ func (p *parser) parseExternGroup(m *vir.Module) error {
 	}
 	if err := c.expectPunct(":"); err != nil {
 		return err
+	}
+	if !c.done() {
+		return l.errf("trailing tokens after extern header")
 	}
 	g := m.DeclareExternGroup(dep)
 	for {
@@ -569,16 +613,18 @@ func (p *parser) parseExternGroup(m *vir.Module) error {
 		if err != nil {
 			return err
 		}
-		f := g.Fn(name, params, ret, attrs...)
-		f.Variadic = variadic
 		if !c.done() {
 			return l.errf("trailing tokens on extern fn line")
+		}
+		f := g.DeclareFunction(name, params, ret, attrs...)
+		if variadic {
+			f.SetVariadic()
 		}
 	}
 }
 
 // parseFnHead parses `name(params) ret attrs*` after the fn keyword.
-func parseFnHead(c *lc) (string, []vir.Param, bool, vir.Type, []vir.FnAttr, error) {
+func parseFnHead(c *lc) (string, []vir.Param, bool, vir.Type, []vir.FunctionAttribute, error) {
 	name, err := c.expectIdent()
 	if err != nil {
 		return "", nil, false, nil, nil, err
@@ -641,7 +687,7 @@ func parseFnHead(c *lc) (string, []vir.Param, bool, vir.Type, []vir.FnAttr, erro
 	if err != nil {
 		return "", nil, false, nil, nil, err
 	}
-	var attrs []vir.FnAttr
+	var attrs []vir.FunctionAttribute
 	for {
 		tk, ok := c.peek()
 		if !ok || tk.kind != tIdent {
@@ -649,7 +695,7 @@ func parseFnHead(c *lc) (string, []vir.Param, bool, vir.Type, []vir.FnAttr, erro
 		}
 		switch tk.text {
 		case "noreturn", "readonly", "inline", "noinline", "cold":
-			attrs = append(attrs, vir.FnAttr(tk.text))
+			attrs = append(attrs, vir.FunctionAttribute(tk.text))
 			c.next()
 		default:
 			return name, params, variadic, ret, attrs, nil
@@ -684,8 +730,17 @@ func (p *parser) parseFn(m *vir.Module) error {
 	if err := c.expectPunct(":"); err != nil {
 		return err
 	}
-	fb := m.DeclareFn(name, params, ret, export, attrs...)
+	if !c.done() {
+		return l.errf("trailing tokens on fn signature line")
+	}
 
+	arch := ""
+	if m.Target != nil {
+		arch = m.Target.Arch
+	}
+
+	fb := m.DeclareFunction(name, params, ret, export, attrs...)
+	terminated := false
 	for {
 		l := p.next()
 		if l == nil {
@@ -694,149 +749,204 @@ func (p *parser) parseFn(m *vir.Module) error {
 		f := first(l)
 		switch {
 		case f == "end":
+			if !terminated {
+				return l.errf("fn %s: block ended without a terminator (§1.3 rule 2)", name)
+			}
 			return nil
 		case len(l.toks) == 2 && l.toks[0].kind == tIdent && l.toks[1].kind == tPunct && l.toks[1].text == ":":
+			if !terminated {
+				return l.errf("fn %s: block must end with a terminator before next label (§1.3 rule 2)", name)
+			}
 			fb.Label(l.toks[0].text)
-		case terminatorWords[f]:
-			t, err := parseTerminator(&lc{l: l})
-			if err != nil {
+			terminated = false
+		case f == "asm":
+			if terminated {
+				return l.errf("fn %s: asm block after terminator (§1.3 rule 2)", name)
+			}
+			if err := p.parseAsm(l, fb, arch); err != nil {
 				return err
 			}
-			fb.EmitInst(vir.Inst{}) // placeholder removed below
-			cur := currentBlock(fb)
-			cur.Insts = cur.Insts[:len(cur.Insts)-1]
-			if cur.Term != nil {
-				return l.errf("code after terminator is rejected as unreachable (§1.3 rule 2)")
+		case terminatorWords[f]:
+			if terminated {
+				return l.errf("fn %s: multiple terminators in one block (§1.3 rule 2)", name)
 			}
-			cur.Term = t
+			if err := applyTerminator(&lc{l: l}, fb); err != nil {
+				return err
+			}
+			terminated = true
 		default:
+			if terminated {
+				return l.errf("fn %s: instruction after terminator (§1.3 rule 2)", name)
+			}
 			inst, err := parseInst(&lc{l: l})
 			if err != nil {
 				return err
 			}
-			cur := currentBlock(fb)
-			if cur.Term != nil {
-				return l.errf("instruction after terminator (§1.3 rule 2)")
-			}
-			fb.EmitInst(inst)
+			fb.EmitInstruction(inst)
 		}
 	}
 }
 
-func currentBlock(fb *vir.FuncBuilder) *vir.Block {
-	if n := len(fb.Func.Blocks); n > 0 {
-		return fb.Func.Blocks[n-1]
-	}
-	return fb.Func.Entry
-}
-
-func parseTerminator(c *lc) (vir.Terminator, error) {
+func applyTerminator(c *lc, fb *vir.FunctionBuilder) error {
 	kw, _ := c.expectIdent()
 	switch kw {
 	case "br":
-		l, err := c.expectIdent()
+		lbl, err := c.expectIdent()
 		if err != nil {
-			return nil, err
+			return err
 		}
-		return vir.Br{Label: l}, nil
+		if !c.done() {
+			return c.l.errf("trailing tokens after br")
+		}
+		fb.Branch(lbl)
 	case "br_if":
 		cond, err := parseOperand(c)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if err := c.expectPunct(","); err != nil {
-			return nil, err
+			return err
 		}
-		t, err := c.expectIdent()
+		then, err := c.expectIdent()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if err := c.expectPunct(","); err != nil {
-			return nil, err
+			return err
 		}
-		e, err := c.expectIdent()
+		els, err := c.expectIdent()
 		if err != nil {
-			return nil, err
+			return err
 		}
-		return vir.BrIf{Cond: cond, Then: t, Else: e}, nil
+		if !c.done() {
+			return c.l.errf("trailing tokens after br_if")
+		}
+		fb.BranchIf(cond, then, els)
 	case "switch":
 		v, err := parseOperand(c)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if err := c.expectPunct(","); err != nil {
-			return nil, err
+			return err
 		}
 		def, err := c.expectIdent()
 		if err != nil {
-			return nil, err
+			return err
 		}
-		sw := vir.Switch{Value: v, Default: def}
+		var cases []vir.SwitchCase
 		for c.accept(tPunct, ",") {
 			n, err := expectInt64(c)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			lbl, err := c.expectIdent()
 			if err != nil {
-				return nil, err
+				return err
 			}
-			sw.Cases = append(sw.Cases, vir.SwitchCase{Value: n, Label: lbl})
+			cases = append(cases, vir.SwitchCase{Value: n, Label: lbl})
 		}
-		return sw, nil
+		if !c.done() {
+			return c.l.errf("trailing tokens after switch")
+		}
+		fb.Switch(v, def, cases...)
 	case "return":
 		if c.done() {
-			return vir.Return{}, nil
+			fb.Return()
+			return nil
 		}
 		o, err := parseOperand(c)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		return vir.Return{Value: &o}, nil
+		if !c.done() {
+			return c.l.errf("trailing tokens after return")
+		}
+		fb.Return(o)
 	case "tailcall":
 		if c.accept(tPunct, ".") {
 			sig, err := c.expectIdent()
 			if err != nil {
-				return nil, err
+				return err
 			}
 			args, err := parseOperandList(c)
 			if err != nil {
-				return nil, err
+				return err
 			}
-			return vir.TailCall{Sig: sig, Args: args}, nil
+			if len(args) == 0 {
+				return c.l.errf("indirect tailcall requires a callee pointer operand")
+			}
+			fb.TailCallIndirect(sig, args[0], args[1:]...)
+			return nil
 		}
 		callee, err := c.expectIdent()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		var args []vir.Operand
 		for c.accept(tPunct, ",") {
 			o, err := parseOperand(c)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			args = append(args, o)
 		}
-		return vir.TailCall{Callee: callee, Args: args}, nil
+		if !c.done() {
+			return c.l.errf("trailing tokens after tailcall")
+		}
+		fb.TailCall(callee, args...)
 	case "trap":
-		return vir.Trap{}, nil
+		if !c.done() {
+			return c.l.errf("trailing tokens after trap")
+		}
+		fb.Trap()
 	case "unreachable":
-		return vir.Unreachable{}, nil
+		if !c.done() {
+			return c.l.errf("trailing tokens after unreachable")
+		}
+		fb.Unreachable()
+	default:
+		return c.l.errf("unknown terminator %q", kw)
 	}
-	return nil, c.l.errf("unknown terminator %q", kw)
+	return nil
 }
 
-func parseInst(c *lc) (vir.Inst, error) {
-	var inst vir.Inst
-	// loc line?
-	if tk, ok := c.peek(); ok && tk.text == "loc" && tk.kind == tIdent {
+func parseInst(c *lc) (vir.Instruction, error) {
+	var inst vir.Instruction
+
+	// loc-line is its own grammar production: space-separated, no commas.
+	if tk, ok := c.peek(); ok && tk.kind == tIdent && tk.text == "loc" {
 		c.next()
-		args, err := parseOperandList(c)
-		if err != nil {
-			return inst, err
+		ftok, ok := c.next()
+		if !ok || ftok.kind != tString {
+			return inst, c.l.errf("loc: expected file string literal")
 		}
-		return vir.Inst{Op: "loc", Args: args}, nil
+		ltok, ok := c.next()
+		if !ok || ltok.kind != tInt {
+			return inst, c.l.errf("loc: expected line number")
+		}
+		lineNo, err := strconv.ParseInt(ltok.text, 10, 64)
+		if err != nil {
+			return inst, c.l.errf("loc: bad line number %q", ltok.text)
+		}
+		args := []vir.Operand{vir.StringLiteral(ftok.text), vir.IntLiteral(lineNo)}
+		if !c.done() {
+			ctok, ok := c.next()
+			if !ok || ctok.kind != tInt {
+				return inst, c.l.errf("loc: expected column number")
+			}
+			col, err := strconv.ParseInt(ctok.text, 10, 64)
+			if err != nil {
+				return inst, c.l.errf("loc: bad column number %q", ctok.text)
+			}
+			args = append(args, vir.IntLiteral(col))
+		}
+		if !c.done() {
+			return inst, c.l.errf("loc: trailing tokens")
+		}
+		return vir.Instruction{Op: "loc", Args: args}, nil
 	}
+
 	// result name?
 	if len(c.l.toks) > 1 && c.l.toks[0].kind == tIdent &&
 		c.l.toks[1].kind == tPunct && c.l.toks[1].text == "=" {
@@ -867,7 +977,7 @@ func parseInst(c *lc) (vir.Inst, error) {
 		return inst, err
 	}
 	// Trailing ", align N" (§1.1 align-clause) — spelled as ident+int operands.
-	if n := len(args); n >= 2 && args[n-2].Kind == vir.OIdent && args[n-2].Ident == "align" && args[n-1].Kind == vir.OInt {
+	if n := len(args); n >= 2 && args[n-2].Kind == vir.OperandIdent && args[n-2].Ident == "align" && args[n-1].Kind == vir.OperandInt {
 		inst.Align = int(args[n-1].Int)
 		args = args[:n-2]
 	}
@@ -912,17 +1022,17 @@ func parseOperand(c *lc) (vir.Operand, error) {
 		if err != nil {
 			return vir.Operand{}, c.l.errf("bad integer %q: %v", tk.text, err)
 		}
-		return vir.Int(v), nil
+		return vir.IntLiteral(v), nil
 	case tFloat:
 		c.next()
 		v, err := strconv.ParseFloat(tk.text, 64)
 		if err != nil {
 			return vir.Operand{}, c.l.errf("bad float %q: %v", tk.text, err)
 		}
-		return vir.Flt(v), nil
+		return vir.FloatLiteral(v), nil
 	case tString:
 		c.next()
-		return vir.Str(tk.text), nil
+		return vir.StringLiteral(tk.text), nil
 	case tPunct:
 		if tk.text == "(" { // vector literal
 			c.next()
@@ -940,38 +1050,41 @@ func parseOperand(c *lc) (vir.Operand, error) {
 					return vir.Operand{}, err
 				}
 			}
-			return vir.VecLit(lanes...), nil
+			return vir.VectorLiteral(lanes...), nil
 		}
 	case tIdent:
 		switch tk.text {
 		case "true":
 			c.next()
-			return vir.Bl(true), nil
+			return vir.BoolLiteral(true), nil
 		case "false":
 			c.next()
-			return vir.Bl(false), nil
+			return vir.BoolLiteral(false), nil
 		case "null":
 			c.next()
-			return vir.Null(), nil
+			return vir.NullLiteral(), nil
 		case "NaN":
 			c.next()
-			return vir.Flt(math.NaN()), nil
+			return vir.FloatLiteral(math.NaN()), nil
 		case "Inf":
 			c.next()
-			return vir.Flt(math.Inf(1)), nil
+			return vir.FloatLiteral(math.Inf(1)), nil
+		case "-Inf":
+			c.next()
+			return vir.FloatLiteral(math.Inf(-1)), nil
 		}
 		if orderings[tk.text] {
 			c.next()
-			return vir.Ord(tk.text), nil
+			return vir.OrderingOperand(tk.text), nil
 		}
 		// Type in operand position (index.ptr)?
 		save := c.i
 		if t, err := parseType(c); err == nil {
-			return vir.Ty(t), nil
+			return vir.TypeOperand(t), nil
 		}
 		c.i = save
 		c.next()
-		return vir.V(tk.text), nil
+		return vir.Ident(tk.text), nil
 	}
 	return vir.Operand{}, c.l.errf("unexpected token %q in operand position", tk.text)
 }
@@ -1054,4 +1167,414 @@ func parseType(c *lc) (vir.Type, error) {
 		}
 	}
 	return nil, c.l.errf("%q is not a type", s)
+}
+
+// ---------------------------------------------------------------------------
+// Inline assembly (§4). Structural only, per README/verify.go: mnemonic and
+// operand-shape legality (§9.38) is explicitly not required at this layer.
+// ---------------------------------------------------------------------------
+
+func (p *parser) parseAsm(header *line, fb *vir.FunctionBuilder, arch string) error {
+	c := &lc{l: header}
+	c.accept(tIdent, "asm")
+	dialectTok, err := c.expectIdent()
+	if err != nil {
+		return err
+	}
+	dialect := vir.AsmDialect(dialectTok)
+	switch dialect {
+	case vir.DialectIntel, vir.DialectATT, vir.DialectA32, vir.DialectT32, vir.DialectNative:
+	default:
+		return header.errf("unknown asm dialect %q", dialectTok)
+	}
+	if err := c.expectPunct(":"); err != nil {
+		return err
+	}
+	if !c.done() {
+		return header.errf("trailing tokens after asm header")
+	}
+
+	ab := fb.BeginAsm(dialect)
+
+bindings:
+	for {
+		bl := p.next()
+		if bl == nil {
+			return fmt.Errorf("unterminated asm block (missing code:/end)")
+		}
+		bc := &lc{l: bl}
+		switch first(bl) {
+		case "in":
+			bc.next()
+			reg, err := parseRegIdent(bc)
+			if err != nil {
+				return err
+			}
+			if err := bc.expectPunct("="); err != nil {
+				return err
+			}
+			ident, err := bc.expectIdent()
+			if err != nil {
+				return err
+			}
+			if !bc.done() {
+				return bl.errf("trailing tokens after in-binding")
+			}
+			ab.In(reg, ident)
+		case "out":
+			bc.next()
+			reg, err := parseRegIdent(bc)
+			if err != nil {
+				return err
+			}
+			if err := bc.expectPunct("="); err != nil {
+				return err
+			}
+			ident, err := bc.expectIdent()
+			if err != nil {
+				return err
+			}
+			if !bc.done() {
+				return bl.errf("trailing tokens after out-binding")
+			}
+			ab.Out(reg, ident)
+		case "clobber":
+			bc.next()
+			var regs []string
+			for {
+				r, err := parseRegIdent(bc)
+				if err != nil {
+					return err
+				}
+				regs = append(regs, r)
+				if bc.done() {
+					break
+				}
+				if err := bc.expectPunct(","); err != nil {
+					return err
+				}
+			}
+			ab.Clobber(regs...)
+		case "code":
+			bc.next()
+			if err := bc.expectPunct(":"); err != nil {
+				return err
+			}
+			if !bc.done() {
+				return bl.errf("trailing tokens after code:")
+			}
+			break bindings
+		default:
+			return bl.errf("expected asm binding (in/out/clobber) or code:, got %q", first(bl))
+		}
+	}
+
+	for {
+		cl := p.next()
+		if cl == nil {
+			return fmt.Errorf("unterminated asm code section (missing end)")
+		}
+		if first(cl) == "end" {
+			ab.End()
+			return nil
+		}
+		codeLine, err := parseAsmCodeLine(cl, arch, dialect)
+		if err != nil {
+			return err
+		}
+		ab.Code(codeLine)
+	}
+}
+
+// parseRegIdent parses "%"? ident, stripping the AT&T '%' prefix; the
+// canonical register name (without '%') is what AsmBinding.Register stores.
+func parseRegIdent(c *lc) (string, error) {
+	c.accept(tPunct, "%")
+	return c.expectIdent()
+}
+
+func parseAsmCodeLine(l *line, arch string, dialect vir.AsmDialect) (vir.AsmCodeLine, error) {
+	if len(l.toks) == 2 && l.toks[0].kind == tIdent && l.toks[1].kind == tPunct && l.toks[1].text == ":" {
+		return vir.AsmLabelDeclaration(l.toks[0].text), nil
+	}
+	c := &lc{l: l}
+	mnem, err := c.expectIdent()
+	if err != nil {
+		return vir.AsmCodeLine{}, l.errf("expected mnemonic or label declaration")
+	}
+	var ops []vir.AsmOperand
+	for !c.done() {
+		op, err := parseAsmOperand(c, arch, dialect)
+		if err != nil {
+			return vir.AsmCodeLine{}, err
+		}
+		ops = append(ops, op)
+		if c.done() {
+			break
+		}
+		if err := c.expectPunct(","); err != nil {
+			return vir.AsmCodeLine{}, err
+		}
+	}
+	return vir.AsmInstructionLine(mnem, ops...), nil
+}
+
+func parseAsmOperand(c *lc, arch string, dialect vir.AsmDialect) (vir.AsmOperand, error) {
+	switch dialect {
+	case vir.DialectATT:
+		return parseAsmOperandATT(c)
+	case vir.DialectIntel:
+		return parseAsmOperandIntel(c, arch)
+	default: // a32, t32, native
+		return parseAsmOperandARM(c, arch)
+	}
+}
+
+func parseAsmOperandATT(c *lc) (vir.AsmOperand, error) {
+	tk, ok := c.peek()
+	if !ok {
+		return vir.AsmOperand{}, c.l.errf("expected asm operand")
+	}
+	switch {
+	case tk.kind == tPunct && tk.text == "%":
+		c.next()
+		reg, err := c.expectIdent()
+		if err != nil {
+			return vir.AsmOperand{}, err
+		}
+		return vir.AsmRegister(reg), nil
+	case tk.kind == tPunct && tk.text == "$":
+		c.next()
+		imm, err := parseImmValue(c)
+		if err != nil {
+			return vir.AsmOperand{}, err
+		}
+		return vir.AsmImmediate(imm), nil
+	case tk.kind == tPunct && tk.text == "(":
+		text, err := readAsmMemory(c, "")
+		if err != nil {
+			return vir.AsmOperand{}, err
+		}
+		return vir.AsmMemory(text), nil
+	case tk.kind == tInt:
+		if n, ok2 := c.peekN(1); ok2 && n.kind == tPunct && n.text == "(" {
+			disp := tk.text
+			c.next()
+			text, err := readAsmMemory(c, disp)
+			if err != nil {
+				return vir.AsmOperand{}, err
+			}
+			return vir.AsmMemory(text), nil
+		}
+		c.next()
+		v, err := strconv.ParseInt(tk.text, 10, 64)
+		if err != nil {
+			return vir.AsmOperand{}, c.l.errf("bad integer %q", tk.text)
+		}
+		return vir.AsmImmediate(vir.IntLiteral(v)), nil
+	case tk.kind == tIdent:
+		c.next()
+		return vir.AsmLabelReference(tk.text), nil
+	}
+	return vir.AsmOperand{}, c.l.errf("unrecognized asm operand %q", tk.text)
+}
+
+func parseAsmOperandIntel(c *lc, arch string) (vir.AsmOperand, error) {
+	tk, ok := c.peek()
+	if !ok {
+		return vir.AsmOperand{}, c.l.errf("expected asm operand")
+	}
+	switch {
+	case tk.kind == tIdent && isPtrSize(tk.text):
+		text, err := readAsmMemory(c, "")
+		if err != nil {
+			return vir.AsmOperand{}, err
+		}
+		return vir.AsmMemory(text), nil
+	case tk.kind == tPunct && tk.text == "[":
+		text, err := readAsmMemory(c, "")
+		if err != nil {
+			return vir.AsmOperand{}, err
+		}
+		return vir.AsmMemory(text), nil
+	case tk.kind == tInt || tk.kind == tFloat:
+		c.next()
+		imm, err := literalOperand(tk)
+		if err != nil {
+			return vir.AsmOperand{}, c.l.errf("%v", err)
+		}
+		return vir.AsmImmediate(imm), nil
+	case tk.kind == tIdent:
+		c.next()
+		if regTableHas(arch, tk.text) {
+			return vir.AsmRegister(tk.text), nil
+		}
+		return vir.AsmLabelReference(tk.text), nil
+	}
+	return vir.AsmOperand{}, c.l.errf("unrecognized asm operand %q", tk.text)
+}
+
+func parseAsmOperandARM(c *lc, arch string) (vir.AsmOperand, error) {
+	tk, ok := c.peek()
+	if !ok {
+		return vir.AsmOperand{}, c.l.errf("expected asm operand")
+	}
+	switch {
+	case tk.kind == tPunct && tk.text == "[":
+		text, err := readAsmMemory(c, "")
+		if err != nil {
+			return vir.AsmOperand{}, err
+		}
+		return vir.AsmMemory(text), nil
+	case tk.kind == tPunct && tk.text == "#":
+		c.next()
+		imm, err := parseImmValue(c)
+		if err != nil {
+			return vir.AsmOperand{}, err
+		}
+		return vir.AsmImmediate(imm), nil
+	case tk.kind == tInt || tk.kind == tFloat:
+		c.next()
+		imm, err := literalOperand(tk)
+		if err != nil {
+			return vir.AsmOperand{}, c.l.errf("%v", err)
+		}
+		return vir.AsmImmediate(imm), nil
+	case tk.kind == tIdent:
+		c.next()
+		if regTableHas(arch, tk.text) {
+			return vir.AsmRegister(tk.text), nil
+		}
+		return vir.AsmLabelReference(tk.text), nil
+	}
+	return vir.AsmOperand{}, c.l.errf("unrecognized asm operand %q", tk.text)
+}
+
+func parseImmValue(c *lc) (vir.Operand, error) {
+	tk, ok := c.next()
+	if !ok {
+		return vir.Operand{}, c.l.errf("expected immediate value")
+	}
+	switch tk.kind {
+	case tInt:
+		v, err := strconv.ParseInt(tk.text, 10, 64)
+		if err != nil {
+			return vir.Operand{}, c.l.errf("bad integer %q", tk.text)
+		}
+		return vir.IntLiteral(v), nil
+	case tFloat:
+		v, err := strconv.ParseFloat(tk.text, 64)
+		if err != nil {
+			return vir.Operand{}, c.l.errf("bad float %q", tk.text)
+		}
+		return vir.FloatLiteral(v), nil
+	case tIdent:
+		return vir.Ident(tk.text), nil
+	}
+	return vir.Operand{}, c.l.errf("bad immediate operand %q", tk.text)
+}
+
+func literalOperand(tk tok) (vir.Operand, error) {
+	switch tk.kind {
+	case tInt:
+		v, err := strconv.ParseInt(tk.text, 10, 64)
+		if err != nil {
+			return vir.Operand{}, fmt.Errorf("bad integer %q: %v", tk.text, err)
+		}
+		return vir.IntLiteral(v), nil
+	case tFloat:
+		v, err := strconv.ParseFloat(tk.text, 64)
+		if err != nil {
+			return vir.Operand{}, fmt.Errorf("bad float %q: %v", tk.text, err)
+		}
+		return vir.FloatLiteral(v), nil
+	}
+	return vir.Operand{}, fmt.Errorf("bad literal token %q", tk.text)
+}
+
+// readAsmMemory consumes a full memory operand (optional intel ptr-size
+// prefix, then a bracketed/parenthesized expression, then an optional ARM
+// '!' writeback marker) and returns it as raw text — AsmOperand.Memory is
+// documented as verbatim dialect-specific addressing text, so no further
+// structure needs to be preserved.
+func readAsmMemory(c *lc, disp string) (string, error) {
+	var toks []tok
+	if disp != "" {
+		toks = append(toks, tok{kind: tInt, text: disp})
+	}
+	if tk, ok := c.peek(); ok && tk.kind == tIdent && isPtrSize(tk.text) {
+		c.next()
+		toks = append(toks, tk)
+		ptk, ok := c.next()
+		if !ok || ptk.kind != tIdent || ptk.text != "ptr" {
+			return "", c.l.errf("expected 'ptr' after size specifier %q", tk.text)
+		}
+		toks = append(toks, ptk)
+	}
+	open, ok := c.next()
+	if !ok || open.kind != tPunct || (open.text != "[" && open.text != "(") {
+		return "", c.l.errf("expected '[' or '(' to start memory operand")
+	}
+	want := "]"
+	if open.text == "(" {
+		want = ")"
+	}
+	toks = append(toks, open)
+	depth := 1
+	for {
+		tk, ok := c.next()
+		if !ok {
+			return "", c.l.errf("unterminated memory operand, expected %q", want)
+		}
+		toks = append(toks, tk)
+		if tk.kind == tPunct {
+			switch tk.text {
+			case "[", "(":
+				depth++
+			case "]", ")":
+				depth--
+			}
+		}
+		if depth == 0 {
+			break
+		}
+	}
+	if c.accept(tPunct, "!") {
+		toks = append(toks, tok{kind: tPunct, text: "!"})
+	}
+	return joinAsmTokens(toks), nil
+}
+
+func joinAsmTokens(toks []tok) string {
+	var b strings.Builder
+	noSpaceBefore := map[string]bool{",": true, ")": true, "]": true, "!": true, ":": true}
+	noSpaceAfter := map[string]bool{"(": true, "[": true, "%": true, "$": true, "#": true}
+	prevNoSpaceAfter := false
+	for i, tk := range toks {
+		if i > 0 {
+			if !prevNoSpaceAfter && !noSpaceBefore[tk.text] {
+				b.WriteByte(' ')
+			}
+		}
+		b.WriteString(tk.text)
+		prevNoSpaceAfter = tk.kind == tPunct && noSpaceAfter[tk.text]
+	}
+	return b.String()
+}
+
+func isPtrSize(s string) bool {
+	switch s {
+	case "byte", "word", "dword", "qword", "xmmword", "ymmword", "zmmword":
+		return true
+	}
+	return false
+}
+
+func regTableHas(arch, name string) bool {
+	t := vir.RegisterTableForArchitecture(arch)
+	if t == nil {
+		return false
+	}
+	_, ok := t[name]
+	return ok
 }

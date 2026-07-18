@@ -1,3 +1,4 @@
+// module.go
 package vir
 
 // Module is the single IR-level program representation (README §"One Idea").
@@ -6,12 +7,12 @@ type Module struct {
 	Name    string
 	Target  *Target // nil for pure-compute modules (§1.2 rule 10)
 	Structs []*Struct
-	FnSigs  []*FnSig
-	Consts  []*Const
-	Globals []*Global
-	Links   []*Link
-	Externs []*ExternGroup
-	Funcs   []*Func
+	FunctionSignatures []*FunctionSignature
+	Constants          []*Constant
+	Globals            []*Global
+	Links               []*Link
+	Externs             []*ExternGroup
+	Functions           []*Function
 }
 
 // Target is the in-file target declaration (§10.6).
@@ -32,7 +33,7 @@ type Struct struct {
 	Fields []Field
 }
 
-func (s *Struct) Field(name string) (Field, bool) {
+func (s *Struct) FieldByName(name string) (Field, bool) {
 	for _, f := range s.Fields {
 		if f.Name == name {
 			return f, true
@@ -41,16 +42,17 @@ func (s *Struct) Field(name string) (Field, bool) {
 	return Field{}, false
 }
 
-// FnSig is a named signature used to type-check indirect calls (§1.3).
-type FnSig struct {
+// FunctionSignature is a named signature used to type-check indirect
+// calls/tailcalls (§1.3).
+type FunctionSignature struct {
 	Name     string
 	Params   []Type
 	Variadic bool
 	Ret      Type
 }
 
-// Const is an immutable compile-time scalar (§8). Value is a literal operand.
-type Const struct {
+// Constant is an immutable compile-time scalar (§8). Value is a literal operand.
+type Constant struct {
 	Name  string
 	Type  Type
 	Value Operand
@@ -59,17 +61,17 @@ type Const struct {
 // ConstInit is the global-initializer grammar (§8).
 type ConstInit interface{ isInit() }
 
-type InitLit struct{ Value Operand } // scalar literal / null
-type InitZero struct{}               // zero
-type InitAddr struct{ Name string }  // addr ident
-type InitAgg struct{ Elems []ConstInit }
-type InitBytes struct{ Data []byte } // "..." for array[i8, N]
+type InitLiteral struct{ Value Operand } // scalar literal / null
+type InitZero struct{}                  // zero
+type InitAddressOf struct{ Name string } // addr ident
+type InitAggregate struct{ Elems []ConstInit }
+type InitByteString struct{ Data []byte } // "..." for array[i8, N]
 
-func (InitLit) isInit()   {}
-func (InitZero) isInit()  {}
-func (InitAddr) isInit()  {}
-func (InitAgg) isInit()   {}
-func (InitBytes) isInit() {}
+func (InitLiteral) isInit()    {}
+func (InitZero) isInit()       {}
+func (InitAddressOf) isInit()  {}
+func (InitAggregate) isInit()  {}
+func (InitByteString) isInit() {}
 
 type Global struct {
 	Name   string
@@ -95,18 +97,18 @@ type Link struct {
 }
 
 type ExternGroup struct {
-	Dep string // byte-for-byte link string; "" = anonymous group
-	Fns []*ExternFn
+	Dependency string // byte-for-byte link string; "" = anonymous group
+	Functions  []*ExternFunction
 }
 
-type FnAttr string
+type FunctionAttribute string
 
 const (
-	AttrNoReturn FnAttr = "noreturn"
-	AttrReadonly FnAttr = "readonly"
-	AttrInline   FnAttr = "inline"
-	AttrNoInline FnAttr = "noinline"
-	AttrCold     FnAttr = "cold"
+	AttributeNoReturn FunctionAttribute = "noreturn"
+	AttributeReadonly FunctionAttribute = "readonly"
+	AttributeInline   FunctionAttribute = "inline"
+	AttributeNoInline FunctionAttribute = "noinline"
+	AttributeCold     FunctionAttribute = "cold"
 )
 
 type Param struct {
@@ -116,25 +118,25 @@ type Param struct {
 	SRet  string // struct name, "" if absent
 }
 
-type ExternFn struct {
+type ExternFunction struct {
 	Name     string
 	Params   []Param
 	Variadic bool
 	Ret      Type
-	Attrs    []FnAttr
+	Attrs    []FunctionAttribute
 }
 
-type Func struct {
+type Function struct {
 	Name   string
 	Params []Param
 	Ret    Type
-	Attrs  []FnAttr
+	Attrs  []FunctionAttribute
 	Export bool
 	Entry  *Block   // unlabeled, untargetable (§1.3 rule 1)
 	Blocks []*Block // labeled blocks in textual order
 }
 
-func (f *Func) HasAttr(a FnAttr) bool {
+func (f *Function) HasAttribute(a FunctionAttribute) bool {
 	for _, x := range f.Attrs {
 		if x == a {
 			return true
@@ -143,8 +145,12 @@ func (f *Func) HasAttr(a FnAttr) bool {
 	return false
 }
 
+// IsVariadic reports whether the function is variadic. The grammar can't
+// express this for fn-def (§1.2 rule 5); kept for symmetry with ExternFunction.
+func (f *Function) IsVariadic() bool { return false }
+
 // AllBlocks returns entry followed by labeled blocks.
-func (f *Func) AllBlocks() []*Block {
+func (f *Function) AllBlocks() []*Block {
 	out := make([]*Block, 0, len(f.Blocks)+1)
 	if f.Entry != nil {
 		out = append(out, f.Entry)
@@ -153,15 +159,23 @@ func (f *Func) AllBlocks() []*Block {
 }
 
 type Block struct {
-	Label string // "" for entry
-	Insts []Inst // includes loc lines (Op == "loc")
+	Label string     // "" for entry
+	Lines []BodyLine // ordinary instructions (incl. loc) and asm blocks, in order
 	Term  Terminator
 }
 
-// Inst is one body line. The textual `<op>.<suffix>` is stored split:
-// Op holds the base name; exactly one of Suffix (a type) or Sig (a fnsig
-// name, for indirect call/tailcall) may be set.
-type Inst struct {
+// BodyLine is one body-line (§1.1 body-line grammar): either an ordinary
+// instruction (including a `loc` line) or an inline-asm block. Exactly one
+// of Instruction / Asm is set.
+type BodyLine struct {
+	Instruction *Instruction
+	Asm         *AsmBlock
+}
+
+// Instruction is one instruction body-line. The textual `<op>.<suffix>` is
+// stored split: Op holds the base name; exactly one of Suffix (a type) or
+// Sig (a fnsig name, for indirect call/tailcall) may be set.
+type Instruction struct {
 	Result string // "" iff the instruction produces no value (§1.3 rule 6)
 	Op     string
 	Suffix Type   // nil if no type suffix
@@ -170,11 +184,99 @@ type Inst struct {
 	Align  int // trailing ", align N"; 0 = unspecified
 }
 
+// ---------------------------------------------------------------------------
+// Inline assembly (§4).
+// ---------------------------------------------------------------------------
+
+// AsmDialect is the block-header dialect token (§1.1 grammar, §4).
+type AsmDialect string
+
+const (
+	DialectIntel  AsmDialect = "intel"
+	DialectATT    AsmDialect = "att"
+	DialectA32    AsmDialect = "a32"
+	DialectT32    AsmDialect = "t32"
+	DialectNative AsmDialect = "native"
+)
+
+// AsmBindingKind is the kind of one asm binding line (§4 Bindings).
+type AsmBindingKind string
+
+const (
+	BindingIn      AsmBindingKind = "in"
+	BindingOut     AsmBindingKind = "out"
+	BindingClobber AsmBindingKind = "clobber"
+)
+
+// AsmBinding is one `in`/`out`/`clobber` line at the top of an asm block.
+// Register is used for in/out (one register each); Registers is used for
+// clobber (one or more registers on the line); Ident is the bound IR value,
+// for in/out only.
+type AsmBinding struct {
+	Kind      AsmBindingKind
+	Register  string
+	Registers []string
+	Ident     string
+}
+
+// AsmOperandKind discriminates operand forms inside an asm-line (§1.1
+// asm-operand grammar).
+type AsmOperandKind string
+
+const (
+	AsmOperandKindRegister AsmOperandKind = "register"
+	AsmOperandKindImmediate AsmOperandKind = "immediate"
+	AsmOperandKindMemory    AsmOperandKind = "memory"
+	AsmOperandKindLabel     AsmOperandKind = "label" // branch target, asm-local (§4)
+)
+
+type AsmOperand struct {
+	Kind      AsmOperandKind
+	Register  string  // for AsmOperandKindRegister
+	Immediate Operand // for AsmOperandKindImmediate
+	Memory    string  // for AsmOperandKindMemory — raw dialect-specific addressing text
+	Label     string  // for AsmOperandKindLabel
+}
+
+func AsmRegister(r string) AsmOperand      { return AsmOperand{Kind: AsmOperandKindRegister, Register: r} }
+func AsmImmediate(o Operand) AsmOperand    { return AsmOperand{Kind: AsmOperandKindImmediate, Immediate: o} }
+func AsmMemory(text string) AsmOperand     { return AsmOperand{Kind: AsmOperandKindMemory, Memory: text} }
+func AsmLabelReference(name string) AsmOperand {
+	return AsmOperand{Kind: AsmOperandKindLabel, Label: name}
+}
+
+// AsmCodeLine is one line inside `code:` — either a mnemonic instruction or
+// a dialect-local label declaration (§1.1 asm-line grammar).
+type AsmCodeLine struct {
+	LabelDeclaration string // non-empty ⇒ this line is solely "name:" (§4 label isolation)
+	Mnemonic         string // empty when LabelDeclaration is set
+	Operands         []AsmOperand
+}
+
+func AsmInstructionLine(mnemonic string, ops ...AsmOperand) AsmCodeLine {
+	return AsmCodeLine{Mnemonic: mnemonic, Operands: ops}
+}
+func AsmLabelDeclaration(name string) AsmCodeLine {
+	return AsmCodeLine{LabelDeclaration: name}
+}
+
+// AsmBlock is a whole inline-assembly block (§4). It is an ordinary
+// body-line — ordering relative to other instructions matters — but is not
+// a terminator (no `asm goto`).
+type AsmBlock struct {
+	Dialect  AsmDialect
+	Bindings []AsmBinding
+	Code     []AsmCodeLine
+}
+
+// ---------------------------------------------------------------------------
 // Terminators (§5).
+// ---------------------------------------------------------------------------
+
 type Terminator interface{ isTerm() }
 
-type Br struct{ Label string }
-type BrIf struct {
+type Branch struct{ Label string }
+type BranchIf struct {
 	Cond       Operand
 	Then, Else string
 }
@@ -196,8 +298,8 @@ type TailCall struct {
 type Trap struct{}
 type Unreachable struct{}
 
-func (Br) isTerm()          {}
-func (BrIf) isTerm()        {}
+func (Branch) isTerm()      {}
+func (BranchIf) isTerm()    {}
 func (Switch) isTerm()      {}
 func (Return) isTerm()      {}
 func (TailCall) isTerm()    {}
@@ -207,9 +309,9 @@ func (Unreachable) isTerm() {}
 // Successors returns the labels a terminator may transfer to.
 func Successors(t Terminator) []string {
 	switch x := t.(type) {
-	case Br:
+	case Branch:
 		return []string{x.Label}
-	case BrIf:
+	case BranchIf:
 		if x.Then == x.Else {
 			return []string{x.Then}
 		}
