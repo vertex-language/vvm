@@ -4,8 +4,9 @@ package vir
 // Module is the single IR-level program representation (README §"One Idea").
 // Field order mirrors the mandatory section order (§1.2).
 type Module struct {
-	Name    string
-	Target  *Target // nil for pure-compute modules (§1.2 rule 10)
+	Name       string
+	Target     *Target     // nil for pure-compute modules (§1.2 rule 10)
+	AsmDialect *AsmDialect // nil unless declared; module-wide asm syntax dialect (§1.2 rule 11)
 	Structs []*Struct
 	FunctionSignatures []*FunctionSignature
 	Constants          []*Constant
@@ -188,7 +189,8 @@ type Instruction struct {
 // Inline assembly (§4).
 // ---------------------------------------------------------------------------
 
-// AsmDialect is the block-header dialect token (§1.1 grammar, §4).
+// AsmDialect is the module-wide asmdialect-decl token (§1.1 grammar, §1.2
+// rule 11, §4). It is declared once per module, not per asm block.
 type AsmDialect string
 
 const (
@@ -262,9 +264,10 @@ func AsmLabelDeclaration(name string) AsmCodeLine {
 
 // AsmBlock is a whole inline-assembly block (§4). It is an ordinary
 // body-line — ordering relative to other instructions matters — but is not
-// a terminator (no `asm goto`).
+// a terminator (no `asm goto`). The dialect that governs its `code:` syntax
+// comes from the enclosing module's AsmDialect, not from the block itself
+// (§1.2 rule 11).
 type AsmBlock struct {
-	Dialect  AsmDialect
 	Bindings []AsmBinding
 	Code     []AsmCodeLine
 }

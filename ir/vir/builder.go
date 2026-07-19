@@ -11,6 +11,14 @@ func (m *Module) SetTarget(arch, os, abi string, tiers ...string) *Module {
 	return m
 }
 
+// SetAsmDialect declares the module-wide asmdialect (§1.2 rule 11). Required
+// if the module contains any asm blocks; Verify checks that the dialect is
+// valid for the module's target architecture.
+func (m *Module) SetAsmDialect(d AsmDialect) *Module {
+	m.AsmDialect = &d
+	return m
+}
+
 func (m *Module) DeclareStruct(name string, fields ...Field) *Struct {
 	s := &Struct{Name: name, Fields: fields}
 	m.Structs = append(m.Structs, s)
@@ -164,15 +172,18 @@ func (fb *FunctionBuilder) Unreachable() { fb.current.Term = Unreachable{} }
 // ---------------------------------------------------------------------------
 
 // AsmBuilder accumulates one asm block's bindings and code before it is
-// appended to the enclosing function's current basic block via End.
+// appended to the enclosing function's current basic block via End. The
+// dialect governing the block's `code:` syntax comes from the module-level
+// AsmDialect declaration (§1.2 rule 11), not from the block itself.
 type AsmBuilder struct {
 	owner *FunctionBuilder
 	block AsmBlock
 }
 
-// BeginAsm starts a new inline-assembly block for the given dialect.
-func (fb *FunctionBuilder) BeginAsm(dialect AsmDialect) *AsmBuilder {
-	return &AsmBuilder{owner: fb, block: AsmBlock{Dialect: dialect}}
+// BeginAsm starts a new inline-assembly block. Its syntax is governed by
+// the enclosing module's AsmDialect (set via Module.SetAsmDialect).
+func (fb *FunctionBuilder) BeginAsm() *AsmBuilder {
+	return &AsmBuilder{owner: fb, block: AsmBlock{}}
 }
 
 func (ab *AsmBuilder) In(register, ident string) *AsmBuilder {

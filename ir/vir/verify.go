@@ -26,7 +26,7 @@ type verifier struct {
 }
 
 var keywords = map[string]bool{
-	"module": true, "target": true, "struct": true, "fnsig": true, "const": true,
+	"module": true, "target": true, "asmdialect": true, "struct": true, "fnsig": true, "const": true,
 	"global": true, "export": true, "tls": true, "extern": true, "link": true,
 	"shared": true, "static": true, "framework": true, "fn": true, "end": true,
 	"zero": true, "addr": true, "loc": true, "align": true, "syscall": true,
@@ -88,6 +88,26 @@ func (v *verifier) run() error {
 	}
 	if len(m.Links) > 0 && m.Target == nil {
 		return fmt.Errorf("module has a link section but no target declaration (§1.2 rule 10)")
+	}
+
+	// §9.34 — asmdialect declaration. Required whenever the module contains
+	// any asm block; must be valid for the module's target architecture.
+	// Checked once here at module scope rather than per asm block.
+	hasAsm := moduleHasAsm(m)
+	if hasAsm {
+		if m.Target == nil {
+			return fmt.Errorf("module contains asm blocks but has no target declaration (§1.2 rule 10)")
+		}
+		if m.AsmDialect == nil {
+			return fmt.Errorf("module contains asm blocks but has no asmdialect declaration (§1.2 rule 11)")
+		}
+		if !IsDialectValidForArchitecture(m.Target.Arch, *m.AsmDialect) {
+			return fmt.Errorf("asmdialect %q is not valid for architecture %q (§9.34)", *m.AsmDialect, m.Target.Arch)
+		}
+	} else if m.AsmDialect != nil && m.Target != nil {
+		if !IsDialectValidForArchitecture(m.Target.Arch, *m.AsmDialect) {
+			return fmt.Errorf("asmdialect %q is not valid for architecture %q (§9.34)", *m.AsmDialect, m.Target.Arch)
+		}
 	}
 
 	// Structs.
@@ -244,6 +264,20 @@ func (v *verifier) run() error {
 		}
 	}
 	return nil
+}
+
+// moduleHasAsm reports whether any function body contains an asm block.
+func moduleHasAsm(m *Module) bool {
+	for _, f := range m.Functions {
+		for _, b := range f.AllBlocks() {
+			for _, ln := range b.Lines {
+				if ln.Asm != nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (v *verifier) checkParams(fn string, params []Param, ret Type, isExtern bool) error {
@@ -975,20 +1009,18 @@ func (v *verifier) checkTerminator(f *Function, b *Block) error {
 // Inline assembly checks (§4, §9.34–41).
 // ---------------------------------------------------------------------------
 
-// checkAsmBlockStructure enforces target consistency, register-table
-// membership, binding well-formedness, width agreement (where the bound
-// ident's type is already known), and asm-local label scoping. It also
-// fixes the type of first-occurrence `out` idents, mirroring the ordinary
-// instruction type-fixation pass, since asm `out` follows the Join
-// Convention (§4).
+// checkAsmBlockStructure enforces register-table membership, binding
+// well-formedness, width agreement (where the bound ident's type is already
+// known), and asm-local label scoping. It also fixes the type of
+// first-occurrence `out` idents, mirroring the ordinary instruction
+// type-fixation pass, since asm `out` follows the Join Convention (§4).
+//
+// Target-decl presence and asmdialect validity for the architecture are
+// checked once at module scope in run() (§9.34), so by the time this is
+// called v.m.Target and v.m.AsmDialect are known to be present and
+// consistent with each other.
 func (v *verifier) checkAsmBlockStructure(a *AsmBlock, types map[string]Type) error {
-	if v.m.Target == nil {
-		return fmt.Errorf("asm block requires a module target-decl (§9.34)")
-	}
 	arch := v.m.Target.Arch
-	if !IsDialectValidForArchitecture(arch, a.Dialect) {
-		return fmt.Errorf("asm dialect %q is not valid for architecture %q (§9.34)", a.Dialect, arch)
-	}
 	regTable := RegisterTableForArchitecture(arch)
 	if regTable == nil {
 		return fmt.Errorf("no register table available for architecture %q (§9.34/35)", arch)

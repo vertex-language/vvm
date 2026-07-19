@@ -42,6 +42,11 @@ func Decode(data []byte) (m *vir.Module, err error) {
 		m.Target = t
 	}
 
+	if r.b() == 1 {
+		d := vir.AsmDialect(r.str())
+		m.AsmDialect = &d
+	}
+
 	for n := r.u(); n > 0; n-- {
 		s := &vir.Struct{Name: r.str()}
 		for k := r.u(); k > 0; k-- {
@@ -313,11 +318,12 @@ func (r *reader) instruction() vir.Instruction {
 }
 
 // ---------------------------------------------------------------------------
-// Inline assembly
+// Inline assembly. The block's dialect is no longer read here: it comes
+// from the module-scoped AsmDialect header field (see Decode above).
 // ---------------------------------------------------------------------------
 
 func (r *reader) asmBlock() vir.AsmBlock {
-	a := vir.AsmBlock{Dialect: vir.AsmDialect(r.str())}
+	a := vir.AsmBlock{}
 	for n := r.u(); n > 0; n-- {
 		a.Bindings = append(a.Bindings, r.asmBinding())
 	}

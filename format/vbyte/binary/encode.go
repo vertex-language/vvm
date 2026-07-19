@@ -14,11 +14,13 @@ import (
 )
 
 // Format header: magic + one format-version byte. Bump the version on any
-// incompatible layout change. v2 adds inline-asm body lines (BodyLine) and
-// tracks the ir/vir rename from Fn/Const/Inst-style names.
+// incompatible layout change. v2 added inline-asm body lines (BodyLine) and
+// tracked the ir/vir rename from Fn/Const/Inst-style names. v3 moves
+// AsmDialect from a per-asm-block field to a module-scoped header field
+// (§1.2 rule 11), matching the module.go/ir.md update.
 var magic = []byte{'V', 'B', 'Y', 'T'}
 
-const version = 2
+const version = 3
 
 // Encode serializes an (assumed verified) module to .vbyte bytes.
 func Encode(m *vir.Module) ([]byte, error) {
@@ -36,6 +38,13 @@ func Encode(m *vir.Module) ([]byte, error) {
 		for _, t := range m.Target.Tiers {
 			w.str(t)
 		}
+	} else {
+		w.b(0)
+	}
+
+	if m.AsmDialect != nil {
+		w.b(1)
+		w.str(string(*m.AsmDialect))
 	} else {
 		w.b(0)
 	}
@@ -327,11 +336,12 @@ func (w *writer) instruction(i vir.Instruction) {
 }
 
 // ---------------------------------------------------------------------------
-// Inline assembly (module.go §4)
+// Inline assembly (module.go §4). The block's dialect is no longer encoded
+// here: it comes from the module-scoped AsmDialect header field (see
+// Encode above), per §1.2 rule 11.
 // ---------------------------------------------------------------------------
 
 func (w *writer) asmBlock(a vir.AsmBlock) {
-	w.str(string(a.Dialect))
 	w.u(uint64(len(a.Bindings)))
 	for _, bind := range a.Bindings {
 		w.asmBinding(bind)
