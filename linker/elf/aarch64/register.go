@@ -41,7 +41,7 @@ func init() {
 	// allows (freebsd, android) return nil until verified rather than
 	// guessed.
 	elf.RegisterDefaultNamespace(elf.ArchARM64, func(t elf.Target) []string {
-		if t.OS != "linux" {
+		if t.OS != elf.OSLinux {
 			return nil
 		}
 		switch t.ABI {

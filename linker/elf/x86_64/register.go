@@ -24,13 +24,12 @@ func init() {
 	})
 	// Default namespace (§7.4) for anonymous extern groups (`extern :`).
 	// Only linux's gnu/musl ABIs have a well-known, unversioned libc
-	// soname; every other (os, abi) this arch's elfMatrix allows
-	// (freebsd/netbsd/openbsd/android's gnu variants) returns nil
-	// deliberately rather than guessing a path — add an entry here only
-	// once it's actually been verified, don't extrapolate from the linux
-	// case.
+	// soname; every other OS this arch's elfMatrix allows (freebsd,
+	// netbsd, openbsd, android) returns nil deliberately rather than
+	// guessing a path — add an entry here only once it's actually been
+	// verified, don't extrapolate from the linux case.
 	elf.RegisterDefaultNamespace(elf.ArchX86_64, func(t elf.Target) []string {
-		if t.OS != "linux" {
+		if t.OS != elf.OSLinux {
 			return nil
 		}
 		switch t.ABI {
