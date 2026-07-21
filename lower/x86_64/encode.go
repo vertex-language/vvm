@@ -1,8 +1,10 @@
+// lower/x86_64/encode.go
 package x86_64
 
 import (
 	"fmt"
 
+	isax86_64 "github.com/vertex-language/vvm/isa/x86_64"
 	"github.com/vertex-language/vvm/isa/x86_64/encoder"
 )
 
@@ -31,19 +33,19 @@ func assemble(insts []Inst, fr *Frame) ([]byte, []encoder.Fixup, error) {
 
 func prologue(localBytes int32) []encoder.Inst {
 	insts := []encoder.Inst{
-		{Op: "push", S: encoder.R(isax86_64RBP)},
-		{Op: "mov", D: encoder.R(isax86_64RBP), S: encoder.R(isax86_64RSP), Sz: 8},
+		{Op: "push", S: encoder.R(isax86_64.RBP)},
+		{Op: "mov", D: encoder.R(isax86_64.RBP), S: encoder.R(isax86_64.RSP), Sz: 8},
 	}
 	if localBytes > 0 {
-		insts = append(insts, encoder.Inst{Op: "sub", D: encoder.R(isax86_64RSP), S: encoder.Imm(int64(localBytes)), Sz: 8})
+		insts = append(insts, encoder.Inst{Op: "sub", D: encoder.R(isax86_64.RSP), S: encoder.Imm(int64(localBytes)), Sz: 8})
 	}
 	return insts
 }
 
 func epilogue() []encoder.Inst {
 	return []encoder.Inst{
-		{Op: "mov", D: encoder.R(isax86_64RSP), S: encoder.R(isax86_64RBP), Sz: 8},
-		{Op: "pop", D: encoder.R(isax86_64RBP)},
+		{Op: "mov", D: encoder.R(isax86_64.RSP), S: encoder.R(isax86_64.RBP), Sz: 8},
+		{Op: "pop", D: encoder.R(isax86_64.RBP)},
 	}
 }
 
@@ -56,7 +58,7 @@ func resolveSlots(insts []Inst, fr *Frame) error {
 		if !ok {
 			return fmt.Errorf("encode: value %q has no frame slot", o.Slot)
 		}
-		*o = Opr{K: KMem, Base: isax86_64RBP, Disp: d}
+		*o = Opr{K: KMem, Base: isax86_64.RBP, Disp: d}
 		return nil
 	}
 	for i := range insts {

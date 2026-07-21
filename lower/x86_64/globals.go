@@ -1,3 +1,4 @@
+// lower/x86_64/globals.go
 package x86_64
 
 import (
@@ -5,6 +6,7 @@ import (
 	"math"
 
 	"github.com/vertex-language/vvm/ir/vir"
+	"github.com/vertex-language/vvm/isa/x86_64/encoder"
 )
 
 // ---------------------------------------------------------------------------
@@ -41,7 +43,7 @@ func (lw *lowerer) lowerGlobal(g *vir.Global) (Global, error) {
 type dataw struct {
 	lay *Layout
 	b   []byte
-	fx  []Fixup
+	fx  []encoder.Fixup
 }
 
 func (w *dataw) pad(to int) {
@@ -69,7 +71,7 @@ func (w *dataw) emit(init vir.ConstInit, t vir.Type) error {
 		w.b = append(w.b, x.Data...)
 		return nil
 	case vir.InitAddressOf:
-		w.fx = append(w.fx, Fixup{Offset: uint32(len(w.b)), Symbol: x.Name, Kind: FixupAbs64})
+		w.fx = append(w.fx, encoder.Fixup{Offset: uint32(len(w.b)), Symbol: x.Name, Kind: encoder.FixupAbs64})
 		w.le(0, 8)
 		return nil
 	case vir.InitLiteral:
