@@ -691,7 +691,7 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		if err := fl.load(a[2], vir.I64, encoder.X2, false); err != nil {
 			return err
 		}
-		back, bloop, floop, done := fl.label(), fl.label(), fl.label()
+		back, bloop, floop, done := fl.label(), fl.label(), fl.label(), fl.label()
 		fl.emit(Inst{Op: "cmp", Sz: 8, D: R(encoder.X1), S: R(encoder.X0)})
 		fl.emit(Inst{Op: "bcc", Cc: encoder.CondLO, Lbl: back})
 		fl.emit(Inst{Op: "movimm", D: R(rIDX), Imm: 0})
