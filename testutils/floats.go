@@ -1,0 +1,252 @@
+// floats.go
+package main
+
+import "github.com/vertex-language/vvm/ir/vir"
+
+// f32/f64 literals, arithmetic, min/max's IEEE-754-2019 semantics (NaN
+// propagation, ordered signed zero), float comparisons, fpromote/fdemote,
+// and int<->float conversions (ir.md §4 "Float Semantics", "Conversions").
+
+func init() {
+	register(testCase{
+		name:       "float_literal_f64",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return f64PrintingModule("float_literal_f64", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "mov", vir.F64, vir.FloatLiteral(3.5))
+			})
+		},
+		wantFloatValue: fval(3.5),
+	})
+
+	register(testCase{
+		name:       "float_literal_f32",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return f32PrintingModule("float_literal_f32", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "mov", vir.F32, vir.FloatLiteral(2.5))
+			})
+		},
+		wantFloatValue: fval(2.5),
+	})
+
+	register(testCase{
+		name:       "float_add",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return f64PrintingModule("float_add", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "add", vir.F64, vir.FloatLiteral(1.25), vir.FloatLiteral(2.5))
+			})
+		},
+		wantFloatValue: fval(3.75),
+	})
+
+	register(testCase{
+		name:       "float_sub",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return f64PrintingModule("float_sub", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "sub", vir.F64, vir.FloatLiteral(5.0), vir.FloatLiteral(1.5))
+			})
+		},
+		wantFloatValue: fval(3.5),
+	})
+
+	register(testCase{
+		name:       "float_mul",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return f64PrintingModule("float_mul", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "mul", vir.F64, vir.FloatLiteral(2.5), vir.FloatLiteral(4.0))
+			})
+		},
+		wantFloatValue: fval(10.0),
+	})
+
+	register(testCase{
+		name:       "float_sqrt",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return f64PrintingModule("float_sqrt", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "sqrt", vir.F64, vir.FloatLiteral(81.0))
+			})
+		},
+		wantFloatValue: fval(9.0),
+	})
+
+	// --- min/max: NaN propagates.
+	register(testCase{
+		name:       "float_min_nan_propagates",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return f64PrintingModule("float_min_nan", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "min", vir.F64, vir.FloatLiteral(nan()), vir.FloatLiteral(5.0))
+			})
+		},
+		wantFloatValue: fval(nan()),
+	})
+
+	register(testCase{
+		name:       "float_max_nan_propagates",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return f64PrintingModule("float_max_nan", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "max", vir.F64, vir.FloatLiteral(nan()), vir.FloatLiteral(5.0))
+			})
+		},
+		wantFloatValue: fval(nan()),
+	})
+
+	// --- min/max: signed zero is ordered (-0.0 < +0.0).
+	register(testCase{
+		name:       "float_min_signed_zero",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return f64PrintingModule("float_min_zero", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "min", vir.F64, vir.FloatLiteral(negZero()), vir.FloatLiteral(0.0))
+			})
+		},
+		wantFloatValue: fval(negZero()),
+	})
+
+	register(testCase{
+		name:       "float_max_signed_zero",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return f64PrintingModule("float_max_zero", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "max", vir.F64, vir.FloatLiteral(negZero()), vir.FloatLiteral(0.0))
+			})
+		},
+		wantFloatValue: fval(0.0),
+	})
+
+	// --- comparisons: lt/gt/le/ge, including NaN unordered (always false).
+	register(testCase{
+		name:       "float_cmp_lt_true",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return i32PrintingModule("float_cmp_lt", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				cond := fb.Emit("cond", "lt", vir.F64, vir.FloatLiteral(3.0), vir.FloatLiteral(5.0))
+				return fb.Emit("v", "select", vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
+			})
+		},
+		wantValue: val(1),
+	})
+
+	register(testCase{
+		name:       "float_cmp_nan_is_unordered",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return i32PrintingModule("float_cmp_nan", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				cond := fb.Emit("cond", "lt", vir.F64, vir.FloatLiteral(nan()), vir.FloatLiteral(5.0))
+				return fb.Emit("v", "select", vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
+			})
+		},
+		wantValue: val(0),
+	})
+
+	// --- fpromote / fdemote.
+	register(testCase{
+		name:       "float_fpromote",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return f64PrintingModule("float_fpromote", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				v := fb.Emit("v", "mov", vir.F32, vir.FloatLiteral(1.5))
+				return fb.Emit("p", "fpromote", vir.F64, v)
+			})
+		},
+		wantFloatValue: fval(1.5),
+	})
+
+	register(testCase{
+		name:       "float_fdemote",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			// f32PrintingModule re-promotes for the printf boundary, so this
+			// still checks that fdemote itself landed on the right value.
+			return f32PrintingModule("float_fdemote", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				v := fb.Emit("v", "mov", vir.F64, vir.FloatLiteral(2.5))
+				return fb.Emit("d", "fdemote", vir.F32, v)
+			})
+		},
+		wantFloatValue: fval(2.5),
+	})
+
+	// --- int <-> float conversions.
+	register(testCase{
+		name:       "convert_sfromint",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return f64PrintingModule("convert_sfromint", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "sfromint", vir.F64, vir.IntLiteral(-5))
+			})
+		},
+		wantFloatValue: fval(-5.0),
+	})
+
+	register(testCase{
+		name:       "convert_ufromint",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return f64PrintingModule("convert_ufromint", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "ufromint", vir.F64, vir.IntLiteral(200))
+			})
+		},
+		wantFloatValue: fval(200.0),
+	})
+
+	register(testCase{
+		name:       "convert_stoint_sat_clamps_high",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return i32PrintingModule("convert_stoint_sat", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "stoint_sat", vir.I32, vir.FloatLiteral(1e20))
+			})
+		},
+		wantValue: val(2147483647),
+	})
+
+	register(testCase{
+		name:       "convert_utoint_sat_clamps_negative_to_zero",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return i32PrintingModule("convert_utoint_sat", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "utoint_sat", vir.I32, vir.FloatLiteral(-5.0))
+			})
+		},
+		wantValue: val(0),
+	})
+
+	register(testCase{
+		name:       "convert_stoint_in_range",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return i32PrintingModule("convert_stoint", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", "stoint", vir.I32, vir.FloatLiteral(42.9)) // truncates toward zero
+			})
+		},
+		wantValue: val(42),
+	})
+}
+
+func nan() float64 { return floatNaN }
+func negZero() float64 { return floatNegZero }

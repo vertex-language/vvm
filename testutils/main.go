@@ -1,38 +1,43 @@
-// runner.go
+// main.go
 package main
 
 import (
 	"fmt"
+	"math"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
-	"os"
+
 	"github.com/vertex-language/vvm"
 	"github.com/vertex-language/vvm/ir/vir"
 )
 
 // testCase is one isolated, in-memory vir.Module check. Each case checks
-// exactly one thing: either a single printed integer, or an exit code —
-// never both, never a combination of several opcodes' worth of behavior
+// exactly one thing: a single printed integer, a single printed float, or
+// an exit code — never a combination of several opcodes' worth of behavior
 // in one build func. If a case's build func needs a loop or a branch to
-// express what it's testing, it almost certainly belongs to a different,
-// not-yet-written file (control flow, tailcalls, etc.) rather than here.
+// express what it's testing, it almost certainly belongs in control_flow.go
+// rather than wherever you were about to put it.
 type testCase struct {
 	name       string
 	hostArches []string // vir-canonical arch names this case can run on; nil = any
 	hostOSes   []string // vir-canonical os names this case can run on; nil = any
 	build      func(arch, osName string) *vir.Module
-	wantValue  *int64 // checked against parsed stdout when non-nil
-	wantExit   int
+
+	wantValue      *int64   // checked against parsed integer stdout when non-nil
+	wantFloatValue *float64 // checked against parsed float stdout when non-nil (see floatMatches)
+	wantExit       int
 }
 
 var registry []testCase
 
-// register is called from each file's own init() — a new case is "add a
-// file, call register," nothing else to wire up.
+// register is called from each file's own init() — a new case is "add it
+// to the right grouped file, call register," nothing else to wire up.
 func register(c testCase) { registry = append(registry, c) }
 
-func val(v int64) *int64 { return &v }
+func val(v int64) *int64      { return &v }
+func fval(v float64) *float64 { return &v }
 
 func hostArch() (string, bool) {
 	switch runtime.GOARCH {
@@ -70,6 +75,24 @@ func matches(list []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// floatMatches compares a parsed float result against an expected value.
+// math.NaN() as want means "expect NaN"; want == 0 additionally checks the
+// sign bit, since min/max's signed-zero behavior (ir.md §4) is exactly the
+// kind of thing plain == would silently paper over (-0.0 == 0.0 in IEEE).
+// Everything else is an epsilon compare, since printf's "%f" only carries
+// six decimal digits.
+func floatMatches(got, want float64) bool {
+	if math.IsNaN(want) {
+		return math.IsNaN(got)
+	}
+	if want == 0 {
+		return got == 0 && math.Signbit(got) == math.Signbit(want)
+	}
+	diff := math.Abs(got - want)
+	tol := 1e-6 * math.Max(1, math.Abs(want))
+	return diff <= tol
 }
 
 // run executes every registered case applicable to the host, prints one
@@ -111,6 +134,17 @@ func run() int {
 			} else {
 				fmt.Printf("PASS  %-28s = %d\n", c.name, got)
 			}
+		case c.wantFloatValue != nil:
+			got, perr := strconv.ParseFloat(strings.TrimSpace(string(res.Stdout)), 64)
+			if perr != nil {
+				failed++
+				fmt.Printf("FAIL  %-28s stdout %q not a plain float: %v\n", c.name, res.Stdout, perr)
+			} else if !floatMatches(got, *c.wantFloatValue) {
+				failed++
+				fmt.Printf("FAIL  %-28s value = %v, want %v\n", c.name, got, *c.wantFloatValue)
+			} else {
+				fmt.Printf("PASS  %-28s = %v\n", c.name, got)
+			}
 		default:
 			fmt.Printf("PASS  %-28s (exit %d)\n", c.name, res.ExitCode)
 		}
@@ -123,6 +157,6 @@ func run() int {
 	return 0
 }
 
-func main() { 
-	os.Exit(run()) 
+func main() {
+	os.Exit(run())
 }
