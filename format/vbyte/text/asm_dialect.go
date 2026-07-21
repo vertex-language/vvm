@@ -1,6 +1,7 @@
 package text
 
 import (
+	"fmt"
 	"strconv"
 
 	"github.com/vertex-language/vvm/ir/vir"
@@ -72,17 +73,17 @@ func literalOperand(tk tok) (vir.Operand, error) {
 	case tInt:
 		v, err := strconv.ParseInt(tk.text, 10, 64)
 		if err != nil {
-			return vir.Operand{}, fmtErrorf("bad integer %q: %v", tk.text, err)
+			return vir.Operand{}, fmt.Errorf("bad integer %q: %v", tk.text, err)
 		}
 		return vir.IntLiteral(v), nil
 	case tFloat:
 		v, err := strconv.ParseFloat(tk.text, 64)
 		if err != nil {
-			return vir.Operand{}, fmtErrorf("bad float %q: %v", tk.text, err)
+			return vir.Operand{}, fmt.Errorf("bad float %q: %v", tk.text, err)
 		}
 		return vir.FloatLiteral(v), nil
 	}
-	return vir.Operand{}, fmtErrorf("bad literal token %q", tk.text)
+	return vir.Operand{}, fmt.Errorf("bad literal token %q", tk.text)
 }
 
 // readAsmMemory consumes a full memory operand (optional intel ptr-size

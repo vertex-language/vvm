@@ -5,7 +5,6 @@
 package aarch64
 
 import (
-	"encoding/binary"
 
 	"github.com/vertex-language/vvm/linker/elf"
 )
