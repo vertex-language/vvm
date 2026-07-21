@@ -1,0 +1,36 @@
+// vvm.go
+//
+// Package vvm is the top-level, dev-facing entry point for the vvm
+// toolchain: "give me .vbyte bytes, .vir text, or an already-built
+// *vir.Module, and either build me a binary or run it." Everything
+// below this package (ir/vir, lower/<arch>, object/<arch>,
+// objectwriter/<arch>, linker/<format>) stays independently importable
+// and knows nothing about this package; this is the one place allowed
+// to import all of them at once and pick the right combination for a
+// given target, the same "straddling" role linker/<format> plays one
+// layer down for object/objectfile.
+package vvm
+
+import (
+	"bytes"
+
+	"github.com/vertex-language/vvm/format/vbyte/binary"
+	"github.com/vertex-language/vvm/format/vbyte/text"
+	"github.com/vertex-language/vvm/ir/vir"
+)
+
+// decodeModule accepts either serialization vvm knows how to read and
+// returns an unverified *vir.Module — same contract format/vbyte/{binary,text}
+// document: decode checks framing/syntax only, verification is the caller's
+// job (done once, centrally, in build.go).
+//
+// .vbyte is sniffed by its documented magic ("VBYT"); anything else is
+// handed to the text decoder. There's no ambiguity case: a real .vir file
+// can never start with those four bytes, since '.vir' text always opens
+// with the "module" keyword.
+func decodeModule(src []byte) (*vir.Module, error) {
+	if bytes.HasPrefix(src, []byte("VBYT")) {
+		return binary.Decode(src)
+	}
+	return text.Decode(src)
+}
