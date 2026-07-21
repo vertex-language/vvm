@@ -373,7 +373,7 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 				fl.emit(Inst{Op: "bcc", Cc: encoder.CondNE, Lbl: skip})
 				min := int64(math.MinInt64)
 				if bitsOf(t) == 32 {
-					min = int64(uint32(math.MinInt32))
+					min = math.MinInt32
 				}
 				fl.emit(Inst{Op: "movimm", D: R(encoder.X2), Imm: min})
 				fl.emit(Inst{Op: "cmp", Sz: sz, D: R(encoder.X0), S: R(encoder.X2)})
@@ -691,7 +691,7 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		if err := fl.load(a[2], vir.I64, encoder.X2, false); err != nil {
 			return err
 		}
-		back, bloop, floop, done := fl.label(), fl.label(), fl.label(), fl.label()
+		back, bloop, floop, done := fl.label(), fl.label(), fl.label()
 		fl.emit(Inst{Op: "cmp", Sz: 8, D: R(encoder.X1), S: R(encoder.X0)})
 		fl.emit(Inst{Op: "bcc", Cc: encoder.CondLO, Lbl: back})
 		fl.emit(Inst{Op: "movimm", D: R(rIDX), Imm: 0})
