@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-
+	"os"
 	"github.com/vertex-language/vvm"
 	"github.com/vertex-language/vvm/ir/vir"
 )
