@@ -396,6 +396,13 @@ func (p *parser) parseExternGroup(m *vir.Module) error {
 
 // parseFnHead parses `name(params) ret attrs*` after the fn keyword. Shared
 // by extern-fn lines (above) and fn definitions (func.go).
+//
+// Note: `entry` is accepted here structurally for both extern-fn and fn
+// definitions, since this parser function is shared and the grammar's
+// fn-attr production (§1.1) lists `entry` unconditionally. Whether `entry`
+// is actually *meaningful* only on fn definitions (vs. extern fn, where it
+// wouldn't make sense) is left to Verify (§9.4a) rather than rejected here
+// at parse time.
 func parseFnHead(c *lc) (string, []vir.Param, bool, vir.Type, []vir.FunctionAttribute, error) {
 	name, err := c.expectIdent()
 	if err != nil {
@@ -466,7 +473,7 @@ func parseFnHead(c *lc) (string, []vir.Param, bool, vir.Type, []vir.FunctionAttr
 			break
 		}
 		switch tk.text {
-		case "noreturn", "readonly", "inline", "noinline", "cold":
+		case "noreturn", "readonly", "inline", "noinline", "cold", "entry":
 			attrs = append(attrs, vir.FunctionAttribute(tk.text))
 			c.next()
 		default:
