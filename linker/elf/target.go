@@ -78,6 +78,13 @@ const TierNone Tier = ""
 
 // Target is the (arch, os, abi[, tier]) triple. Arch is the same uint16
 // e_machine-derived space used throughout this package (ArchX86_64, …).
+//
+// NOTE: ArchRISCV32/ArchRISCV64 share one e_machine value, as do
+// ArchMIPS/ArchMIPS64 (see types.go) — real ELF files disambiguate via
+// EI_CLASS, but a bare Target triple here cannot. Anything keyed on Arch
+// alone (archSpellingRev, elfMatrix, String()'s BE-spelling switch) treats
+// each such pair as a single entry; ParseTarget itself still round-trips
+// correctly because it keys off the input string, not off Arch.
 type Target struct {
 	Arch      Arch
 	OS        OS
@@ -115,17 +122,22 @@ var archSpelling = map[string]archInfo{
 
 // archSpellingRev gives the canonical little-endian (or only) spelling for
 // String(); big-endian variants are special-cased there.
+//
+// ArchRISCV32 and ArchRISCV64 are the same numeric value (0xF3), as are
+// ArchMIPS and ArchMIPS64 (0x08) — see the Target doc comment above — so
+// each pair gets a single entry here rather than two conflicting ones.
+// This means String() can't tell riscv32 from riscv64 (or mips32 from
+// mips64) apart at the Arch level; that ambiguity is pre-existing, not
+// introduced by this fix.
 var archSpellingRev = map[Arch]string{
 	ArchX86_64:      "x86_64",
 	ArchX86:         "x86",
 	ArchARM:         "arm",
 	ArchARM64:       "aarch64",
-	ArchRISCV32:     "riscv32",
-	ArchRISCV64:     "riscv64",
+	ArchRISCV64:     "riscv64", // also covers ArchRISCV32 (same numeric value)
 	ArchPowerPC:     "powerpc",
 	ArchPowerPC64:   "powerpc64le",
-	ArchMIPS:        "mips32el",
-	ArchMIPS64:      "mips64el",
+	ArchMIPS:        "mips32el", // also covers ArchMIPS64 (same numeric value)
 	ArchLoongArch64: "loongarch64",
 	ArchS390X:       "s390x",
 }
@@ -177,7 +189,10 @@ func ParseTarget(s string) (Target, error) {
 	return t, nil
 }
 
-// String round-trips ParseTarget's canonical spelling.
+// String round-trips ParseTarget's canonical spelling, except that it
+// cannot distinguish riscv32 from riscv64 or mips32 from mips64 — those
+// pairs share one e_machine value at the Arch level (see the Target doc
+// comment above), so both spell the same way here.
 func (t Target) String() string {
 	arch := archSpellingRev[t.Arch]
 	if t.BigEndian {
@@ -186,10 +201,8 @@ func (t Target) String() string {
 			arch = "aarch64_be"
 		case ArchARM:
 			arch = "armeb"
-		case ArchMIPS:
+		case ArchMIPS: // also covers ArchMIPS64 (same numeric value)
 			arch = "mips32"
-		case ArchMIPS64:
-			arch = "mips64"
 		case ArchPowerPC64:
 			arch = "powerpc64"
 		}
@@ -207,6 +220,10 @@ func (t Target) WithTier(tier Tier) Target {
 }
 
 // elfMatrix enumerates every (arch, os) → allowed ABI set for the ELF format.
+//
+// ArchRISCV32/ArchRISCV64 and ArchMIPS/ArchMIPS64 each share one numeric
+// Arch value (see the Target doc comment above), so each pair is folded
+// into a single entry here — the union of what either variant allows.
 var elfMatrix = map[Arch]map[OS][]ABI{
 	ArchX86_64: {
 		OSLinux: {ABIGNU, ABIMusl}, OSFreeBSD: {ABIGNU}, OSNetBSD: {ABIGNU}, OSOpenBSD: {ABIGNU}, OSAndroid: {ABIGNU},
@@ -221,12 +238,12 @@ var elfMatrix = map[Arch]map[OS][]ABI{
 	ArchARM64: {
 		OSLinux: {ABIGNU, ABIMusl}, OSFreeBSD: {ABIGNU}, OSAndroid: {ABIGNU},
 	},
-	ArchRISCV32:     {OSLinux: {ABIGNU, ABIMusl}},
+	// Covers both ArchRISCV32 and ArchRISCV64 (same numeric value).
 	ArchRISCV64:     {OSLinux: {ABIGNU, ABIMusl}, OSFreeBSD: {ABIGNU}},
 	ArchPowerPC:     {OSLinux: {ABIGNU, ABIMusl}},
 	ArchPowerPC64:   {OSLinux: {ABIGNU, ABIMusl}},
+	// Covers both ArchMIPS and ArchMIPS64 (same numeric value).
 	ArchMIPS:        {OSLinux: {ABIGNU, ABIMusl}},
-	ArchMIPS64:      {OSLinux: {ABIGNU, ABIMusl}},
 	ArchLoongArch64: {OSLinux: {ABIGNU, ABIMusl}},
 	ArchS390X:       {OSLinux: {ABIGNU, ABIMusl}},
 }
