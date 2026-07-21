@@ -16,6 +16,37 @@ var dosStub = [sizeDOSStub]byte{
 	0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00,
 }
 
+// EmitImports carries the import-directory geometry computed by
+// computeIdataGeom/fillImports so emitPE can populate the IMPORT and IAT
+// data directory entries without recomputing anything. Nil when the link
+// has no PLT symbols (no .idata was ever injected).
+type EmitImports struct {
+	ImportDirRVA  uint32
+	ImportDirSize uint32
+	IATRVA        uint32
+	IATSize       uint32
+}
+
+// EmitRequest is everything emitPE needs to serialise a laid-out image. It is
+// built by Linker.Link once AssignLayout, ResolveSymbolAddresses, PatchPLT,
+// fillImports, PatchAll, and (conditionally) buildBaseRelocSection have all
+// run — emitPE itself invents no addresses and performs no further linking
+// work, it only packs file offsets and writes bytes.
+type EmitRequest struct {
+	OutputType OutputType
+	Target     Target
+	Layout     *Layout
+	Entry      string
+	Symtab     *SymbolTable
+	Imports    *EmitImports
+
+	MajorOSVersion         uint16
+	MinorOSVersion         uint16
+	MajorSubsystemVersion  uint16
+	MinorSubsystemVersion  uint16
+	Subsystem              Subsystem
+}
+
 type peSection struct {
 	name    string
 	ms      *MergedSection
