@@ -67,6 +67,9 @@ Usage:
       --min-os-version string  required for macos/ios/watchos/tvos/visionos
                                 targets, e.g. "14.0"
 
+  The <file> argument may appear anywhere relative to the flags — before,
+  after, or between them.
+
 Target triples (see docs/ir.md §10 for the canonical vocabulary):
   arch: x86, x86_64, arm, armeb, aarch64, aarch64_be, ...
   os:   linux, macos, ios, watchos, tvos, visionos, windows, uefi, none, ...
@@ -80,24 +83,81 @@ Examples:
   vvm build add.vbyte --target x86_64-linux-gnu -o add
   vvm build add.vir --target aarch64-macos-none --min-os-version 14.0 -o add
   vvm build hastarget.vir -o hastarget   // target read from the file itself
+  vvm build main.vir -o main             // file first, flags after — also fine
 `)
+}
+
+// splitPositional pulls the single expected positional argument (the input
+// file path) out of args, wherever it falls relative to the flags, and
+// returns it along with the remaining arguments in their original relative
+// order for flag.FlagSet to parse.
+//
+// This exists because flag.FlagSet.Parse stops scanning for flags at the
+// first argument that doesn't itself look like a flag (i.e. doesn't start
+// with "-") — it does not permute a mixed positional/flag command line the
+// way a getopt-style parser would. "vvm build main.vir -o main" therefore
+// cannot be handed to fs.Parse as-is: it would see "main.vir" first, stop
+// immediately, and report NArg()==3 with -o/main never recognized as a
+// flag at all. Extracting the lone positional first, and only ever calling
+// fs.Parse on the flag-only remainder, sidesteps that entirely regardless
+// of where the file path was typed.
+//
+// This only works because vvm's subcommands take exactly one positional
+// argument and no flag takes a bare (unattached) value that could be
+// confused for it; a subcommand needing repeated or optional positionals
+// would need a different scheme.
+func splitPositional(args []string) (positional string, rest []string, ok bool) {
+	for i, a := range args {
+		if a == "" || a[0] == '-' {
+			continue
+		}
+		// Not a flag itself — but if the immediately preceding argument
+		// was a flag expecting a separate value (e.g. "-o main"), this
+		// token belongs to that flag, not to us. We can't know here
+		// which flags take values without duplicating the FlagSet's own
+		// definitions, so the caller is required to only pass flags that
+		// use "=" or are boolean when mixing with a positional... this
+		// package instead sidesteps the ambiguity by only having flags
+		// that vvm's own flag set defines, checked below via a lookahead
+		// against known value-taking flag names.
+		if i > 0 && isValueFlag(args[i-1]) {
+			continue
+		}
+		positional = a
+		rest = append(append([]string{}, args[:i]...), args[i+1:]...)
+		return positional, rest, true
+	}
+	return "", args, false
+}
+
+// isValueFlag reports whether a is one of vvm's own flags that consumes a
+// separate following argument as its value (as opposed to "--flag=value"
+// form, which splitPositional already leaves alone since the value is
+// fused into the same token and never mistaken for the positional).
+func isValueFlag(a string) bool {
+	switch a {
+	case "-o", "--o", "-target", "--target", "-min-os-version", "--min-os-version":
+		return true
+	}
+	return false
 }
 
 // --- vvm run --------------------------------------------------------------
 
 func cmdRun(args []string) int {
+	path, rest, ok := splitPositional(args)
+
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: vvm run <file.vir|file.vbyte>")
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
-	if fs.NArg() != 1 {
+	if !ok || fs.NArg() != 0 {
 		fs.Usage()
 		return 2
 	}
-	path := fs.Arg(0)
 
 	src, err := os.ReadFile(path)
 	if err != nil {
@@ -119,6 +179,8 @@ func cmdRun(args []string) int {
 // --- vvm build -------------------------------------------------------------
 
 func cmdBuild(args []string) int {
+	path, rest, ok := splitPositional(args)
+
 	fs := flag.NewFlagSet("build", flag.ContinueOnError)
 	var (
 		targetStr    string
@@ -131,14 +193,13 @@ func cmdBuild(args []string) int {
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: vvm build <file.vir|file.vbyte> [--target <triple>] [-o <output>] [--min-os-version <ver>]")
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
-	if fs.NArg() != 1 {
+	if !ok || fs.NArg() != 0 {
 		fs.Usage()
 		return 2
 	}
-	path := fs.Arg(0)
 
 	src, err := os.ReadFile(path)
 	if err != nil {
