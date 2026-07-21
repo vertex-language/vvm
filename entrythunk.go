@@ -88,14 +88,81 @@ func resolveEntryPoint(m *vir.Module, t Target) (string, error) {
 }
 
 // ---------------------------------------------------------------------------
-// x86_64 / linux: raw-syscall entry thunk (no libc call at all, so gnu vs.
-// musl is irrelevant — registered by OS only).
+// x86_64 / linux entry thunk.
 // ---------------------------------------------------------------------------
 
 const sysExitX86_64Linux = 60
 
 func init() {
 	RegisterEntryThunk("x86_64", "linux", synthesizeX86_64LinuxStart)
+}
+
+// linksLibC reports whether m declares the conventional libc dependency
+// (ir.md §7.4's own worked example: `link shared "c"`). This is the same
+// signal dispatch.go's addELFLinkDependencies already special-cases when
+// resolving "c" to the real runtime soname via AddDefaultNamespace — here
+// it answers a different question: not "what file provides libc" but
+// "does this module's stdio go through libc's buffered streams at all,"
+// which determines how _start must terminate the process (see
+// synthesizeX86_64LinuxStart below).
+func linksLibC(m *vir.Module) bool {
+	for _, l := range m.Links {
+		if l.Kind == vir.LinkShared && l.Name == "c" {
+			return true
+		}
+	}
+	return false
+}
+
+// libcExit returns the name of an extern fn matching the standard C
+// `exit(int) noreturn` shape, declaring one on the module's "c" extern
+// group if none already exists.
+//
+// It reuses an existing "exit" declaration rather than blindly appending
+// a new one: a module that already calls exit() itself will have already
+// declared it, and appending a second same-named extern function would
+// collide in the flat namespace (ir.md §1.2 rule 3) and fail the re-Verify
+// BuildModule performs immediately after resolveEntryPoint runs. If a name
+// "exit" exists but doesn't match the shape we need, that's a genuine
+// conflict — fail loudly rather than silently calling something else's
+// "exit" with the wrong signature.
+func libcExit(m *vir.Module) (string, error) {
+	for _, g := range m.Externs {
+		for _, f := range g.Functions {
+			if f.Name != "exit" {
+				continue
+			}
+			if len(f.Params) == 1 && vir.Equal(f.Params[0].Type, vir.I32) && vir.IsVoid(f.Ret) {
+				return f.Name, nil
+			}
+			return "", fmt.Errorf(
+				"vvm: module already declares extern %q with a signature incompatible "+
+					"with the standard C exit(int) — needed here to flush libc's stdio "+
+					"buffers before the process terminates", f.Name)
+		}
+	}
+	g := externGroupForC(m)
+	g.Functions = append(g.Functions, &vir.ExternFunction{
+		Name:   "exit",
+		Params: []vir.Param{{Name: "code", Type: vir.I32}},
+		Ret:    vir.Void,
+		Attrs:  []vir.FunctionAttribute{vir.AttributeNoReturn},
+	})
+	return "exit", nil
+}
+
+// externGroupForC returns the module's existing extern group for the "c"
+// dependency, or declares a new empty one. A `link shared "c"` line with
+// no matching extern group is legal on its own (ir.md §1.2 rule 8,
+// "link-only dependencies"), so linksLibC having returned true doesn't
+// guarantee a group already exists.
+func externGroupForC(m *vir.Module) *vir.ExternGroup {
+	for _, g := range m.Externs {
+		if g.Dependency == "c" {
+			return g
+		}
+	}
+	return m.DeclareExternGroup("c")
 }
 
 // synthesizeX86_64LinuxStart builds:
@@ -113,9 +180,23 @@ func init() {
 //	    [argc1   = add.i64 argc64, 1]
 //	    [envp_ptr = index.ptr argv_ptr, i64, argc1]  // only if sig wants envp
 //	    ret      = call userMain, <args per sig>
-//	    exitcode = syscall.i32 60, ret                // SYS_exit
-//	    trap                                          // defined halt if it
-//	                                                   // somehow returned
+//
+//	    // Termination is NOT uniformly a raw syscall. A module that links
+//	    // libc (link shared "c") may have routed output through libc's
+//	    // buffered stdio (printf and friends); those buffers only get
+//	    // flushed by libc's own atexit machinery, which runs inside
+//	    // libc's exit(), never inside a bare SYS_exit syscall. Skipping
+//	    // straight to SYS_exit after such a module's main() silently
+//	    // drops any buffered-but-unflushed output — the process exits
+//	    // cleanly, with status 0, and nothing was ever written. So:
+//	    //
+//	    //   if m links libc:
+//	    //     call exit, ret     // flushes stdio, then terminates
+//	    //     unreachable        // required after a noreturn call, §9.30
+//	    //   else:
+//	    //     exitcode = syscall.i32 60, ret   // SYS_exit
+//	    //     trap                              // defined halt if it
+//	    //                                        // somehow returned
 //
 // Assumes Intel asmdialect (set on the module if not already declared);
 // AT&T-dialect modules would need the operands re-spelled, not attempted
@@ -152,8 +233,18 @@ func synthesizeX86_64LinuxStart(m *vir.Module, userMain string, sig vir.MainSign
 	}
 
 	ret := fb.Call("ret", userMain, callArgs...)
-	fb.Syscall("exitcode", vir.I32, vir.IntLiteral(sysExitX86_64Linux), ret)
-	fb.Trap()
+
+	if linksLibC(m) {
+		exitName, err := libcExit(m)
+		if err != nil {
+			return "", err
+		}
+		fb.Call("", exitName, ret) // void result: exit() never returns a value
+		fb.Unreachable()           // required immediately after a noreturn call, §9.30
+	} else {
+		fb.Syscall("exitcode", vir.I32, vir.IntLiteral(sysExitX86_64Linux), ret)
+		fb.Trap()
+	}
 
 	return "_start", nil
 }

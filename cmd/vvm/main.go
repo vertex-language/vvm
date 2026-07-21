@@ -54,11 +54,14 @@ Usage:
       Compile to a temporary native binary for the host platform,
       execute it immediately, and stream its output.
 
-  vvm build <file.vir|file.vbyte> --target <arch-os-abi[tiers]> [-o <output>]
+  vvm build <file.vir|file.vbyte> [--target <arch-os-abi[tiers]>] [-o <output>]
       Compile to a standalone, statically-linked executable.
 
-      --target string       required, e.g. "x86_64-linux-gnu" or
-                             "aarch64-macos-none[avx2]" (see below)
+      --target string       target triple, e.g. "x86_64-linux-gnu" or
+                             "aarch64-macos-none[avx2]" (see below).
+                             Optional if the file carries its own in-file
+                             `+"`target`"+` declaration (ir.md §10.6); required
+                             otherwise. If both are present they must agree.
       -o string              output path (default: input file's base
                               name, extension stripped)
       --min-os-version string  required for macos/ios/watchos/tvos/visionos
@@ -76,6 +79,7 @@ Examples:
   vvm run add.vir
   vvm build add.vbyte --target x86_64-linux-gnu -o add
   vvm build add.vir --target aarch64-macos-none --min-os-version 14.0 -o add
+  vvm build hastarget.vir -o hastarget   // target read from the file itself
 `)
 }
 
@@ -121,11 +125,11 @@ func cmdBuild(args []string) int {
 		output       string
 		minOSVersion string
 	)
-	fs.StringVar(&targetStr, "target", "", "target triple, e.g. x86_64-linux-gnu (required)")
+	fs.StringVar(&targetStr, "target", "", "target triple, e.g. x86_64-linux-gnu (optional if the file declares its own)")
 	fs.StringVar(&output, "o", "", "output path (default: input file's base name)")
 	fs.StringVar(&minOSVersion, "min-os-version", "", "required for macos/ios/watchos/tvos/visionos targets")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: vvm build <file.vir|file.vbyte> --target <triple> [-o <output>] [--min-os-version <ver>]")
+		fmt.Fprintln(os.Stderr, "usage: vvm build <file.vir|file.vbyte> [--target <triple>] [-o <output>] [--min-os-version <ver>]")
 	}
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -136,28 +140,50 @@ func cmdBuild(args []string) int {
 	}
 	path := fs.Arg(0)
 
-	if targetStr == "" {
-		fmt.Fprintln(os.Stderr, "vvm: --target is required for build")
-		fs.Usage()
-		return 2
-	}
-
-	target, err := vvm.ParseTarget(targetStr)
+	src, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "vvm: %v\n", err)
+		return 1
+	}
+
+	// A module with a link section or asm block is per-target by
+	// construction and must carry a target-decl (ir.md §10.6); such a
+	// file's own declaration is authoritative unless the invocation
+	// explicitly overrides it, in which case the two must agree. Sniff
+	// before deciding whether --target was actually required.
+	declared, hasDeclared, derr := vvm.ModuleTarget(src)
+	if derr != nil {
+		fmt.Fprintf(os.Stderr, "vvm: %v\n", derr)
+		return 1
+	}
+
+	var target vvm.Target
+	switch {
+	case targetStr == "" && hasDeclared:
+		target = declared
+	case targetStr == "" && !hasDeclared:
+		fmt.Fprintln(os.Stderr, "vvm: --target is required (file has no in-file target declaration)")
+		fs.Usage()
 		return 2
+	default: // targetStr != ""
+		parsed, err := vvm.ParseTarget(targetStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "vvm: %v\n", err)
+			return 2
+		}
+		if hasDeclared && (parsed.Arch != declared.Arch || parsed.OS != declared.OS || parsed.ABI != declared.ABI) {
+			fmt.Fprintf(os.Stderr,
+				"vvm: --target %s conflicts with the file's own target declaration %s (ir.md §10.6)\n",
+				parsed, declared)
+			return 2
+		}
+		target = parsed
 	}
 	target.MinOSVersion = minOSVersion
 
 	if output == "" {
 		base := filepath.Base(path)
 		output = strings.TrimSuffix(strings.TrimSuffix(base, ".vbyte"), ".vir")
-	}
-
-	src, err := os.ReadFile(path)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "vvm: %v\n", err)
-		return 1
 	}
 
 	out, err := vvm.Build(src, target)
