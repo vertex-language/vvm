@@ -3,14 +3,17 @@
 // arrow 4 of the README taxonomy.
 //
 // The only arch-specific knowledge this package adds is the
-// x86_64.FixupKind -> RelocKind mapping, which for AMD64 is exactly the
+// encoder.FixupKind -> RelocKind mapping, which for AMD64 is exactly the
 // R_X86_64_PLT32 / R_X86_64_PC32 / R_X86_64_64 shape: rel32 branch sites
 // (S+A-P, PLT-eligible), rel32 RIP-relative data references (S+A-P), and
 // 8-byte absolute pointers (S+A). This package does not import objectfile
 // and knows nothing about ELF/COFF/Mach-O.
 package object
 
-import x86_64 "github.com/vertex-language/vvm/lower/x86_64"
+import (
+	"github.com/vertex-language/vvm/isa/x86_64/encoder"
+	x86_64 "github.com/vertex-language/vvm/lower/x86_64"
+)
 
 type SectionKind int
 
@@ -88,11 +91,11 @@ type Reloc struct {
 	Addend int64
 }
 
-func relocKind(k x86_64.FixupKind) RelocKind {
+func relocKind(k encoder.FixupKind) RelocKind {
 	switch k {
-	case x86_64.FixupPCRel32Call:
+	case encoder.FixupPCRel32Call:
 		return RelocPLT32
-	case x86_64.FixupPCRel32:
+	case encoder.FixupPCRel32:
 		return RelocPCRel32
 	}
 	return RelocAbs64
