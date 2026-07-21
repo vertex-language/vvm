@@ -17,7 +17,7 @@ func init() {
 	pe.RegisterSearchDirs(pe.ABIMSVC, func() []string {
 		return []string{`C:\Windows\System32`, `C:\Windows\SysWOW64`, `C:\Windows\System`}
 	})
-	pe.RegisterSearchDirs(pe.ABIGNu(), func() []string {
+	pe.RegisterSearchDirs(pe.ABIGNU, func() []string {
 		return []string{`C:\Windows\System32`, `C:\Windows\SysWOW64`, `C:\Windows\System`}
 	})
 }
