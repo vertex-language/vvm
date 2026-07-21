@@ -16,7 +16,9 @@ func init() {
 		m := vir.NewModule("field_ptr")
 		m.DeclareStruct("Point", vir.Field{Name: "x", Type: vir.I32}, vir.Field{Name: "y", Type: vir.I32})
 
-		fmtG := m.DeclareGlobal("fmt", vir.ArrayType{Elem: vir.I8, Len: 4},
+		// "%d\x00" is 3 bytes: '%', 'd', NUL. No implicit NUL is added (§8),
+		// so the array length must match exactly.
+		fmtG := m.DeclareGlobal("fmt", vir.ArrayType{Elem: vir.I8, Len: 3},
 			vir.InitByteString{Data: []byte("%d\x00")})
 		ext := m.DeclareExternGroup("")
 		ext.DeclareFunction("printf", []vir.Param{{Name: "f", Type: vir.Ptr}}, vir.I32).SetVariadic()

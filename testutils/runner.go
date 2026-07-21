@@ -42,7 +42,9 @@ func val(v int64) *int64 { return &v }
 func intPrintingModule(name string, body func(fb *vir.FunctionBuilder) vir.Operand) *vir.Module {
 	m := vir.NewModule(name)
 
-	fmtG := m.DeclareGlobal("fmt", vir.ArrayType{Elem: vir.I8, Len: 4},
+	// "%d\x00" is 3 bytes: '%', 'd', NUL. No implicit NUL is added (§8),
+	// so the array length must match exactly.
+	fmtG := m.DeclareGlobal("fmt", vir.ArrayType{Elem: vir.I8, Len: 3},
 		vir.InitByteString{Data: []byte("%d\x00")})
 
 	ext := m.DeclareExternGroup("")
