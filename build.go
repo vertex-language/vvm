@@ -38,7 +38,16 @@ func BuildModule(m *vir.Module, t Target) ([]byte, error) {
 		return nil, err
 	}
 
-	l, err := newLinker(t)
+	// newLinker needs m, not just t: whether the module used an anonymous
+	// extern group (§7.4) — and therefore needs the target's default
+	// symbol namespace, e.g. libc on hosted OSes — is a property of the
+	// module, never something inferable from the target triple alone.
+	// A target "looking hosted" (x86_64-linux-gnu) is not the trigger;
+	// os=none modules can and do use named extern groups without ever
+	// touching this path, and the verifier already forbids anonymous
+	// groups on os=none/uefi (§1.2 rule 9), so this can never misfire
+	// there.
+	l, err := newLinker(m, t)
 	if err != nil {
 		return nil, err
 	}

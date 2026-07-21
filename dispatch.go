@@ -156,7 +156,18 @@ func machoObjTarget(t Target) ofmacho.Target {
 // vvm.Target into that package's own native triple grammar and string
 // spelling before calling its ParseTarget — exactly the translation step
 // each format's README says is this package's job, not theirs.
-func newLinker(t Target) (linker interface {
+//
+// m is consulted for exactly one thing: whether it declared an anonymous
+// extern group (§7.4, `extern :`). That — not the target triple's shape —
+// is the sole signal that the module needs the target's default symbol
+// namespace (e.g. libc on hosted OSes) auto-resolved. Named extern groups
+// (`extern "X":`) always resolve against their own explicit `link` line
+// and never touch this path, on any target, including ones that "look
+// hosted." The verifier already refuses anonymous groups on os=none/uefi
+// (§1.2 rule 9), so this can't misfire on bare-metal/kernel targets: if a
+// module reaches here with a non-nil AnonymousExternFunctions, its target
+// is necessarily one where a default namespace is a meaningful concept.
+func newLinker(m *vir.Module, t Target) (linker interface {
 	SetEntryPoint(string)
 	AddObject(name string, data []byte) error
 	Link() ([]byte, error)
@@ -166,6 +177,8 @@ func newLinker(t Target) (linker interface {
 	if err != nil {
 		return nil, err
 	}
+
+	needsDefaultNamespace := len(m.AnonymousExternFunctions()) > 0
 
 	switch f {
 	case formatELF:
@@ -178,6 +191,12 @@ func newLinker(t Target) (linker interface {
 			return nil, fmt.Errorf("vvm: %s: no elf codegen backend registered", t)
 		}
 		l.SetEntryPoint("_start")
+
+		if needsDefaultNamespace {
+			if err := l.AddDefaultNamespace(); err != nil {
+				return nil, fmt.Errorf("vvm: %s: resolving anonymous extern group: %w", t, err)
+			}
+		}
 		return l, nil
 
 	case formatMachO:
@@ -204,6 +223,18 @@ func newLinker(t Target) (linker interface {
 			return nil, fmt.Errorf("vvm: %s: no macho codegen backend registered", t)
 		}
 		l.SetEntryPoint("_main")
+
+		if needsDefaultNamespace {
+			// TODO: linker/macho doesn't expose a default-namespace
+			// equivalent (libSystem auto-link) yet. Fail loudly rather
+			// than silently emitting a binary with unresolved libSystem
+			// symbols — same "no guessing" culture as the ELF path.
+			return nil, fmt.Errorf(
+				"vvm: %s: module uses an anonymous extern group, but "+
+					"default-namespace resolution isn't implemented for "+
+					"Mach-O targets yet — use a named extern group with an "+
+					"explicit `link framework \"...\"`/`link shared \"...\"` instead", t)
+		}
 		return l, nil
 
 	case formatPE:
@@ -230,6 +261,16 @@ func newLinker(t Target) (linker interface {
 			return nil, fmt.Errorf("vvm: %s: no pe codegen backend registered", t)
 		}
 		// entry point left at the arch's registered default (mainCRTStartup, etc.)
+
+		if needsDefaultNamespace {
+			// TODO: same gap as Mach-O above — linker/pe has no default-
+			// namespace (MSVCRT/ucrtbase auto-link) support yet.
+			return nil, fmt.Errorf(
+				"vvm: %s: module uses an anonymous extern group, but "+
+					"default-namespace resolution isn't implemented for "+
+					"PE targets yet — use a named extern group with an "+
+					"explicit `link shared \"...\"` instead", t)
+		}
 		return l, nil
 	}
 

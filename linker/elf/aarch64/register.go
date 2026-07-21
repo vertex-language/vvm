@@ -31,4 +31,28 @@ func init() {
 			"/lib64", "/usr/lib64", "/usr/lib", "/lib",
 		}
 	})
+	// Default namespace (§7.4) for anonymous extern groups (`extern :`).
+	// Mirrors RegisterDefaultInterp's ABI/endianness branching above:
+	// glibc publishes one unversioned soname regardless of endianness
+	// ("libc.so.6" — the ELF e_machine/EI_DATA in the .so itself carries
+	// the endianness, not the soname string), but musl's soname is
+	// arch-qualified and does vary by endianness, same as its ld.so path
+	// above. Only linux is covered; other OSes this arch's elfMatrix
+	// allows (freebsd, android) return nil until verified rather than
+	// guessed.
+	elf.RegisterDefaultNamespace(elf.ArchARM64, func(t elf.Target) []string {
+		if t.OS != "linux" {
+			return nil
+		}
+		switch t.ABI {
+		case elf.ABIGNU:
+			return []string{"libc.so.6"}
+		case elf.ABIMusl:
+			if t.BigEndian {
+				return []string{"libc.musl-aarch64_be.so.1"}
+			}
+			return []string{"libc.musl-aarch64.so.1"}
+		}
+		return nil
+	})
 }

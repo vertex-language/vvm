@@ -332,3 +332,20 @@ func Successors(t Terminator) []string {
 	}
 	return nil // return, tailcall, trap, unreachable
 }
+
+// AnonymousExternFunctions returns the functions declared in the module's
+// anonymous extern group (`extern :`), or nil if the module has none.
+// Per §1.2 rule 9 there is at most one anonymous group per module and
+// empty groups are rejected by the verifier, so the result — if non-nil —
+// is always non-empty. This is the "does this module need the target's
+// default symbol namespace (e.g. libc on hosted OSes)" signal (§7.4):
+// named extern groups always resolve against an explicit `link` line and
+// never trigger any implicit default-namespace lookup.
+func (m *Module) AnonymousExternFunctions() []*ExternFunction {
+	for _, g := range m.Externs {
+		if g.Dependency == "" {
+			return g.Functions
+		}
+	}
+	return nil
+}

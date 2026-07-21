@@ -102,6 +102,52 @@ func (l *Linker) AddDynamicLibrary(name string, data []byte) error {
 	return nil
 }
 
+// AddSystemLibrary locates soname on the linker's configured search path —
+// explicit AddLibraryPath entries, then a sysroot-prefixed copy of the
+// target's registered dirs (if a sysroot is active), then the target's
+// registered dirs unprefixed (searchDirs()'s existing priority order) —
+// and adds it as a dynamic-library dependency, exactly as if its bytes had
+// been handed to AddDynamicLibrary directly. This is the same resolution
+// logic walkSharedDeps already uses for transitive DT_NEEDED dependencies
+// (findShared), just invoked directly against an explicit name instead of
+// from the dependency-walk queue.
+func (l *Linker) AddSystemLibrary(soname string) error {
+	lib, err := l.findShared(soname, nil)
+	if err != nil {
+		return fmt.Errorf("system library %q: %w", soname, err)
+	}
+	l.shared = append(l.shared, lib)
+	return nil
+}
+
+// AddDefaultNamespace adds whatever l.target's registered
+// DefaultNamespaceFunc says provides the target's default symbol namespace
+// (§7.4 — what an anonymous `extern :` group resolves against, e.g. libc
+// on hosted OSes). It is a hard error, not a silent no-op, if l.target's
+// arch has no DefaultNamespaceFunc registered at all — same "fail loudly"
+// stance mustRegistered already takes for missing codegen backends, rather
+// than than quietly emitting a binary with unresolved symbols. A
+// registered function that legitimately has nothing to add for this
+// particular (os, abi) combination returns an empty (not missing) slice,
+// which is not an error — see defaultNamespace in registry.go for the
+// registered/empty distinction.
+func (l *Linker) AddDefaultNamespace() error {
+	sonames, ok := defaultNamespace(l.target)
+	if !ok {
+		return fmt.Errorf(
+			"elf: no default namespace registered for %s (blank-import its "+
+				"subpackage, or use a named extern group with an explicit "+
+				"`link shared \"...\"` instead)",
+			l.target)
+	}
+	for _, soname := range sonames {
+		if err := l.AddSystemLibrary(soname); err != nil {
+			return fmt.Errorf("default namespace for %s: %w", l.target, err)
+		}
+	}
+	return nil
+}
+
 // Link runs all linking phases and returns the native binary bytes.
 func (l *Linker) Link() ([]byte, error) {
 	if err := mustRegistered(l.target); err != nil {
