@@ -2,7 +2,6 @@ package x86_64
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/vertex-language/vvm/ir/vir"
 	isax86_64 "github.com/vertex-language/vvm/isa/x86_64"
