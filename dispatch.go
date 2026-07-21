@@ -157,17 +157,27 @@ func machoObjTarget(t Target) ofmacho.Target {
 // spelling before calling its ParseTarget — exactly the translation step
 // each format's README says is this package's job, not theirs.
 //
-// m is consulted for exactly one thing: whether it declared an anonymous
-// extern group (§7.4, `extern :`). That — not the target triple's shape —
-// is the sole signal that the module needs the target's default symbol
-// namespace (e.g. libc on hosted OSes) auto-resolved. Named extern groups
-// (`extern "X":`) always resolve against their own explicit `link` line
-// and never touch this path, on any target, including ones that "look
-// hosted." The verifier already refuses anonymous groups on os=none/uefi
-// (§1.2 rule 9), so this can't misfire on bare-metal/kernel targets: if a
-// module reaches here with a non-nil AnonymousExternFunctions, its target
-// is necessarily one where a default namespace is a meaningful concept.
-func newLinker(m *vir.Module, t Target) (linker interface {
+// entryPoint is what resolveEntryPoint (entrythunk.go) decided the actual
+// process entry symbol should be — either "_start" (raw, or the
+// newly-synthesized libc-style wrapper) or the `entry`-attributed fn's own
+// name (raw wiring on os=none/uefi, unrecognized signatures, or a fn
+// literally named "_start" already). For a shared-library build
+// (t.Kind == OutputSharedLibrary) no entry point is wired at all — shared
+// libraries have no process entry, only init/fini, which this package
+// doesn't yet synthesize.
+//
+// m is consulted for exactly one other thing: whether it declared an
+// anonymous extern group (§7.4, `extern :`). That — not the target
+// triple's shape — is the sole signal that the module needs the target's
+// default symbol namespace (e.g. libc on hosted OSes) auto-resolved. Named
+// extern groups (`extern "X":`) always resolve against their own explicit
+// `link` line and never touch this path, on any target, including ones
+// that "look hosted." The verifier already refuses anonymous groups on
+// os=none/uefi (§1.2 rule 9), so this can't misfire on bare-metal/kernel
+// targets: if a module reaches here with a non-nil
+// AnonymousExternFunctions, its target is necessarily one where a default
+// namespace is a meaningful concept.
+func newLinker(m *vir.Module, t Target, entryPoint string) (linker interface {
 	SetEntryPoint(string)
 	AddObject(name string, data []byte) error
 	Link() ([]byte, error)
@@ -190,7 +200,16 @@ func newLinker(m *vir.Module, t Target) (linker interface {
 		if !l.Supported() {
 			return nil, fmt.Errorf("vvm: %s: no elf codegen backend registered", t)
 		}
-		l.SetEntryPoint("_start")
+
+		if t.Kind == OutputSharedLibrary {
+			l.SetOutputType(linkelf.OutputShared)
+			// No process entry point for a shared library — deliberately
+			// skip SetEntryPoint. elf.Linker.Link() only defaults l.entry
+			// to "_start" when outputType != OutputShared, so leaving it
+			// unset here is exactly "no entry, and none assumed."
+		} else {
+			l.SetEntryPoint(entryPoint)
+		}
 
 		if needsDefaultNamespace {
 			if err := l.AddDefaultNamespace(); err != nil {
@@ -222,6 +241,12 @@ func newLinker(m *vir.Module, t Target) (linker interface {
 		if !l.Supported() {
 			return nil, fmt.Errorf("vvm: %s: no macho codegen backend registered", t)
 		}
+		// TODO: entrythunk.go has no registered thunk for any Mach-O
+		// (arch, os) yet, so entryPoint here is always just the raw
+		// `entry`-attributed fn's name (or "_start" with no `entry` fn at
+		// all) — same as before this change. Kept as the pre-existing
+		// hardcoded "_main" for now rather than wiring entryPoint through
+		// half-heartedly; revisit once a real macOS CRT thunk lands.
 		l.SetEntryPoint("_main")
 
 		if needsDefaultNamespace {
@@ -260,7 +285,9 @@ func newLinker(m *vir.Module, t Target) (linker interface {
 		if !l.Supported() {
 			return nil, fmt.Errorf("vvm: %s: no pe codegen backend registered", t)
 		}
-		// entry point left at the arch's registered default (mainCRTStartup, etc.)
+		// TODO: same as Mach-O above — entrythunk.go has nothing registered
+		// for PE yet, so entry point is left at the arch's registered
+		// default (mainCRTStartup, etc.), same as before this change.
 
 		if needsDefaultNamespace {
 			// TODO: same gap as Mach-O above — linker/pe has no default-

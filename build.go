@@ -28,6 +28,18 @@ func BuildModule(m *vir.Module, t Target) ([]byte, error) {
 		return nil, fmt.Errorf("vvm: verify: %w", err)
 	}
 
+	// Entry-point resolution runs after the first Verify (so it can trust
+	// m.EntryFunction()'s §9.4a invariants) but before lowering, since it
+	// may mutate m by adding a synthesized "_start" wrapper (entrythunk.go).
+	// Re-verify afterward — cheap, and idempotent when nothing changed.
+	entryPoint, err := resolveEntryPoint(m, t)
+	if err != nil {
+		return nil, err
+	}
+	if err := vir.Verify(m); err != nil {
+		return nil, fmt.Errorf("vvm: verify (post entry-thunk synthesis): %w", err)
+	}
+
 	f, err := t.objFormat()
 	if err != nil {
 		return nil, err
@@ -47,7 +59,7 @@ func BuildModule(m *vir.Module, t Target) ([]byte, error) {
 	// touching this path, and the verifier already forbids anonymous
 	// groups on os=none/uefi (§1.2 rule 9), so this can never misfire
 	// there.
-	l, err := newLinker(m, t)
+	l, err := newLinker(m, t, entryPoint)
 	if err != nil {
 		return nil, err
 	}

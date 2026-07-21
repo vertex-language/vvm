@@ -24,6 +24,34 @@ type Target struct {
 	// "unversioned" form (linker/macho's ParseTarget: "<arch>-apple-<sdk><ver>").
 	// Ignored for every other OS.
 	MinOSVersion string
+
+	// Kind selects what BuildModule actually produces. Zero value
+	// (OutputExecutable) is today's only reachable behavior; it exists
+	// mainly so entry-point resolution (entrythunk.go) has something
+	// concrete to gate the libc-style _start synthesis against — a
+	// shared-library build must never get one, regardless of what an
+	// `entry`-attributed fn looks like.
+	Kind OutputKind
+}
+
+// OutputKind is not part of the (arch, os, abi) triple string (ir.md §10
+// only ever talks about the triple); it's set programmatically by the
+// caller building the module, the same way real toolchains take a
+// separate "-shared" flag alongside a target triple.
+type OutputKind int
+
+const (
+	OutputExecutable OutputKind = iota
+	OutputSharedLibrary
+)
+
+// isHostedProcessOS reports whether t.OS implies a hosted process image
+// with a libc-style argc/argv/exit(3) convention worth auto-wiring —
+// i.e. everything except os=none (bare-metal/kernel) and os=uefi, which
+// have no such convention to synthesize against (ir.md §1.2 rule 7's
+// os=none TLS gating is the same shape of check).
+func (t Target) isHostedProcessOS() bool {
+	return t.OS != "none" && t.OS != "uefi"
 }
 
 // ParseTarget parses vvm's own CLI-friendly triple spelling, matching the

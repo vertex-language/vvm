@@ -1,3 +1,4 @@
+// vir/module.go
 // module.go
 package vir
 
@@ -354,4 +355,47 @@ func (m *Module) EntryFunction() *Function {
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Recognized `main`-style entry signatures (vvm's entry-thunk gate).
+// ---------------------------------------------------------------------------
+
+// MainSignature identifies a recognized libc-style `main` shape. This is
+// purely a shape check at the IR level — deciding *whether* an fn matching
+// one of these shapes should actually get a libc-style process-entry
+// wrapper synthesized (vs. wired in raw) is a policy call made one layer
+// up, by vvm, based on target OS and output kind. A struct/array-heavy or
+// otherwise unusual entry fn simply reports MainSignatureNone and is always
+// wired in raw.
+type MainSignature int
+
+const (
+	MainSignatureNone         MainSignature = iota // not a recognized shape — wire in raw
+	MainSignatureBare                               // () i32
+	MainSignatureArgcArgv                           // (i32, ptr) i32
+	MainSignatureArgcArgvEnvp                       // (i32, ptr, ptr) i32
+)
+
+// RecognizedMainSignature reports which (if any) libc-style `main` shape f
+// matches. Return type must be exactly i32 (an exit code); this alone
+// already excludes void/noreturn entries, which §9.4a rejects pairing with
+// `entry` in the first place.
+func RecognizedMainSignature(f *Function) MainSignature {
+	if !Equal(f.Ret, I32) {
+		return MainSignatureNone
+	}
+	switch len(f.Params) {
+	case 0:
+		return MainSignatureBare
+	case 2:
+		if Equal(f.Params[0].Type, I32) && IsPtr(f.Params[1].Type) {
+			return MainSignatureArgcArgv
+		}
+	case 3:
+		if Equal(f.Params[0].Type, I32) && IsPtr(f.Params[1].Type) && IsPtr(f.Params[2].Type) {
+			return MainSignatureArgcArgvEnvp
+		}
+	}
+	return MainSignatureNone
 }
