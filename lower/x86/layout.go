@@ -6,10 +6,6 @@ import (
 	"github.com/vertex-language/vvm/ir/vir"
 )
 
-// Layout implements the i386 System V ABI's aggregate layout rules: fields
-// at increasing offsets, each at its natural alignment, trailing padding
-// to the largest field alignment. Note the classic i386 quirk: 8-byte
-// scalars (i64, f64) align to 4 inside aggregates.
 type Layout struct {
 	m       *vir.Module
 	structs map[string]*vir.Struct
@@ -44,7 +40,7 @@ func (l *Layout) Size(t vir.Type) (int, error) {
 	case vir.FloatType:
 		return x.Bits / 8, nil
 	case vir.PtrType:
-		return 4, nil // usize is i32 on x86
+		return 4, nil
 	case vir.VecType:
 		es, err := l.Size(x.Elem)
 		if err != nil {
@@ -72,7 +68,7 @@ func (l *Layout) AlignOf(t vir.Type) (int, error) {
 			return 0, err
 		}
 		if sz > 4 {
-			return 4, nil // i386 SysV: 8/16-byte scalars align to 4
+			return 4, nil
 		}
 		return sz, nil
 	case vir.VecType:
@@ -93,7 +89,6 @@ func (l *Layout) AlignOf(t vir.Type) (int, error) {
 	return 0, fmt.Errorf("layout: %s has no alignment", t)
 }
 
-// StructLayout returns (size, align, field offsets).
 func (l *Layout) StructLayout(name string) (int, int, map[string]int, error) {
 	s, ok := l.structs[name]
 	if !ok {
@@ -132,8 +127,6 @@ func (l *Layout) FieldOffset(structName, field string) (int, error) {
 	return o, nil
 }
 
-// Struct exposes the raw declaration (used by dataw when walking an
-// aggregate initializer's fields in order).
 func (l *Layout) Struct(name string) (*vir.Struct, bool) {
 	s, ok := l.structs[name]
 	return s, ok

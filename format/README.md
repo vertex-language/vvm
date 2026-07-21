@@ -9,19 +9,20 @@ Converts between `vir.Module` and a byte or text representation of it, plus one 
 ## Import paths
 
 ```go
-import "github.com/vertex-language/vvm/format/vbyte/binary" // .vbyte — round-trip, the frontend boundary
-import "github.com/vertex-language/vvm/format/vbyte/text"    // .vir   — round-trip, human-readable
+import "github.com/vertex-language/vvm/format/vbyte/binary"     // .vbyte — round-trip, the frontend boundary
+import "github.com/vertex-language/vvm/format/vbyte/text"       // .vir   — round-trip, human-readable
 import "github.com/vertex-language/vvm/format/asm/x86/text"     // IA-32 debug listing, encode-only
 import "github.com/vertex-language/vvm/format/asm/x86_64/text"  // x86-64 debug listing, encode-only
 import "github.com/vertex-language/vvm/format/asm/arm/text"     // A32 debug listing, encode-only
 import "github.com/vertex-language/vvm/format/asm/aarch64/text" // A64 debug listing, encode-only
+
 ```
 
 ---
 
 ## Package layout
 
-```
+```text
 format/
 ├── vbyte/
 │   ├── binary/       .vbyte — decode.go, encode.go
@@ -33,6 +34,7 @@ format/
     ├── x86_64/text/    encode.go — reads lower/x86_64.Program
     ├── arm/text/       encode.go — reads lower/arm.Program
     └── aarch64/text/   encode.go — reads lower/aarch64.Program
+
 ```
 
 Two genuinely different shapes live under this tree, and the layout keeps them apart: `vbyte/` round-trips a `vir.Module`; `asm/` only ever prints, never parses.
@@ -56,6 +58,7 @@ if err := vir.Verify(m); err != nil { // caller's job, always
     return err
 }
 b, err := binary.Encode(m)   // assumes m already passed Verify
+
 ```
 
 This is why `text.Decode → binary.Encode → binary.Decode → text.Encode` is meant to land back on the same canonical `.vir` text it started from — both codecs traverse the module in the same field order and neither silently mutates it. This round-trip now also covers inline-asm body lines and the module-scoped `AsmDialect` field.
@@ -71,6 +74,7 @@ if err != nil {
 }
 listing, err := text.Encode(p) // format/asm/x86_64/text
 os.Stdout.Write(listing)
+
 ```
 
 ---
@@ -82,6 +86,7 @@ The one binary format vvm treats as input it may need to reload, so it's the onl
 ```go
 func Decode(data []byte) (*vir.Module, error)
 func Encode(m *vir.Module) ([]byte, error)
+
 ```
 
 `Decode` checks **framing only** — magic bytes (`VBYT`), format version, varint bounds, string lengths. Internally the reader panics with an unexported `decodeErr` on any framing problem, and `Decode` recovers it into a normal `error`, so the body reads linearly without threading `error` through every call:
@@ -92,6 +97,7 @@ m, err := binary.Decode(data)
 if err != nil {
     // framing problem — "vbyte: offset 14: string length 900 exceeds input"
 }
+
 ```
 
 `Encode` assumes the module is already verified: tag bytes for each `Type`/`Operand`/`ConstInit`/`Terminator`/body-line variant, uvarint-prefixed strings and repetition counts, 8-byte floats, varint-encoded ints.
@@ -103,6 +109,7 @@ if r.b() == 1 {
     d := vir.AsmDialect(r.str())
     m.AsmDialect = &d
 }
+
 ```
 
 A `BodyLine` decodes/encodes as one of two tagged variants — an ordinary `Instruction`, or a whole `AsmBlock` (bindings, then code lines, each either a mnemonic instruction or a bare label declaration). Nothing in the asm block's own encoding carries a dialect anymore; the block is interpreted using whatever `m.AsmDialect` says.
@@ -114,12 +121,14 @@ A `BodyLine` decodes/encodes as one of two tagged variants — an ordinary `Inst
 ```go
 func Decode(src []byte) (*vir.Module, error)
 func Encode(m *vir.Module) ([]byte, error)
+
 ```
 
 `Decode` is a two-stage parser: `lexAll` splits source into one token stream per non-blank logical line (line breaks are significant; `//` starts a comment to end of line), then `parseModule` consumes those lines in the mandatory section order:
 
-```
+```text
 module → target? → asmdialect? → struct* → fnsig* → const* → global* → link* → extern* → fn*
+
 ```
 
 Anything out of order, or interleaved, is rejected immediately — this is structural enforcement, distinct from anything `vir.Verify` checks later:
@@ -131,12 +140,13 @@ global fmt array[i8, 14] = "%d + %d = %d\n\0"
 extern :
     fn printf(f ptr, ...) i32
 end
-export fn main() i32:
+export fn main() i32 entry:
     a = mov.i32 7
     return 0
 end
 `)
 m, err := text.Decode(src)
+
 ```
 
 Within a function body, labels (`ident:`), instructions, asm blocks, and terminators are recognized by shape; code appearing after a block's terminator is rejected on sight rather than left for `Verify` to catch. An `asm block after terminator` or an `instruction after terminator` are both parse-time errors from `func.go`, same as any other misplaced body line.
@@ -159,19 +169,20 @@ loop:
     dec ecx
     jnz loop
 end
+
 ```
 
 * `parseAsm` (in `asm.go`) reads the `in`/`out`/`clobber` binding lines, then a `code:` section of mnemonic lines and bare `label:` declarations, until `end`. This layer only enforces *shape* — legality of a given mnemonic/operand combination for the target dialect (§9.38) is not checked here.
 * The dialect governing `code:` syntax is **module-wide**, not per-block: it comes from the module's `asmdialect` declaration (parsed by `parseAsmDialect` in `decl.go`) and is threaded into `parseAsm`/`parseAsmCodeLine` by the caller in `func.go`. A function that emits an `asm` block without the module having declared `asmdialect` is a parse error.
 * Per-dialect operand grammar lives in one file per dialect, all implementing the same small `dialectSyntax` interface (`asm_dialect.go`):
 
-  | Dialect | File | Registers | Immediates | Memory |
-  |---|---|---|---|---|
-  | `intel` | `asm_intel.go` | bare (`eax`) | bare literal (`ptr`-sized prefix + `[...]` recognized) | `[...]`, optional `byte/word/dword/qword/xmmword/ymmword/zmmword ptr` prefix |
-  | `att` | `asm_att.go` | `%`-prefixed (`%eax`) | `$`-prefixed | `disp(base,index,scale)` |
-  | `a32` / `t32` / `native` | `asm_arm.go` (shared `armSyntax`) | bare | `#`-prefixed | `[...]`, optional trailing `!` writeback |
+| Dialect | File | Registers | Immediates | Memory |
+| --- | --- | --- | --- | --- |
+| `intel` | `asm_intel.go` | bare (`eax`) | bare literal (`ptr`-sized prefix + `[...]` recognized) | `[...]`, optional `byte/word/dword/qword/xmmword/ymmword/zmmword ptr` prefix |
+| `att` | `asm_att.go` | `%`-prefixed (`%eax`) | `$`-prefixed | `disp(base,index,scale)` |
+| `a32` / `t32` / `native` | `asm_arm.go` (shared `armSyntax`) | bare | `#`-prefixed | `[...]`, optional trailing `!` writeback |
 
-  `code`/`in`/`out`/`clobber` bindings themselves are dialect-agnostic (`asm.go`); only mnemonic operand parsing/printing (`parseOperand`/`encodeOperand`) and the `%`-vs-bare register spelling (`regIdent`) vary by dialect.
+* `code`/`in`/`out`/`clobber` bindings themselves are dialect-agnostic (`asm.go`); only mnemonic operand parsing/printing (`parseOperand`/`encodeOperand`) and the `%`-vs-bare register spelling (`regIdent`) vary by dialect.
 * `readAsmMemory` (`asm_dialect.go`) is shared token/bracket-matching used by all dialects to capture a memory operand as raw text — `AsmOperand.Memory` is documented as verbatim dialect-specific addressing text, so no further structure is imposed on it.
 * Encoding mirrors parsing: `encodeAsmBlock` prints `asm :` / bindings / `code:` / instruction-or-label lines / `end`, using the same per-dialect `encodeOperand`/`regIdent` to invert whatever `parseOperand` produced.
 
@@ -186,12 +197,13 @@ func Encode(p *x86.Program) ([]byte, error)      // format/asm/x86/text
 func Encode(p *x86_64.Program) ([]byte, error)   // format/asm/x86_64/text
 func Encode(p *arm.Program) ([]byte, error)      // format/asm/arm/text
 func Encode(p *aarch64.Program) ([]byte, error)  // format/asm/aarch64/text
+
 ```
 
 None of these is a general-purpose disassembler — each is a small decoder scoped to *exactly* the encoding subset its matching `lower/<arch>` package emits:
 
 | Arch | Scope |
-|---|---|
+| --- | --- |
 | `x86` | One-byte opcodes + `0F` map; `nop`; full `FF`/group-5 form (`inc`/`dec`/`call`/`jmp`/`push`, register or memory r/m — not just register-indirect `call`/`jmp`); ModRM/SIB forms the encoder produces (`[disp32]` absolute, ESP/`0x24` SIB escape); legacy prefixes `66`/`F0`/`F3` |
 | `x86_64` | Same as x86, plus REX prefixes, `[RIP+disp32]`, SIB absolute/base-only forms |
 | `arm` | Fixed 4-byte words in the `Program`'s own byte order; condition-coded data processing; `movw`/`movt` pairs; halfword/word/byte load-store; `ldrex`/`strex`; fixed misc encodings (`push`/`pop`, `bx`/`blx`, `dmb`, `clrex`, `udf`) |
@@ -202,6 +214,7 @@ Fixup sites are read from `Program.Fixups` and annotated inline with symbol, kin
 ```go
 p, _ := x86_64.Lower(m)
 listing, _ := text.Encode(p)
+
 ```
 
 ```text
@@ -213,6 +226,7 @@ fn main: export  // size=41 align=16 fixups=2
   ...
   0000000a  48 8d 05 00 00 00 00     lea rax, fmt<pcrel32-4>
   ...
+
 ```
 
 An unrecognized instruction word or opcode byte degrades to a raw `.word`/`db` line instead of failing the whole `Encode` call, so the listing stays usable even if `lower/<arch>` grows past what the printer currently recognizes. Global data prints alongside, with fixups rendered as `.long`/`.quad`/`.word` directives and long zero runs compressed to `.zero N`.

@@ -251,7 +251,7 @@ func parseInst(c *lc) (vir.Instruction, error) {
 		if !c.done() {
 			return inst, c.l.errf("loc: trailing tokens")
 		}
-		return vir.Instruction{Op: "loc", Args: args}, nil
+		return vir.Instruction{Op: vir.OpLoc, Args: args}, nil
 	}
 
 	// result name?
@@ -260,11 +260,16 @@ func parseInst(c *lc) (vir.Instruction, error) {
 		inst.Result = c.l.toks[0].text
 		c.i = 2
 	}
-	op, err := c.expectIdent()
+	opStr, err := c.expectIdent()
 	if err != nil {
 		return inst, err
 	}
-	inst.Op = op
+	opCode, ok := vir.ParseOpcode(opStr)
+	if !ok {
+		return inst, c.l.errf("unrecognized opcode %q", opStr)
+	}
+	inst.Op = opCode
+
 	if c.accept(tPunct, ".") {
 		// Suffix is a type or a fnsig name (§4).
 		save := c.i
@@ -328,7 +333,7 @@ func encodeFunctionsSection(w func(string, ...any), m *vir.Module) {
 // distinct grammar production (space-separated, no operand-list commas)
 // and is special-cased.
 func encodeInst(i *vir.Instruction) string {
-	if i.Op == "loc" {
+	if i.Op == vir.OpLoc {
 		return encodeLoc(i)
 	}
 	var b []byte
@@ -336,7 +341,7 @@ func encodeInst(i *vir.Instruction) string {
 		b = append(b, i.Result...)
 		b = append(b, " = "...)
 	}
-	b = append(b, i.Op...)
+	b = append(b, i.Op.String()...)
 	if i.Suffix != nil {
 		b = append(b, '.')
 		b = append(b, i.Suffix.String()...)

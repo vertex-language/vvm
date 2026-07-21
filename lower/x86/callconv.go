@@ -2,19 +2,11 @@ package x86
 
 import "github.com/vertex-language/vvm/ir/vir"
 
-// ArgSlot is one outgoing argument's placement within the cdecl argument
-// area built by a call site: Offset is its byte offset from the lowest
-// address (first argument), and ByVal names the struct being copied when
-// the argument is passed byval; "" for ordinary scalar arguments.
 type ArgSlot struct {
 	Offset int
 	ByVal  string
 }
 
-// PlanCall lays out the argument area for a direct or indirect call: every
-// scalar argument takes one 4-byte slot, byval structs take their aligned
-// size, and the first argument sits at the lowest address (cdecl).
-// structSize resolves a byval struct's total (already-aligned) size.
 func PlanCall(params []vir.Param, argCount int, structSize func(name string) (int, error)) ([]ArgSlot, int, error) {
 	slots := make([]ArgSlot, argCount)
 	total := 0

@@ -6,17 +6,14 @@ import (
 	"strconv"
 	"strings"
 
-	isax86 "github.com/vertex-language/vvm/isa/x86"
 	"github.com/vertex-language/vvm/ir/vir"
+	isax86 "github.com/vertex-language/vvm/isa/x86"
 )
 
 // --- Intel -------------------------------------------------------------
 
 type intelDialect struct{ resolver SymbolResolver }
 
-// intelMemRe implements the intel-mem grammar (§1.1):
-//
-//	(ptr-size "ptr")? "[" reg-ident ("+" reg-ident ("*" int-literal)?)? (("+"|"-") int-literal)? "]"
 var intelMemRe = regexp.MustCompile(
 	`^(?:(byte|word|dword|qword|xmmword|ymmword|zmmword)\s+ptr\s+)?` +
 		`\[\s*([A-Za-z][A-Za-z0-9]*)\s*` +
@@ -95,11 +92,6 @@ func (d intelDialect) resolveOperand(o vir.AsmOperand) (Opr, error) {
 	return Opr{}, fmt.Errorf("asm: a label operand was used where a value operand was expected")
 }
 
-// Lower dispatches jumps directly (their operand is a bare label, not a
-// value), otherwise resolves operands and delegates to the shared
-// mnemonic table. Intel operand order is already (dst, src) — the
-// canonical order lowerMnemonic expects — so no reordering happens here;
-// attDialect is the one that has to swap.
 func (d intelDialect) Lower(line vir.AsmCodeLine, label func(string) string) ([]Inst, error) {
 	if cc, ok := jccTable[line.Mnemonic]; ok {
 		return lowerJump(line, true, cc, label)
@@ -122,9 +114,6 @@ func (d intelDialect) Lower(line vir.AsmCodeLine, label func(string) string) ([]
 
 type attDialect struct{ resolver SymbolResolver }
 
-// attMemRe implements the att-mem grammar (§1.1):
-//
-//	("-")? int-literal? "(" (reg-ident)? ("," reg-ident ("," int-literal)?)? ")"
 var attMemRe = regexp.MustCompile(
 	`^(-)?([0-9]+)?` +
 		`\(\s*%?([A-Za-z][A-Za-z0-9]*)?\s*` +
@@ -138,10 +127,6 @@ var attBaseMnemonics = map[string]bool{
 	"rol": true, "ror": true, "bswap": true,
 }
 
-// stripATTSizeSuffix strips AT&T's trailing operand-size letter (movl,
-// addl, ...). Only the 32-bit ('l') forms are lowered; 8/16-bit ('b'/'w')
-// are TODO and 64-bit ('q') is rejected outright — this backend is x86
-// (32-bit) only.
 func stripATTSizeSuffix(m string) (string, error) {
 	if attBaseMnemonics[m] || len(m) < 2 {
 		return m, nil
@@ -149,7 +134,7 @@ func stripATTSizeSuffix(m string) (string, error) {
 	suffix := m[len(m)-1]
 	base := m[:len(m)-1]
 	if !attBaseMnemonics[base] {
-		return m, nil // jmp/jcc/int/nop/cdq/syscall etc. carry no size suffix
+		return m, nil
 	}
 	switch suffix {
 	case 'l':
@@ -238,8 +223,6 @@ func (d attDialect) resolveOperand(o vir.AsmOperand) (Opr, error) {
 	return Opr{}, fmt.Errorf("asm: a label operand was used where a value operand was expected")
 }
 
-// Lower reorders AT&T's src-first operands into the canonical (dst, src)
-// order lowerMnemonic expects, then delegates to it.
 func (d attDialect) Lower(line vir.AsmCodeLine, label func(string) string) ([]Inst, error) {
 	if cc, ok := jccTable[line.Mnemonic]; ok {
 		return lowerJump(line, true, cc, label)
@@ -263,7 +246,6 @@ func (d attDialect) Lower(line vir.AsmCodeLine, label func(string) string) ([]In
 	case len(ops) == 2:
 		ops[0], ops[1] = ops[1], ops[0]
 	case len(ops) == 3 && mnemonic == "imul":
-		// AT&T: imul $imm, src, dst -> canonical dst, src, imm
 		ops[0], ops[1], ops[2] = ops[2], ops[1], ops[0]
 	}
 	return lowerMnemonic(mnemonic, ops)

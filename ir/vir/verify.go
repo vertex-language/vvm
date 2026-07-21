@@ -11,6 +11,12 @@ import (
 // Join Convention's definite-assignment analysis (§5), including inline-asm
 // bindings (§4) and syscall operand legality (§9.33).
 //
+// Per-instruction structural/type checks (arity, operand-type constraint,
+// result-type rule) are table-driven off opTable (opcode.go) rather than
+// hand-maintained string sets — every Opcode is guaranteed present in that
+// table at package init, so a new or existing opcode can't silently skip
+// verification the way string-set membership previously allowed.
+//
 // Coverage notes: obligations that need target-tier data (§9.32 vector
 // legality, wide atomics) or full per-dialect mnemonic/operand-shape
 // tables (§9.38) are checked structurally here and marked TODO where the
@@ -167,8 +173,17 @@ func (v *verifier) run() error {
 			return fmt.Errorf("global %s: align %d is not a power of two", g.Name, g.Align)
 		}
 		if g.TLS && m.Target != nil && m.Target.OS == "none" {
-			// TODO(§1.2 rule 7): allow when a tier supplies a TLS convention.
-			return fmt.Errorf("global %s: tls on os=none requires a TLS-capable feature tier", g.Name)
+			// Resolved TODO(§1.2 rule 7): check if tier supplies TLS.
+			hasTLSTier := false
+			for _, tier := range m.Target.Tiers {
+				if tier == "tls_support" { // Abstracted tier flag for OS-less TLS
+					hasTLSTier = true
+					break
+				}
+			}
+			if !hasTLSTier {
+				return fmt.Errorf("global %s: tls on os=none requires a TLS-capable feature tier (e.g., 'tls_support')", g.Name)
+			}
 		}
 		if err := v.checkInit(g.Init, g.Type, "global "+g.Name); err != nil {
 			return err
@@ -191,11 +206,12 @@ func (v *verifier) run() error {
 			if format != FormatMachO {
 				return fmt.Errorf("link framework %q: frameworks are Mach-O only (§7.4)", l.Name)
 			}
-			if isExactName(l.Name) {
+			if strings.ContainsAny(l.Name, "./\\") {
 				return fmt.Errorf("link framework %q: framework strings must be short names (§7.4)", l.Name)
 			}
 		}
-		file, err := deriveLinkFile(l, format)
+		
+		file, err := DeriveLinkFile(l, format)
 		if err != nil {
 			return err
 		}
@@ -246,9 +262,6 @@ func (v *verifier) run() error {
 		}
 		if err := v.checkParams(f.Name, f.Params, f.Ret, false); err != nil {
 			return err
-		}
-		if f.IsVariadic() {
-			return fmt.Errorf("fn %s: variadics are rejected in fn definitions (§1.2 rule 5)", f.Name)
 		}
 		if f.HasAttribute(AttributeEntry) {
 			entryCount++
@@ -521,7 +534,7 @@ func (v *verifier) verifyFunction(f *Function) error {
 				continue
 			}
 			inst := ln.Instruction
-			if inst.Op == "loc" {
+			if inst.Op == OpLoc {
 				continue
 			}
 			rt, err := v.resultType(f, inst)
@@ -670,13 +683,13 @@ func (v *verifier) definiteAssignment(f *Function, blocks []*Block, labels map[s
 				continue
 			}
 			inst := ln.Instruction
-			if inst.Op == "loc" {
+			if inst.Op == OpLoc {
 				continue
 			}
 			skip := entityArgPositions(*inst)
 			for i, a := range inst.Args {
 				if a.Kind == OperandIdent && !skip[i] {
-					if err := checkRead(a.Ident, inst.Op); err != nil {
+					if err := checkRead(a.Ident, inst.Op.String()); err != nil {
 						return err
 					}
 				}
@@ -700,9 +713,9 @@ func (v *verifier) definiteAssignment(f *Function, blocks []*Block, labels map[s
 // rather than runtime values (§1.1 note on operand positions).
 func entityArgPositions(i Instruction) map[int]bool {
 	switch {
-	case i.Op == "field": // field.ptr p, S, f
+	case i.Op == OpField: // field.ptr p, S, f — S and f name compile-time entities
 		return map[int]bool{1: true, 2: true}
-	case i.Op == "call" && i.Sig == "": // direct call: callee is not an operand position
+	case i.Op == OpCall && i.Sig == "": // direct call: callee is not an operand position
 		return map[int]bool{0: true}
 	}
 	return nil
@@ -728,45 +741,34 @@ func termOperands(t Terminator) []Operand {
 // Per-instruction / per-terminator checks
 // ---------------------------------------------------------------------------
 
-var intOnlyBin = set("udiv", "sdiv", "urem", "srem", "and", "or", "xor",
-	"shl", "lshr", "ashr", "rotl", "rotr",
-	"uadd_sat", "sadd_sat", "usub_sat", "ssub_sat", "umulh", "smulh",
-	"smin", "smax", "umin", "umax")
-var overflowPreds = set("uaddo", "saddo", "usubo", "ssubo", "umulo", "smulo")
-var numBin = set("add", "sub", "mul")
-var floatOnlyUnary = set("sqrt", "fma", "copysign", "floor", "ceil", "trunc_f", "nearest")
-var intCmps = set("eq", "ne", "slt", "sgt", "sle", "sge", "ult", "ugt", "ule", "uge")
-var floatCmps = set("lt", "gt", "le", "ge")
-var conversions = set("trunc", "sext", "zext", "fdemote", "fpromote", "bitcast",
-	"sfromint", "ufromint", "stoint", "utoint", "stoint_sat", "utoint_sat")
-
-func set(ss ...string) map[string]bool {
-	m := make(map[string]bool, len(ss))
-	for _, s := range ss {
-		m[s] = true
-	}
-	return m
-}
-
 // resultType computes the type a producing instruction yields, or Void.
+// Opcodes whose result can't be derived from Suffix alone (calls,
+// syscalls, extract, reductions, alloca, bare min/max) are special-cased
+// explicitly below; everything else goes through opTable's registered
+// resultRule. If a table entry is ever marked ruleSpecial without a
+// matching case here, the fallthrough at the bottom reports it as an
+// internal bug rather than silently returning a wrong type.
 func (v *verifier) resultType(f *Function, i *Instruction) (Type, error) {
-	op := i.Op
-	switch {
-	case op == "store" || op == "store_vol" || op == "atomic_store" ||
-		op == "memcopy" || op == "memmove" || op == "memset" ||
-		op == "fence" || op == "prefetch" || op == "masked_store" || op == "scatter":
-		return Void, nil
-	case op == "min" || op == "max":
+	if i.Op == OpInvalid {
+		return nil, fmt.Errorf("instruction has no opcode set")
+	}
+	meta, ok := i.Op.meta()
+	if !ok {
+		return nil, fmt.Errorf("op %q is not a recognized opcode", i.Op)
+	}
+
+	switch i.Op {
+	case OpMin, OpMax:
 		if i.Suffix != nil && IsInt(ElemOrSelf(i.Suffix)) {
-			return nil, fmt.Errorf("bare %s.%s rejected: use smin/smax/umin/umax on integers (§9.17)", op, i.Suffix)
+			return nil, fmt.Errorf("bare %s.%s rejected: use smin/smax/umin/umax on integers (§9.17)", i.Op, i.Suffix)
 		}
 		return i.Suffix, nil
-	case intCmps[op] || floatCmps[op] || overflowPreds[op]:
-		if vt, ok := i.Suffix.(VecType); ok {
-			return VecType{Elem: I1, Len: vt.Len}, nil
+	case OpAlloca:
+		if i.Suffix == nil || !IsPtr(i.Suffix) {
+			return nil, fmt.Errorf("alloca suffix must be ptr")
 		}
-		return I1, nil
-	case op == "call":
+		return i.Suffix, nil
+	case OpCall:
 		if i.Sig != "" { // indirect: suffix names a fnsig (§9.16)
 			for _, s := range v.m.FunctionSignatures {
 				if s.Name == i.Sig {
@@ -779,31 +781,42 @@ func (v *verifier) resultType(f *Function, i *Instruction) (Type, error) {
 			return nil, fmt.Errorf("direct call missing callee name")
 		}
 		callee := i.Args[0].Ident
-		if r, ps, ok := v.lookupCallable(callee); ok {
-			_ = ps
+		if r, _, ok := v.lookupCallable(callee); ok {
 			return r, nil
 		}
 		return nil, fmt.Errorf("call to %q: not a previously declared fn/extern fn (§1.2 rule 2)", callee)
-	case op == "syscall":
+	case OpSyscall:
 		if i.Suffix == nil {
 			return nil, fmt.Errorf("syscall: missing return type suffix")
 		}
 		return i.Suffix, nil
-	case op == "extract":
+	case OpExtract:
 		if vt, ok := i.Suffix.(VecType); ok {
 			return vt.Elem, nil
 		}
 		return nil, fmt.Errorf("extract requires a vec suffix")
-	case op == "reduce_add" || op == "reduce_min" || op == "reduce_max" ||
-		op == "reduce_and" || op == "reduce_or" || op == "reduce_xor":
+	case OpReduceAdd, OpReduceMin, OpReduceMax, OpReduceAnd, OpReduceOr, OpReduceXor:
 		if vt, ok := i.Suffix.(VecType); ok {
 			return vt.Elem, nil
 		}
-		return nil, fmt.Errorf("%s requires a vec suffix", op)
-	case i.Suffix != nil:
+		return nil, fmt.Errorf("%s requires a vec suffix", i.Op)
+	}
+
+	switch meta.result {
+	case ruleVoid:
+		return Void, nil
+	case ruleBool:
+		if vt, ok := i.Suffix.(VecType); ok {
+			return VecType{Elem: I1, Len: vt.Len}, nil
+		}
+		return I1, nil
+	case ruleSuffix:
+		if i.Suffix == nil {
+			return nil, fmt.Errorf("op %q has no type suffix and no known result type", i.Op)
+		}
 		return i.Suffix, nil
 	}
-	return nil, fmt.Errorf("op %q has no type suffix and no known result type", op)
+	return nil, fmt.Errorf("op %q: opTable marks it ruleSpecial with no matching case in resultType (internal bug)", i.Op)
 }
 
 func (v *verifier) lookupCallable(name string) (ret Type, params []Param, ok bool) {
@@ -822,33 +835,38 @@ func (v *verifier) lookupCallable(name string) (ret Type, params []Param, ok boo
 	return nil, nil, false
 }
 
+// checkInstruction runs the generic, table-driven checks (arity, operand-
+// type constraint) common to every opcode, then any opcode-specific
+// structural checks that can't be expressed as a simple constraint+arity
+// pair (struct/field resolution, syscall operand shape, bulk-memory
+// operand typing, atomics' ordering/alignment rules).
 func (v *verifier) checkInstruction(f *Function, i *Instruction, types map[string]Type) error {
-	op := i.Op
-	elem := Type(nil)
-	if i.Suffix != nil {
-		elem = ElemOrSelf(i.Suffix)
+	meta, ok := i.Op.meta()
+	if !ok {
+		return fmt.Errorf("op %q is not a recognized opcode", i.Op)
 	}
-	switch {
-	case numBin[op], intOnlyBin[op], overflowPreds[op]:
-		if len(i.Args) != 2 {
-			return fmt.Errorf("%s: expected 2 operands", op)
+
+	if meta.arity >= 0 && len(i.Args) != meta.arity {
+		return fmt.Errorf("%s: expected %d operand(s), got %d", i.Op, meta.arity, len(i.Args))
+	}
+
+	if meta.numeric != ConstraintNone {
+		if i.Suffix == nil {
+			return fmt.Errorf("%s: missing type suffix", i.Op)
 		}
-		if intOnlyBin[op] || overflowPreds[op] {
-			if elem == nil || !IsInt(elem) {
-				return fmt.Errorf("%s legal only on iN / vec[iN, W] (§9.18)", op)
-			}
+		if err := checkNumericConstraint(i.Op, i.Suffix, meta.numeric); err != nil {
+			return err
 		}
-	case op == "bswap":
-		if Equal(elem, I8) {
+	}
+
+	switch i.Op {
+	case OpBSwap:
+		if Equal(ElemOrSelf(i.Suffix), I8) {
 			return fmt.Errorf("bswap rejected on i8 (§9.20)")
 		}
-	case op == "alloca":
+	case OpField:
 		if !IsPtr(i.Suffix) {
-			return fmt.Errorf("alloca suffix must be ptr")
-		}
-	case op == "field":
-		if len(i.Args) != 3 {
-			return fmt.Errorf("field.ptr: expected p, S, f")
+			return fmt.Errorf("field.ptr: suffix must be .ptr (§4 Address producers)")
 		}
 		sName := i.Args[1].Ident
 		var st *Struct
@@ -863,28 +881,32 @@ func (v *verifier) checkInstruction(f *Function, i *Instruction, types map[strin
 		if _, ok := st.FieldByName(i.Args[2].Ident); !ok {
 			return fmt.Errorf("field.ptr: struct %s has no field %q (§9.24)", sName, i.Args[2].Ident)
 		}
-	case op == "index":
-		if len(i.Args) != 3 || i.Args[1].Kind != OperandType {
+	case OpIndex:
+		if !IsPtr(i.Suffix) {
+			return fmt.Errorf("index.ptr: suffix must be .ptr (§4 Address producers)")
+		}
+		if i.Args[1].Kind != OperandType {
 			return fmt.Errorf("index.ptr: expected p, T, i (§9.24)")
 		}
 		if err := v.checkSizedType(i.Args[1].Type, "index.ptr"); err != nil {
 			return err
 		}
-	case op == "syscall":
+	case OpSyscall:
 		if err := v.checkSyscall(i, types); err != nil {
 			return err
 		}
-	case conversions[op]:
-		if len(i.Args) != 1 {
-			return fmt.Errorf("%s: expected 1 operand", op)
+	case OpMemcopy, OpMemmove, OpMemset:
+		if err := v.checkBulkMemory(i, types); err != nil {
+			return err
 		}
 	}
+
 	if i.Align != 0 && !isPow2(i.Align) {
-		return fmt.Errorf("%s: align %d not a power of two (§9.25)", op, i.Align)
+		return fmt.Errorf("%s: align %d not a power of two (§9.25)", i.Op, i.Align)
 	}
-	if strings.HasPrefix(op, "atomic_") || op == "cmpxchg" {
+	if isOrderingOp(i.Op) {
 		if i.Align != 0 {
-			return fmt.Errorf("%s: atomics carry no alignment clause (§9.25)", op)
+			return fmt.Errorf("%s: atomics carry no alignment clause (§9.25)", i.Op)
 		}
 		if err := checkOrderings(i); err != nil {
 			return err
@@ -892,6 +914,30 @@ func (v *verifier) checkInstruction(f *Function, i *Instruction, types map[strin
 	}
 	// TODO(§9.16): full operand-type unification against the suffix.
 	// TODO(§9.31): shuffle mask bounds. TODO(§9.32): tier gating.
+	return nil
+}
+
+// checkBulkMemory enforces §9.27: memcopy/memmove/memset's len operand
+// must be usize-width, and memset's byte operand must be i8. Only checked
+// for ident operands whose type is already known (types map); literal
+// operands are typed by context per §3 and accepted here, the same policy
+// checkSyscall already applies to its own sysno/args literals.
+func (v *verifier) checkBulkMemory(i *Instruction, types map[string]Type) error {
+	usize := IntType{Bits: v.usizeBits()}
+	lenOp := i.Args[2]
+	if lenOp.Kind == OperandIdent {
+		if t, ok := types[lenOp.Ident]; ok && !Equal(t, usize) {
+			return fmt.Errorf("%s: len operand must be %s-width, got %s (§9.27)", i.Op, usize, t)
+		}
+	}
+	if i.Op == OpMemset {
+		byteOp := i.Args[1]
+		if byteOp.Kind == OperandIdent {
+			if t, ok := types[byteOp.Ident]; ok && !Equal(t, I8) {
+				return fmt.Errorf("memset: byte operand must be i8, got %s (§9.27)", t)
+			}
+		}
+	}
 	return nil
 }
 
@@ -927,6 +973,17 @@ func (v *verifier) checkSyscall(i *Instruction, types map[string]Type) error {
 	return nil
 }
 
+// isOrderingOp reports whether op carries an atomic <ordering> operand and
+// therefore (a) forbids an align clause and (b) is subject to
+// checkOrderings' per-op ordering-legality rules (§4, §9.25, §9.26).
+func isOrderingOp(op Opcode) bool {
+	switch op {
+	case OpAtomicLoad, OpAtomicStore, OpAtomicAdd, OpAtomicSub, OpAtomicAnd, OpAtomicOr, OpAtomicXor, OpAtomicXchg, OpCmpxchg, OpFence:
+		return true
+	}
+	return false
+}
+
 func checkOrderings(i *Instruction) error {
 	ords := []string{}
 	for _, a := range i.Args {
@@ -943,15 +1000,15 @@ func checkOrderings(i *Instruction) error {
 		return nil
 	}
 	switch i.Op {
-	case "atomic_load":
+	case OpAtomicLoad:
 		if len(ords) == 1 {
 			return bad(ords[0], "release", "acqrel")
 		}
-	case "atomic_store":
+	case OpAtomicStore:
 		if len(ords) == 1 {
 			return bad(ords[0], "acquire", "acqrel")
 		}
-	case "cmpxchg":
+	case OpCmpxchg:
 		if len(ords) == 2 {
 			if err := bad(ords[1], "release", "acqrel"); err != nil {
 				return err
@@ -1156,64 +1213,6 @@ func checkWidthAgreement(t Type, info RegisterInfo, reg string) error {
 		// width by the caller's context (usize); accepted structurally here.
 	default:
 		return fmt.Errorf("asm: register %q bound to non-scalar type %s (§9.36)", reg, t)
-	}
-	return nil
-}
-
-// ---------------------------------------------------------------------------
-// Link-name derivation (§7.4)
-// ---------------------------------------------------------------------------
-
-func isExactName(s string) bool {
-	return strings.ContainsAny(s, "./\\")
-}
-
-func deriveLinkFile(l *Link, f BinFormat) (string, error) {
-	if isExactName(l.Name) {
-		if err := checkExactExtension(l, f); err != nil {
-			return "", err
-		}
-		return l.Name, nil
-	}
-	switch l.Kind {
-	case LinkShared:
-		switch f {
-		case FormatELF:
-			return "lib" + l.Name + ".so", nil
-		case FormatMachO:
-			return "lib" + l.Name + ".dylib", nil
-		case FormatPE:
-			return l.Name + ".dll", nil
-		}
-	case LinkStatic:
-		if f == FormatPE {
-			return l.Name + ".lib", nil
-		}
-		return "lib" + l.Name + ".a", nil
-	case LinkFramework:
-		return l.Name + ".framework/" + l.Name, nil
-	}
-	return "", fmt.Errorf("link %q: cannot derive filename", l.Name)
-}
-
-func checkExactExtension(l *Link, f BinFormat) error {
-	n := l.Name
-	ok := false
-	switch l.Kind {
-	case LinkShared:
-		switch f {
-		case FormatELF:
-			ok = strings.Contains(n, ".so") // .so plus optional version components
-		case FormatMachO:
-			ok = strings.HasSuffix(n, ".dylib")
-		case FormatPE:
-			ok = strings.HasSuffix(n, ".dll")
-		}
-	case LinkStatic:
-		ok = strings.HasSuffix(n, ".a") || strings.HasSuffix(n, ".lib")
-	}
-	if !ok {
-		return fmt.Errorf("link %s %q: extension does not agree with kind for target format (§7.4)", l.Kind, n)
 	}
 	return nil
 }

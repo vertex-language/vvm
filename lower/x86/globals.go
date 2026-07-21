@@ -127,13 +127,15 @@ func (w *dataw) lit(o vir.Operand, t vir.Type) error {
 		w.le(0, 4)
 		return nil
 	case vir.OperandFloat:
-		switch t {
-		case vir.F64:
-			w.le(math.Float64bits(o.Float), 8)
-			return nil
-		case vir.F32:
-			w.le(uint64(math.Float32bits(float32(o.Float))), 4)
-			return nil
+		if ft, ok := t.(vir.FloatType); ok {
+			switch ft.Bits {
+			case 64:
+				w.le(math.Float64bits(o.Float), 8)
+				return nil
+			case 32:
+				w.le(uint64(math.Float32bits(float32(o.Float))), 4)
+				return nil
+			}
 		}
 		return fmt.Errorf("f16 initializers not yet emitted on x86 (TODO)")
 	case vir.OperandVector:
@@ -153,4 +155,4 @@ func (w *dataw) lit(o vir.Operand, t vir.Type) error {
 	return fmt.Errorf("literal kind %d in initializer", o.Kind)
 }
 
-var _ = sort.Ints // placeholder if global-fixup sorting is reintroduced later
+var _ = sort.Ints

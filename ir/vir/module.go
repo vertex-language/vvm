@@ -1,20 +1,19 @@
 // vir/module.go
-// module.go
 package vir
 
 // Module is the single IR-level program representation (README §"One Idea").
 // Field order mirrors the mandatory section order (§1.2).
 type Module struct {
-	Name       string
-	Target     *Target     // nil for pure-compute modules (§1.2 rule 10)
-	AsmDialect *AsmDialect // nil unless declared; module-wide asm syntax dialect (§1.2 rule 11)
-	Structs []*Struct
+	Name               string
+	Target             *Target     // nil for pure-compute modules (§1.2 rule 10)
+	AsmDialect         *AsmDialect // nil unless declared; module-wide asm syntax dialect (§1.2 rule 11)
+	Structs            []*Struct
 	FunctionSignatures []*FunctionSignature
 	Constants          []*Constant
 	Globals            []*Global
-	Links               []*Link
-	Externs             []*ExternGroup
-	Functions           []*Function
+	Links              []*Link
+	Externs            []*ExternGroup
+	Functions          []*Function
 }
 
 // Target is the in-file target declaration (§10.6).
@@ -63,11 +62,11 @@ type Constant struct {
 // ConstInit is the global-initializer grammar (§8).
 type ConstInit interface{ isInit() }
 
-type InitLiteral struct{ Value Operand } // scalar literal / null
-type InitZero struct{}                  // zero
-type InitAddressOf struct{ Name string } // addr ident
+type InitLiteral struct{ Value Operand }         // scalar literal / null
+type InitZero struct{}                           // zero
+type InitAddressOf struct{ Name string }         // addr ident
 type InitAggregate struct{ Elems []ConstInit }
-type InitByteString struct{ Data []byte } // "..." for array[i8, N]
+type InitByteString struct{ Data []byte }        // "..." for array[i8, N]
 
 func (InitLiteral) isInit()    {}
 func (InitZero) isInit()       {}
@@ -120,8 +119,7 @@ const (
 	// (§1.1 fn-attr, §9.4a). At most one fn per module may carry it; the
 	// linker resolves what it's actually wired to (process entry, DLL
 	// load hook, driver entry, ...) at link time, based on the requested
-	// output kind — the IR module itself asserts only "this is the
-	// function you'd hand control to, if you hand control to anything."
+	// output kind.
 	AttributeEntry FunctionAttribute = "entry"
 )
 
@@ -146,7 +144,7 @@ type Function struct {
 	Ret    Type
 	Attrs  []FunctionAttribute
 	Export bool
-	Entry  *Block   // unlabeled, untargetable (§1.3 rule 1) — the function's own entry BLOCK, distinct from the entry ATTRIBUTE above
+	Entry  *Block   // unlabeled, untargetable (§1.3 rule 1)
 	Blocks []*Block // labeled blocks in textual order
 }
 
@@ -158,10 +156,6 @@ func (f *Function) HasAttribute(a FunctionAttribute) bool {
 	}
 	return false
 }
-
-// IsVariadic reports whether the function is variadic. The grammar can't
-// express this for fn-def (§1.2 rule 5); kept for symmetry with ExternFunction.
-func (f *Function) IsVariadic() bool { return false }
 
 // AllBlocks returns entry followed by labeled blocks.
 func (f *Function) AllBlocks() []*Block {
@@ -187,11 +181,13 @@ type BodyLine struct {
 }
 
 // Instruction is one instruction body-line. The textual `<op>.<suffix>` is
-// stored split: Op holds the base name; exactly one of Suffix (a type) or
-// Sig (a fnsig name, for indirect call/tailcall) may be set.
+// stored split: Op holds the opcode (§4's closed, spec-fixed vocabulary —
+// see opcode.go); exactly one of Suffix (a type) or Sig (a fnsig name, for
+// indirect call/tailcall) may be set. Op's zero value, OpInvalid, is never
+// a legal instruction opcode.
 type Instruction struct {
 	Result string // "" iff the instruction produces no value (§1.3 rule 6)
-	Op     string
+	Op     Opcode
 	Suffix Type   // nil if no type suffix
 	Sig    string // fnsig name for call.<fnsig>; "" otherwise
 	Args   []Operand
@@ -239,12 +235,16 @@ type AsmBinding struct {
 type AsmOperandKind string
 
 const (
-	AsmOperandKindRegister AsmOperandKind = "register"
+	AsmOperandKindRegister  AsmOperandKind = "register"
 	AsmOperandKindImmediate AsmOperandKind = "immediate"
 	AsmOperandKindMemory    AsmOperandKind = "memory"
 	AsmOperandKindLabel     AsmOperandKind = "label" // branch target, asm-local (§4)
 )
 
+// AsmOperand's Register/Memory/Mnemonic-adjacent fields stay stringly-typed
+// on purpose: §4 defines dialect data (register tables, mnemonic tables)
+// as open, per-architecture tables the verifier looks names up in
+// (targets.go), not a closed Go-level vocabulary the way core Opcodes are.
 type AsmOperand struct {
 	Kind      AsmOperandKind
 	Register  string  // for AsmOperandKindRegister
@@ -261,7 +261,9 @@ func AsmLabelReference(name string) AsmOperand {
 }
 
 // AsmCodeLine is one line inside `code:` — either a mnemonic instruction or
-// a dialect-local label declaration (§1.1 asm-line grammar).
+// a dialect-local label declaration (§1.1 asm-line grammar). Mnemonic is a
+// string because it indexes a per-dialect data table (§4 "Dialect
+// Definitions & Data Structures"), not a closed enum.
 type AsmCodeLine struct {
 	LabelDeclaration string // non-empty ⇒ this line is solely "name:" (§4 label isolation)
 	Mnemonic         string // empty when LabelDeclaration is set
@@ -355,47 +357,4 @@ func (m *Module) EntryFunction() *Function {
 		}
 	}
 	return nil
-}
-
-// ---------------------------------------------------------------------------
-// Recognized `main`-style entry signatures (vvm's entry-thunk gate).
-// ---------------------------------------------------------------------------
-
-// MainSignature identifies a recognized libc-style `main` shape. This is
-// purely a shape check at the IR level — deciding *whether* an fn matching
-// one of these shapes should actually get a libc-style process-entry
-// wrapper synthesized (vs. wired in raw) is a policy call made one layer
-// up, by vvm, based on target OS and output kind. A struct/array-heavy or
-// otherwise unusual entry fn simply reports MainSignatureNone and is always
-// wired in raw.
-type MainSignature int
-
-const (
-	MainSignatureNone         MainSignature = iota // not a recognized shape — wire in raw
-	MainSignatureBare                               // () i32
-	MainSignatureArgcArgv                           // (i32, ptr) i32
-	MainSignatureArgcArgvEnvp                       // (i32, ptr, ptr) i32
-)
-
-// RecognizedMainSignature reports which (if any) libc-style `main` shape f
-// matches. Return type must be exactly i32 (an exit code); this alone
-// already excludes void/noreturn entries, which §9.4a rejects pairing with
-// `entry` in the first place.
-func RecognizedMainSignature(f *Function) MainSignature {
-	if !Equal(f.Ret, I32) {
-		return MainSignatureNone
-	}
-	switch len(f.Params) {
-	case 0:
-		return MainSignatureBare
-	case 2:
-		if Equal(f.Params[0].Type, I32) && IsPtr(f.Params[1].Type) {
-			return MainSignatureArgcArgv
-		}
-	case 3:
-		if Equal(f.Params[0].Type, I32) && IsPtr(f.Params[1].Type) && IsPtr(f.Params[2].Type) {
-			return MainSignatureArgcArgvEnvp
-		}
-	}
-	return MainSignatureNone
 }

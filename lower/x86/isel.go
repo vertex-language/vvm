@@ -3,16 +3,9 @@ package x86
 import (
 	"fmt"
 
-	isax86 "github.com/vertex-language/vvm/isa/x86"
 	"github.com/vertex-language/vvm/ir/vir"
+	isax86 "github.com/vertex-language/vvm/isa/x86"
 )
-
-// Lower converts a verified module into an x86 Program — see x86.go.
-// This file is instruction selection: turning one vir.Function's body
-// into an Inst stream over the EAX/ECX/EDX scratch set, with every named
-// value materialized through its own stack slot (Slot). Register operands
-// are isax86.Reg values used directly (isax86.REAX, ...) — no local
-// rEAX-style aliases.
 
 func (lw *lowerer) lowerFunc(f *vir.Function) (Func, error) {
 	fl := &fnLower{lowerer: lw, f: f}
@@ -63,18 +56,14 @@ type fnLower struct {
 	nlbl  int
 }
 
-func (fl *fnLower) emit(i Inst)            { fl.b = append(fl.b, i) }
-func (fl *fnLower) mov(d, s Opr)           { fl.emit(Inst{Op: "mov", D: d, S: s, Sz: 4}) }
+func (fl *fnLower) emit(i Inst)             { fl.b = append(fl.b, i) }
+func (fl *fnLower) mov(d, s Opr)            { fl.emit(Inst{Op: "mov", D: d, S: s, Sz: 4}) }
 func (fl *fnLower) alu(op string, d, s Opr) { fl.emit(Inst{Op: op, D: d, S: s}) }
 func (fl *fnLower) label() string {
 	fl.nlbl++
 	return fmt.Sprintf(".L%s.%d", fl.f.Name, fl.nlbl)
 }
 
-// typeFunc mirrors the verifier's result-type/type-fixation computation
-// for the subset this backend supports (input is verified, so lookups
-// cannot fail semantically), including asm `out` bindings, which follow
-// the same Join Convention as ordinary instructions (§4, §5 rule 2).
 func (fl *fnLower) typeFunc() (map[string]vir.Type, error) {
 	types := map[string]vir.Type{}
 	for _, p := range fl.f.Params {
@@ -104,7 +93,7 @@ func (fl *fnLower) typeFunc() (map[string]vir.Type, error) {
 				continue
 			}
 			in := ln.Instruction
-			if in.Op == "loc" || in.Result == "" {
+			if in.Op == vir.OpLoc || in.Result == "" {
 				continue
 			}
 			if _, done := types[in.Result]; done {
@@ -140,16 +129,40 @@ func (fl *fnLower) checkValueType(t vir.Type) error {
 	return fmt.Errorf("type %s cannot be a named value on x86", t)
 }
 
-var voidOps = map[string]bool{
-	"store": true, "store_vol": true, "atomic_store": true,
-	"memcopy": true, "memmove": true, "memset": true,
-	"fence": true, "prefetch": true, "masked_store": true, "scatter": true,
+var voidOps = map[vir.Opcode]bool{
+	vir.OpStore:       true,
+	vir.OpStoreVol:    true,
+	vir.OpAtomicStore: true,
+	vir.OpMemcopy:     true,
+	vir.OpMemmove:     true,
+	vir.OpMemset:      true,
+	vir.OpFence:       true,
+	vir.OpPrefetch:    true,
+	vir.OpMaskedStore: true,
+	vir.OpScatter:     true,
 }
-var cmpOps = map[string]bool{
-	"eq": true, "ne": true, "slt": true, "sgt": true, "sle": true, "sge": true,
-	"ult": true, "ugt": true, "ule": true, "uge": true,
-	"lt": true, "gt": true, "le": true, "ge": true,
-	"uaddo": true, "saddo": true, "usubo": true, "ssubo": true, "umulo": true, "smulo": true,
+
+var cmpOps = map[vir.Opcode]bool{
+	vir.OpEq:     true,
+	vir.OpNe:     true,
+	vir.OpSlt:    true,
+	vir.OpSgt:    true,
+	vir.OpSle:    true,
+	vir.OpSge:    true,
+	vir.OpUlt:    true,
+	vir.OpUgt:    true,
+	vir.OpUle:    true,
+	vir.OpUge:    true,
+	vir.OpLt:     true,
+	vir.OpGt:     true,
+	vir.OpLe:     true,
+	vir.OpGe:     true,
+	vir.OpUAddO:  true,
+	vir.OpSAddO:  true,
+	vir.OpUSubO:  true,
+	vir.OpSSubO:  true,
+	vir.OpUMulO:  true,
+	vir.OpSMulO:  true,
 }
 
 func (fl *fnLower) resultType(in *vir.Instruction) (vir.Type, error) {
@@ -158,7 +171,7 @@ func (fl *fnLower) resultType(in *vir.Instruction) (vir.Type, error) {
 		return vir.Void, nil
 	case cmpOps[in.Op]:
 		return vir.I1, nil
-	case in.Op == "call":
+	case in.Op == vir.OpCall:
 		if in.Sig != "" {
 			for _, s := range fl.m.FunctionSignatures {
 				if s.Name == in.Sig {
@@ -172,7 +185,7 @@ func (fl *fnLower) resultType(in *vir.Instruction) (vir.Type, error) {
 			return nil, fmt.Errorf("callee %q not declared", in.Args[0].Ident)
 		}
 		return ret, nil
-	case in.Op == "syscall":
+	case in.Op == vir.OpSyscall:
 		if in.Suffix == nil {
 			return nil, fmt.Errorf("syscall: missing return type suffix")
 		}
@@ -180,12 +193,8 @@ func (fl *fnLower) resultType(in *vir.Instruction) (vir.Type, error) {
 	case in.Suffix != nil:
 		return in.Suffix, nil
 	}
-	return nil, fmt.Errorf("op %q has no result type", in.Op)
+	return nil, fmt.Errorf("op %s has no result type", in.Op)
 }
-
-// ---------------------------------------------------------------------------
-// Operand loading / storing
-// ---------------------------------------------------------------------------
 
 func bitsOf(t vir.Type) int {
 	switch x := t.(type) {
@@ -208,7 +217,6 @@ func szOf(t vir.Type) int {
 	return 4
 }
 
-// litBits masks v to t's width, sign- or zero-extending back to 32 bits.
 func litBits(v int64, t vir.Type, signed bool) int64 {
 	b := uint(bitsOf(t))
 	if b >= 32 {
@@ -222,9 +230,6 @@ func litBits(v int64, t vir.Type, signed bool) int64 {
 	return int64(int32(u))
 }
 
-// load materializes operand o (of type t) into r as a 32-bit value.
-// Values narrower than 32 bits live zero-extended; signed=true requests a
-// sign-extended materialization instead.
 func (fl *fnLower) load(o vir.Operand, t vir.Type, r isax86.Reg, signed bool) error {
 	switch o.Kind {
 	case vir.OperandInt:
@@ -284,9 +289,6 @@ func (fl *fnLower) norm(r isax86.Reg, t vir.Type) {
 	}
 }
 
-// Resolve implements SymbolResolver: an ident used as a raw asm-line
-// operand resolves exactly like an ordinary instruction operand would
-// (§4 Addresses).
 func (fl *fnLower) Resolve(name string) (Opr, error) {
 	switch fl.kinds[name] {
 	case "const":
@@ -312,10 +314,6 @@ func (fl *fnLower) Resolve(name string) (Opr, error) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Inline assembly
-// ---------------------------------------------------------------------------
-
 func (fl *fnLower) selAsm(blockIdx, lineIdx int, a *vir.AsmBlock) error {
 	if fl.m.AsmDialect == nil || fl.m.Target == nil {
 		return fmt.Errorf("asm block present but module has no asmdialect/target (should have been rejected by Verify, §1.2 rule 11)")
@@ -330,10 +328,6 @@ func (fl *fnLower) selAsm(blockIdx, lineIdx int, a *vir.AsmBlock) error {
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// Syscalls
-// ---------------------------------------------------------------------------
-
 func (fl *fnLower) selSyscall(in *vir.Instruction) error {
 	if fl.m.Target == nil {
 		return fmt.Errorf("syscall: module has no target declaration")
@@ -342,15 +336,13 @@ func (fl *fnLower) selSyscall(in *vir.Instruction) error {
 	conv, ok := syscallConventionFor(osName)
 	if !ok {
 		if osName == "none" || osName == "uefi" {
-			// §4: "executes a runtime trap if unsupported" absent an
-			// explicitly enabled feature-tier flag providing a convention.
 			fl.emit(Inst{Op: "ud2"})
 			return nil
 		}
 		return fmt.Errorf("syscall: no lowering convention for target os %q", osName)
 	}
 
-	args := in.Args // args[0] = sysno, args[1:] = up to six arguments
+	args := in.Args
 	var stackVals []vir.Operand
 	regVals := map[int]vir.Operand{}
 	for i, a := range args {
@@ -361,9 +353,6 @@ func (fl *fnLower) selSyscall(in *vir.Instruction) error {
 		}
 	}
 
-	// Push stack-passed arguments first, before any register (including
-	// sysno) is loaded, so no scratch register we use here can clobber a
-	// value about to be materialized into a syscall register.
 	if len(stackVals) > 0 {
 		if conv.StackArgsPushRetAddrPlaceholder {
 			fl.emit(Inst{Op: "push", S: Imm(0)})
@@ -397,39 +386,46 @@ func (fl *fnLower) selSyscall(in *vir.Instruction) error {
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// Instruction selection
-// ---------------------------------------------------------------------------
-
 func (fl *fnLower) selInst(in *vir.Instruction) error {
 	op, t, a := in.Op, in.Suffix, in.Args
-	signedCmp := map[string]byte{"slt": isax86.CondL, "sle": isax86.CondLE, "sgt": isax86.CondG, "sge": isax86.CondGE}
-	unsignedCmp := map[string]byte{"eq": isax86.CondE, "ne": isax86.CondNE, "ult": isax86.CondB, "ule": isax86.CondBE, "ugt": isax86.CondA, "uge": isax86.CondAE}
+
+	signedCmp := map[vir.Opcode]byte{
+		vir.OpSlt: isax86.CondL,
+		vir.OpSle: isax86.CondLE,
+		vir.OpSgt: isax86.CondG,
+		vir.OpSge: isax86.CondGE,
+	}
+	unsignedCmp := map[vir.Opcode]byte{
+		vir.OpEq:  isax86.CondE,
+		vir.OpNe:  isax86.CondNE,
+		vir.OpUlt: isax86.CondB,
+		vir.OpUle: isax86.CondBE,
+		vir.OpUgt: isax86.CondA,
+		vir.OpUge: isax86.CondAE,
+	}
 
 	switch {
-	case op == "loc":
+	case op == vir.OpLoc:
 		return nil
 
-	case op == "mov":
-		if err := fl.load(a[0], t, isax86.REAX, false); err != nil {
-			return err
-		}
-		fl.st(in.Result, isax86.REAX)
-
-	case op == "add" || op == "sub" || op == "and" || op == "or" || op == "xor":
+	case op == vir.OpAdd || op == vir.OpSub || op == vir.OpAnd || op == vir.OpOr || op == vir.OpXor:
 		if err := fl.load(a[0], t, isax86.REAX, false); err != nil {
 			return err
 		}
 		if err := fl.load(a[1], t, isax86.RECX, false); err != nil {
 			return err
 		}
-		fl.alu(op, R(isax86.REAX), R(isax86.RECX))
-		if op == "add" || op == "sub" {
+		x86op := map[vir.Opcode]string{
+			vir.OpAdd: "add", vir.OpSub: "sub",
+			vir.OpAnd: "and", vir.OpOr: "or", vir.OpXor: "xor",
+		}[op]
+		fl.alu(x86op, R(isax86.REAX), R(isax86.RECX))
+		if op == vir.OpAdd || op == vir.OpSub {
 			fl.norm(isax86.REAX, t)
 		}
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "mul":
+	case op == vir.OpMul:
 		if err := fl.load(a[0], t, isax86.REAX, false); err != nil {
 			return err
 		}
@@ -440,15 +436,19 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		fl.norm(isax86.REAX, t)
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "neg" || op == "not":
+	case op == vir.OpNeg || op == vir.OpNot:
 		if err := fl.load(a[0], t, isax86.REAX, false); err != nil {
 			return err
 		}
-		fl.emit(Inst{Op: op, S: R(isax86.REAX)})
+		x86op := "neg"
+		if op == vir.OpNot {
+			x86op = "not"
+		}
+		fl.emit(Inst{Op: x86op, S: R(isax86.REAX)})
 		fl.norm(isax86.REAX, t)
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "abs":
+	case op == vir.OpAbs:
 		if err := fl.load(a[0], t, isax86.REAX, true); err != nil {
 			return err
 		}
@@ -459,7 +459,7 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		fl.norm(isax86.REAX, t)
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "udiv" || op == "urem":
+	case op == vir.OpUDiv || op == vir.OpURem:
 		if err := fl.load(a[0], t, isax86.REAX, false); err != nil {
 			return err
 		}
@@ -469,14 +469,12 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		fl.alu("xor", R(isax86.REDX), R(isax86.REDX))
 		fl.emit(Inst{Op: "div", S: R(isax86.RECX)})
 		r := isax86.REAX
-		if op == "urem" {
+		if op == vir.OpURem {
 			r = isax86.REDX
 		}
 		fl.st(in.Result, r)
 
-	case op == "sdiv" || op == "srem":
-		// TODO(§6.1): narrow INT_MIN/-1 (e.g. i8 -128/-1) must trap but the
-		// widened 32-bit idiv wraps instead; needs an explicit check for sz<4.
+	case op == vir.OpSDiv || op == vir.OpSRem:
 		if err := fl.load(a[0], t, isax86.REAX, true); err != nil {
 			return err
 		}
@@ -486,14 +484,14 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		fl.emit(Inst{Op: "cdq"})
 		fl.emit(Inst{Op: "idiv", S: R(isax86.RECX)})
 		r := isax86.REAX
-		if op == "srem" {
+		if op == vir.OpSRem {
 			r = isax86.REDX
 		}
 		fl.norm(r, t)
 		fl.st(in.Result, r)
 
-	case op == "shl" || op == "lshr" || op == "ashr":
-		signedV := op == "ashr"
+	case op == vir.OpShl || op == vir.OpLShr || op == vir.OpAShr:
+		signedV := op == vir.OpAShr
 		if err := fl.load(a[0], t, isax86.REAX, signedV); err != nil {
 			return err
 		}
@@ -503,12 +501,12 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		if bitsOf(t) < 32 {
 			fl.alu("and", R(isax86.RECX), Imm(int64(bitsOf(t)-1)))
 		}
-		x86op := map[string]string{"shl": "shl", "lshr": "shr", "ashr": "sar"}[op]
+		x86op := map[vir.Opcode]string{vir.OpShl: "shl", vir.OpLShr: "shr", vir.OpAShr: "sar"}[op]
 		fl.emit(Inst{Op: x86op, D: R(isax86.REAX), Sz: 4})
 		fl.norm(isax86.REAX, t)
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "rotl" || op == "rotr":
+	case op == vir.OpRotl || op == vir.OpRotr:
 		if err := fl.load(a[0], t, isax86.REAX, false); err != nil {
 			return err
 		}
@@ -516,15 +514,15 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 			return err
 		}
 		x86op := "rol"
-		if op == "rotr" {
+		if op == vir.OpRotr {
 			x86op = "ror"
 		}
 		fl.emit(Inst{Op: x86op, D: R(isax86.REAX), Sz: szOf(t)})
 		fl.norm(isax86.REAX, t)
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "smin" || op == "smax" || op == "umin" || op == "umax":
-		signed := op[0] == 's'
+	case op == vir.OpSMin || op == vir.OpSMax || op == vir.OpUMin || op == vir.OpUMax:
+		signed := op == vir.OpSMin || op == vir.OpSMax
 		if err := fl.load(a[0], t, isax86.REAX, signed); err != nil {
 			return err
 		}
@@ -532,12 +530,15 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 			return err
 		}
 		fl.alu("cmp", R(isax86.REAX), R(isax86.RECX))
-		cc := map[string]byte{"smin": isax86.CondG, "smax": isax86.CondL, "umin": isax86.CondA, "umax": isax86.CondB}[op]
+		cc := map[vir.Opcode]byte{
+			vir.OpSMin: isax86.CondG, vir.OpSMax: isax86.CondL,
+			vir.OpUMin: isax86.CondA, vir.OpUMax: isax86.CondB,
+		}[op]
 		fl.emit(Inst{Op: "cmovcc", CC: cc, D: R(isax86.REAX), S: R(isax86.RECX)})
 		fl.norm(isax86.REAX, t)
 		fl.st(in.Result, isax86.REAX)
 
-	case signedCmp[op] != 0 || unsignedCmp[op] != 0 || op == "eq" || op == "ne":
+	case signedCmp[op] != 0 || unsignedCmp[op] != 0:
 		cc, signed := unsignedCmp[op], false
 		if c, ok := signedCmp[op]; ok {
 			cc, signed = c, true
@@ -553,14 +554,14 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		fl.emit(Inst{Op: "movzx", D: R(isax86.REAX), S: R(isax86.REAX), Sz: 1})
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "lt" || op == "gt" || op == "le" || op == "ge":
+	case op == vir.OpLt || op == vir.OpGt || op == vir.OpLe || op == vir.OpGe:
 		return fmt.Errorf("float compares not lowered on x86 (TODO)")
 
-	case op == "uaddo" || op == "saddo" || op == "usubo" || op == "ssubo" || op == "umulo" || op == "smulo":
+	case op == vir.OpUAddO || op == vir.OpSAddO || op == vir.OpUSubO || op == vir.OpSSubO || op == vir.OpUMulO || op == vir.OpSMulO:
 		return fl.selOverflow(in)
 
-	case op == "umulh" || op == "smulh":
-		signed := op == "smulh"
+	case op == vir.OpUMulH || op == vir.OpSMulH:
+		signed := op == vir.OpSMulH
 		if err := fl.load(a[0], t, isax86.REAX, signed); err != nil {
 			return err
 		}
@@ -585,10 +586,10 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 			fl.st(in.Result, isax86.REAX)
 		}
 
-	case op == "uadd_sat" || op == "sadd_sat" || op == "usub_sat" || op == "ssub_sat":
+	case op == vir.OpUAddSat || op == vir.OpSAddSat || op == vir.OpUSubSat || op == vir.OpSSubSat:
 		return fmt.Errorf("saturating arithmetic not yet lowered on x86 (TODO)")
 
-	case op == "ctlz":
+	case op == vir.OpCtlz:
 		if err := fl.load(a[0], t, isax86.RECX, false); err != nil {
 			return err
 		}
@@ -599,7 +600,7 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		fl.alu("sub", R(isax86.RECX), R(isax86.REAX))
 		fl.st(in.Result, isax86.RECX)
 
-	case op == "cttz":
+	case op == vir.OpCttz:
 		if err := fl.load(a[0], t, isax86.RECX, false); err != nil {
 			return err
 		}
@@ -608,14 +609,14 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		fl.emit(Inst{Op: "cmovcc", CC: isax86.CondNE, D: R(isax86.REAX), S: R(isax86.REDX)})
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "popcnt":
+	case op == vir.OpPopcnt:
 		if err := fl.load(a[0], t, isax86.RECX, false); err != nil {
 			return err
 		}
 		fl.emit(Inst{Op: "popcnt", D: R(isax86.REAX), S: R(isax86.RECX)})
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "bswap":
+	case op == vir.OpBSwap:
 		if err := fl.load(a[0], t, isax86.REAX, false); err != nil {
 			return err
 		}
@@ -627,10 +628,10 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		}
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "bitrev":
+	case op == vir.OpBitrev:
 		return fmt.Errorf("bitrev not yet lowered on x86 (SWAR sequence TODO)")
 
-	case op == "select":
+	case op == vir.OpSelect:
 		if err := fl.load(a[0], vir.I1, isax86.REAX, false); err != nil {
 			return err
 		}
@@ -644,7 +645,7 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		fl.emit(Inst{Op: "cmovcc", CC: isax86.CondE, D: R(isax86.RECX), S: R(isax86.REDX)})
 		fl.st(in.Result, isax86.RECX)
 
-	case op == "load" || op == "load_vol" || op == "atomic_load":
+	case op == vir.OpLoad || op == vir.OpLoadVol || op == vir.OpAtomicLoad:
 		if err := fl.load(a[0], vir.Ptr, isax86.RECX, false); err != nil {
 			return err
 		}
@@ -656,7 +657,7 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		}
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "store" || op == "store_vol" || op == "atomic_store":
+	case op == vir.OpStore || op == vir.OpStoreVol || op == vir.OpAtomicStore:
 		if err := fl.load(a[0], vir.Ptr, isax86.RECX, false); err != nil {
 			return err
 		}
@@ -664,11 +665,11 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 			return err
 		}
 		fl.emit(Inst{Op: "mov", D: Mem(isax86.RECX, 0), S: R(isax86.REAX), Sz: szOf(t)})
-		if op == "atomic_store" && lastOrd(a) == "seqcst" {
+		if op == vir.OpAtomicStore && lastOrd(a) == "seqcst" {
 			fl.emit(Inst{Op: "mfence"})
 		}
 
-	case op == "alloca":
+	case op == vir.OpAlloca:
 		if err := fl.load(a[0], vir.I32, isax86.REAX, false); err != nil {
 			return err
 		}
@@ -680,7 +681,7 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		}
 		fl.st(in.Result, isax86.RESP)
 
-	case op == "field":
+	case op == vir.OpField:
 		off, err := fl.lay.FieldOffset(a[1].Ident, a[2].Ident)
 		if err != nil {
 			return err
@@ -693,7 +694,7 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		}
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "index":
+	case op == vir.OpIndex:
 		esz, err := fl.lay.Size(a[1].Type)
 		if err != nil {
 			return err
@@ -708,11 +709,11 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		fl.alu("add", R(isax86.REAX), R(isax86.RECX))
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "memcopy" || op == "memset":
+	case op == vir.OpMemcopy || op == vir.OpMemset:
 		if err := fl.load(a[0], vir.Ptr, isax86.REDI, false); err != nil {
 			return err
 		}
-		if op == "memcopy" {
+		if op == vir.OpMemcopy {
 			if err := fl.load(a[1], vir.Ptr, isax86.RESI, false); err != nil {
 				return err
 			}
@@ -725,13 +726,13 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 			return err
 		}
 		fl.emit(Inst{Op: "cld"})
-		if op == "memcopy" {
+		if op == vir.OpMemcopy {
 			fl.emit(Inst{Op: "rep_movsb"})
 		} else {
 			fl.emit(Inst{Op: "rep_stosb"})
 		}
 
-	case op == "memmove":
+	case op == vir.OpMemmove:
 		fwd, done := fl.label(), fl.label()
 		if err := fl.load(a[0], vir.Ptr, isax86.REDI, false); err != nil {
 			return err
@@ -757,16 +758,16 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		fl.emit(Inst{Op: "rep_movsb"})
 		fl.emit(Inst{Op: "label", Lbl: done})
 
-	case op == "prefetch":
+	case op == vir.OpPrefetch:
 		return nil
 
-	case op == "fence":
+	case op == vir.OpFence:
 		if lastOrd(a) == "seqcst" {
 			fl.emit(Inst{Op: "mfence"})
 		}
 		return nil
 
-	case op == "atomic_add" || op == "atomic_sub" || op == "atomic_xchg":
+	case op == vir.OpAtomicAdd || op == vir.OpAtomicSub || op == vir.OpAtomicXchg:
 		if szOf(t) != 4 {
 			return fmt.Errorf("%s narrower than 32 bits not yet lowered on x86 (TODO)", op)
 		}
@@ -777,17 +778,17 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 			return err
 		}
 		switch op {
-		case "atomic_sub":
+		case vir.OpAtomicSub:
 			fl.emit(Inst{Op: "neg", S: R(isax86.REAX)})
 			fallthrough
-		case "atomic_add":
+		case vir.OpAtomicAdd:
 			fl.emit(Inst{Op: "lock_xadd", D: Mem(isax86.RECX, 0), S: R(isax86.REAX)})
-		case "atomic_xchg":
+		case vir.OpAtomicXchg:
 			fl.emit(Inst{Op: "xchg", D: Mem(isax86.RECX, 0), S: R(isax86.REAX)})
 		}
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "atomic_and" || op == "atomic_or" || op == "atomic_xor":
+	case op == vir.OpAtomicAnd || op == vir.OpAtomicOr || op == vir.OpAtomicXor:
 		if szOf(t) != 4 {
 			return fmt.Errorf("%s narrower than 32 bits not yet lowered on x86 (TODO)", op)
 		}
@@ -801,12 +802,13 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		fl.emit(Inst{Op: "mov", D: R(isax86.REAX), S: Mem(isax86.RESI, 0), Sz: 4})
 		fl.emit(Inst{Op: "label", Lbl: loop})
 		fl.mov(R(isax86.RECX), R(isax86.REAX))
-		fl.alu(op[len("atomic_"):], R(isax86.RECX), R(isax86.REDX))
+		aluOp := map[vir.Opcode]string{vir.OpAtomicAnd: "and", vir.OpAtomicOr: "or", vir.OpAtomicXor: "xor"}[op]
+		fl.alu(aluOp, R(isax86.RECX), R(isax86.REDX))
 		fl.emit(Inst{Op: "lock_cmpxchg", D: Mem(isax86.RESI, 0), S: R(isax86.RECX)})
 		fl.emit(Inst{Op: "jcc", CC: isax86.CondNE, Lbl: loop})
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "cmpxchg":
+	case op == vir.OpCmpxchg:
 		if szOf(t) != 4 {
 			return fmt.Errorf("cmpxchg narrower than 32 bits not yet lowered on x86 (TODO)")
 		}
@@ -822,20 +824,20 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		fl.emit(Inst{Op: "lock_cmpxchg", D: Mem(isax86.RECX, 0), S: R(isax86.REDX)})
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "trunc":
+	case op == vir.OpTrunc:
 		if err := fl.load(a[0], nil, isax86.REAX, false); err != nil {
 			return err
 		}
 		fl.norm(isax86.REAX, t)
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "zext":
+	case op == vir.OpZext:
 		if err := fl.load(a[0], nil, isax86.REAX, false); err != nil {
 			return err
 		}
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "sext":
+	case op == vir.OpSext:
 		st, err := fl.typeOfOperand(a[0])
 		if err != nil {
 			return err
@@ -853,7 +855,7 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		fl.norm(isax86.REAX, t)
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "bitcast":
+	case op == vir.OpBitcast:
 		st, err := fl.typeOfOperand(a[0])
 		if err != nil {
 			return err
@@ -866,33 +868,33 @@ func (fl *fnLower) selInst(in *vir.Instruction) error {
 		}
 		fl.st(in.Result, isax86.REAX)
 
-	case op == "call":
+	case op == vir.OpCall:
 		return fl.selCall(in)
 
-	case op == "syscall":
+	case op == vir.OpSyscall:
 		return fl.selSyscall(in)
 
-	case op == "fdemote" || op == "fpromote" || op == "sfromint" || op == "ufromint" ||
-		op == "stoint" || op == "utoint" || op == "stoint_sat" || op == "utoint_sat" ||
-		op == "sqrt" || op == "fma" || op == "copysign" || op == "floor" || op == "ceil" ||
-		op == "trunc_f" || op == "nearest" || op == "min" || op == "max":
-		return fmt.Errorf("floating-point op %q not lowered on x86 (x87/SSE tier TODO)", op)
+	case op == vir.OpFdemote || op == vir.OpFpromote || op == vir.OpSfromint || op == vir.OpUfromint ||
+		op == vir.OpStoint || op == vir.OpUtoint || op == vir.OpStointSat || op == vir.OpUtointSat ||
+		op == vir.OpSqrt || op == vir.OpFma || op == vir.OpCopysign || op == vir.OpFloor || op == vir.OpCeil ||
+		op == vir.OpTruncF || op == vir.OpNearest || op == vir.OpMin || op == vir.OpMax:
+		return fmt.Errorf("floating-point op %s not lowered on x86 (x87/SSE tier TODO)", op)
 
-	case op == "splat" || op == "extract" || op == "insert" || op == "shuffle" ||
-		op == "masked_load" || op == "masked_store" || op == "gather" || op == "scatter" ||
-		op == "reduce_add" || op == "reduce_min" || op == "reduce_max" ||
-		op == "reduce_and" || op == "reduce_or" || op == "reduce_xor":
-		return fmt.Errorf("vector op %q not lowered on x86 (tier TODO, §10.4)", op)
+	case op == vir.OpSplat || op == vir.OpExtract || op == vir.OpInsert || op == vir.OpShuffle ||
+		op == vir.OpMaskedLoad || op == vir.OpMaskedStore || op == vir.OpGather || op == vir.OpScatter ||
+		op == vir.OpReduceAdd || op == vir.OpReduceMin || op == vir.OpReduceMax ||
+		op == vir.OpReduceAnd || op == vir.OpReduceOr || op == vir.OpReduceXor:
+		return fmt.Errorf("vector op %s not lowered on x86 (tier TODO, §10.4)", op)
 
 	default:
-		return fmt.Errorf("op %q not lowered on x86", op)
+		return fmt.Errorf("op %s not lowered on x86", op)
 	}
 	return nil
 }
 
 func (fl *fnLower) selOverflow(in *vir.Instruction) error {
 	t, a := in.Suffix, in.Args
-	signed := in.Op[0] == 's'
+	signed := in.Op == vir.OpSAddO || in.Op == vir.OpSSubO || in.Op == vir.OpSMulO
 	if err := fl.load(a[0], t, isax86.REAX, signed); err != nil {
 		return err
 	}
@@ -902,31 +904,29 @@ func (fl *fnLower) selOverflow(in *vir.Instruction) error {
 	if szOf(t) == 4 {
 		var cc byte
 		switch in.Op {
-		case "uaddo", "usubo":
+		case vir.OpUAddO, vir.OpUSubO:
 			cc = isax86.CondB
-		case "saddo", "ssubo", "smulo":
-			cc = isax86.CondO
-		case "umulo":
+		case vir.OpSAddO, vir.OpSSubO, vir.OpSMulO, vir.OpUMulO:
 			cc = isax86.CondO
 		}
 		switch in.Op {
-		case "uaddo", "saddo":
+		case vir.OpUAddO, vir.OpSAddO:
 			fl.alu("add", R(isax86.REAX), R(isax86.RECX))
-		case "usubo", "ssubo":
+		case vir.OpUSubO, vir.OpSSubO:
 			fl.alu("sub", R(isax86.REAX), R(isax86.RECX))
-		case "umulo":
+		case vir.OpUMulO:
 			fl.emit(Inst{Op: "mul32", S: R(isax86.RECX)})
-		case "smulo":
+		case vir.OpSMulO:
 			fl.emit(Inst{Op: "imul32", S: R(isax86.RECX)})
 		}
 		fl.emit(Inst{Op: "setcc", CC: cc, D: R(isax86.REAX)})
 	} else {
 		switch in.Op {
-		case "uaddo", "saddo":
+		case vir.OpUAddO, vir.OpSAddO:
 			fl.alu("add", R(isax86.REAX), R(isax86.RECX))
-		case "usubo", "ssubo":
+		case vir.OpUSubO, vir.OpSSubO:
 			fl.alu("sub", R(isax86.REAX), R(isax86.RECX))
-		case "umulo", "smulo":
+		case vir.OpUMulO, vir.OpSMulO:
 			fl.emit(Inst{Op: "imul", D: R(isax86.REAX), S: R(isax86.RECX)})
 		}
 		ext := "movzx"
@@ -967,10 +967,6 @@ func lastOrd(args []vir.Operand) string {
 	}
 	return ""
 }
-
-// ---------------------------------------------------------------------------
-// Calls (cdecl) and terminators
-// ---------------------------------------------------------------------------
 
 func (fl *fnLower) selCall(in *vir.Instruction) error {
 	args := in.Args
@@ -1088,10 +1084,6 @@ func (fl *fnLower) selTerm(t vir.Terminator) error {
 	return nil
 }
 
-// selTailCall implements guaranteed tail calls (§5) for the eligible shape
-// this backend supports: the callee's argument bytes fit inside the
-// caller's own incoming argument area (which cdecl lets the callee
-// overwrite).
 func (fl *fnLower) selTailCall(x vir.TailCall) error {
 	args := x.Args
 	indirect := x.Callee == ""

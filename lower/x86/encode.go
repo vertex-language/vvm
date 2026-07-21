@@ -1,13 +1,3 @@
-// encode.go is the last stage of the pipeline: it takes a selected Inst
-// stream (labels, OSlot operands, epilogue pseudo-ops and all) plus the
-// Frame instruction selection was built against, and produces real IA-32
-// bytes. It wraps the body in a prologue/epilogue, resolves every OSlot to
-// its EBP-relative home, expands "epi_ret"/"epi_jmp_sym"/"epi_jmp_r" into
-// their real instruction sequences, and hands the fully concrete stream to
-// isa/x86/encoder — the generic, vir-agnostic assembler — for byte
-// emission. This is what used to be package mcode's own (unseen) Encode
-// plus package regalloc's ResolveSlots; there's no reason for either to be
-// a separate package from the Inst type they operate on.
 package x86
 
 import (
@@ -17,8 +7,6 @@ import (
 	"github.com/vertex-language/vvm/isa/x86/encoder"
 )
 
-// assemble turns one function's selected instruction stream into machine
-// bytes and its relocations.
 func assemble(body []Inst, fr *Frame) ([]byte, []encoder.Fixup, error) {
 	out := prologue(fr)
 	for _, in := range body {
@@ -54,9 +42,6 @@ func assemble(body []Inst, fr *Frame) ([]byte, []encoder.Fixup, error) {
 	return encoder.Encode(einsts)
 }
 
-// resolveSlot rewrites an OSlot operand into the concrete EBP-relative
-// memory operand its Frame assigned it. Every other operand kind is
-// already what isa/x86/encoder expects and passes through untouched.
 func resolveSlot(o *Opr, fr *Frame) error {
 	if o.Kind != OSlot {
 		return nil
@@ -96,18 +81,12 @@ func epilogue(fr *Frame) []Inst {
 	)
 }
 
-// toEncoderOpr and toEncoderInst are the one necessary translation this
-// package performs: isa/x86/encoder.Opr has no OSlot variant at all (it's
-// strictly post-resolution), so once resolveSlot has run, converting is a
-// plain field-for-field copy. Reaching this with an unresolved OSlot still
-// present is a bug in this package, not a user error — reported, not
-// panicked, so a caller can decide how to surface it.
 func toEncoderOpr(o Opr) (encoder.Opr, error) {
 	if o.Kind == OSlot {
 		return encoder.Opr{}, fmt.Errorf("encode: unresolved slot %q reached final assembly", o.Slot)
 	}
 	return encoder.Opr{
-		Kind:  encoder.OprKind(o.Kind), // ONone/OReg/OImm/OMem share position with encoder.OprKind
+		Kind:  encoder.OprKind(o.Kind),
 		Reg:   o.Reg,
 		Imm:   o.Imm,
 		Sym:   o.Sym,

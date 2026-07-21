@@ -325,7 +325,7 @@ func (w *writer) bodyLine(ln vir.BodyLine) {
 
 func (w *writer) instruction(i vir.Instruction) {
 	w.str(i.Result)
-	w.str(i.Op)
+	w.str(i.Op.String())
 	w.typ(i.Suffix)
 	w.str(i.Sig)
 	w.u(uint64(i.Align))

@@ -309,7 +309,15 @@ func (r *reader) bodyLine() vir.BodyLine {
 }
 
 func (r *reader) instruction() vir.Instruction {
-	i := vir.Instruction{Result: r.str(), Op: r.str(), Suffix: r.typ(), Sig: r.str()}
+	result := r.str()
+	opStr := r.str()
+	
+	op, ok := vir.ParseOpcode(opStr)
+	if !ok {
+		r.fail("unknown opcode %q", opStr)
+	}
+
+	i := vir.Instruction{Result: result, Op: op, Suffix: r.typ(), Sig: r.str()}
 	i.Align = int(r.u())
 	for k := r.u(); k > 0; k-- {
 		i.Args = append(i.Args, r.operand())

@@ -1,6 +1,6 @@
 # ir/vir
 
-`github.com/vertex-language/vvm/ir/vir`
+[github.com/vertex-language/vvm/ir/vir](https://github.com/vertex-language/vvm/ir/vir)
 
 The Vertex IR data model: the in-memory representation of a verified program, a construction API for building one, and the verifier that enforces every invariant the rest of the pipeline is allowed to assume. Every other package in the repository either produces a `vir.Module` or consumes one.
 
@@ -10,33 +10,37 @@ The Vertex IR data model: the in-memory representation of a verified program, a 
 
 ```go
 import "github.com/vertex-language/vvm/ir/vir"
+
 ```
 
 ---
 
 ## Package layout
 
-```
-ir/vir/
-├── module.go     Module (incl. module-wide AsmDialect field), Target, Struct,
-│                 FunctionSignature, Constant, Global, ConstInit variants,
-│                 Link, ExternGroup/ExternFunction, Function, Block,
-│                 Instruction, Terminator variants, the inline-asm data types
-│                 (AsmDialect, AsmBlock, AsmBinding, AsmOperand, AsmCodeLine, ...)
-├── types.go      Type interface: IntType, FloatType, PtrType, VoidType, VecType,
-│                 StructType, ArrayType; Equal, IsInt/IsFloat/.../IsValueType
-├── operand.go    Operand, OperandKind, constructors (Ident, IntLiteral, FloatLiteral,
-│                 StringLiteral, BoolLiteral, NullLiteral, TypeOperand,
-│                 OrderingOperand, VectorLiteral)
-├── float.go      formatFloat — canonical float-literal text
-├── targets.go    canonical arch/OS/ABI vocabularies, rejected-alias tables,
-│                 PointerBits, BinFormat/FormatOf, per-arch asm-dialect
-│                 legality (DialectsForArchitecture) and register tables
-│                 (X86RegisterTable, AArch64RegisterTable, ARMRegisterTable)
-├── builder.go    NewModule + FunctionBuilder + AsmBuilder — construction API,
-│                 never checks
-└── verify.go     Verify — the single place invariants are enforced
-```
+* **`module.go`**: Module (incl. module-wide AsmDialect field), Target, Struct, FunctionSignature, Constant, Global, ConstInit variants, Link, ExternGroup/ExternFunction, Function, Block, Instruction, Terminator variants, and inline-asm data types (AsmDialect, AsmBlock, AsmBinding, AsmOperand, AsmCodeLine).
+
+
+* **`opcode.go`**: Opcode — the closed, spec-fixed §4 instruction vocabulary as a Go enum, plus opTable (the single source of truth for each opcode's arity/operand-type-constraint/result-rule), String()/ParseOpcode, and an init()-time completeness check.
+
+
+* **`types.go`**: Type interface: IntType, FloatType, PtrType, VoidType, VecType, StructType, ArrayType; Equal, IsInt/IsFloat/.../IsValueType.
+
+
+* **`operand.go`**: Operand, OperandKind, and constructors (Ident, IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, NullLiteral, TypeOperand, OrderingOperand, VectorLiteral).
+
+
+* **`float.go`**: formatFloat — canonical float-literal text formatting.
+
+
+* **`targets.go`**: Canonical arch/OS/ABI vocabularies, rejected-alias tables, PointerBits, BinFormat/FormatOf, per-arch asm-dialect legality (DialectsForArchitecture), and populated register tables for standard architectures (x86, ARM/AArch64, RISC-V, PowerPC, MIPS, LoongArch, s390x).
+
+
+* **`builder.go`**: NewModule + FunctionBuilder + AsmBuilder — construction API that mirrors the IR structure without performing checks.
+
+
+* **`verify.go`**: Verify — the single place invariants are enforced, running passes over module sections and function bodies.
+
+
 
 ---
 
@@ -52,15 +56,14 @@ fmtGlobal := m.DeclareGlobal("fmt", vir.ArrayType{Elem: vir.I8, Len: 14},
     vir.InitByteString{Data: []byte("%d + %d = %d\n\x00")})
 
 fb := m.DeclareFunction("main", nil, vir.I32, true)
-a := fb.Emit("a", "mov", vir.I32, vir.IntLiteral(7))
-b := fb.Emit("b", "mov", vir.I32, vir.IntLiteral(35))
-sum := fb.Add("sum", vir.I32, a, b)
-fb.Call("r", "printf", vir.Ident(fmtGlobal.Name), a, b, sum)
+sum := fb.Add("sum", vir.I32, vir.IntLiteral(7), vir.IntLiteral(35))
+fb.Call("r", "printf", vir.Ident(fmtGlobal.Name), vir.IntLiteral(7), vir.IntLiteral(35), sum)
 fb.Return(vir.IntLiteral(0))
 
 if err := vir.Verify(m); err != nil {
     panic(err)
 }
+
 ```
 
 Nothing above validated anything — `Verify` is the first point at which name collisions, type mismatches, or malformed control flow would surface.
@@ -69,26 +72,23 @@ Nothing above validated anything — `Verify` is the first point at which name c
 
 ## Core concepts
 
-### `Module`
+### `Opcode`
 
-Field order mirrors the mandatory section order a `.vir` file must follow: `Target`, `AsmDialect`, `Structs`, `FunctionSignatures`, `Constants`, `Globals`, `Links`, `Externs`, `Functions`. Nothing downstream (`format/`, `lower/`, `object/`, `objectfile/`, `objectwriter/`) is allowed to touch an unverified `Module`.
+The §4 instruction vocabulary is closed and spec-fixed, so it's a Go enum (`Opcode`, `opcode.go`), not a string.
 
 ```go
-type Module struct {
-    Name               string
-    Target             *Target     // nil for pure-compute modules
-    AsmDialect         *AsmDialect // nil unless declared; module-wide asm syntax dialect
-    Structs            []*Struct
-    FunctionSignatures []*FunctionSignature
-    Constants          []*Constant
-    Globals            []*Global
-    Links              []*Link
-    Externs            []*ExternGroup
-    Functions          []*Function
-}
+vir.OpAdd     // add
+vir.OpCtlz    // ctlz
+vir.OpFma     // fma
+
+vir.OpAdd.String()        // "add"
+vir.ParseOpcode("ctlz")   // (vir.OpCtlz, true) — used by decoders
+
 ```
 
-`AsmDialect` is set once per module via `Module.SetAsmDialect` — it is required if the module contains any inline-asm blocks, and governs every asm block in every function; there is no per-block override.
+Every `Opcode` constant is registered exactly once in `opTable`, which pairs it with its operand-count and operand-type-constraint (§9.18) and how its result type is computed. `init()` panics at package load if a constant is missing an entry. A newly added opcode cannot silently skip verification the way a name absent from a hand-maintained `map[string]bool` could.
+
+This is deliberately *not* used for everything textual in the package: struct/field/label/link/function names stay `string` (they're open, user-chosen identifiers). Inline-asm mnemonics/registers (`AsmCodeLine.Mnemonic`, `AsmBinding.Register`) stay `string` too, because §4 defines those as open, per-architecture *data tables*, not a fixed vocabulary the verifier reasons about the way it does core opcodes.
 
 ### `Type`
 
@@ -103,6 +103,7 @@ vir.ArrayType{Elem: vir.I8, Len: 14}
 vir.StructType{Name: "Point"}
 
 vir.Equal(vir.I32, vir.IntType{Bits: 32}) // true — structural equality
+
 ```
 
 ### `Operand`
@@ -110,25 +111,27 @@ vir.Equal(vir.I32, vir.IntType{Bits: 32}) // true — structural equality
 A tagged union covering every position an operand can appear in: idents, literals, `null`, a type used in operand position (`index.ptr`), atomic orderings, and vector literals.
 
 ```go
-vir.Ident("x")             // ident
-vir.IntLiteral(42)         // integer literal
-vir.FloatLiteral(3.14)     // float literal
-vir.BoolLiteral(true)      // bool literal
-vir.NullLiteral()          // null
-vir.TypeOperand(vir.I32)   // type-in-operand-position
+vir.Ident("x")                 // ident
+vir.IntLiteral(42)             // integer literal
+vir.FloatLiteral(3.14)         // float literal
+vir.BoolLiteral(true)          // bool literal
+vir.NullLiteral()              // null
+vir.TypeOperand(vir.I32)       // type-in-operand-position
 vir.OrderingOperand("acquire") // atomic ordering
 vir.VectorLiteral(0, 4, 1, 5)  // shuffle mask / vector const
+
 ```
 
 ### Instructions and terminators
 
-`Instruction.Op` holds the bare mnemonic; exactly one of `Instruction.Suffix` (a `Type`) or `Instruction.Sig` (an `fnsig` name, for indirect `call`/`tailcall`) may be set — the `<op>.<suffix>` split is structural, not string-parsed downstream. Terminators are a separate interface from instructions, so "exactly one terminator, nothing after it" doesn't need to be checked by scanning:
+`Instruction.Op` is an `Opcode`; exactly one of `Instruction.Suffix` (a `Type`) or `Instruction.Sig` (an `fnsig` name, for indirect `call`/`tailcall`) may be set — the `<op>.<suffix>` split is structural, not string-parsed downstream. Terminators are a separate interface from instructions, so "exactly one terminator, nothing after it" doesn't need to be checked by scanning:
 
 ```go
 type Terminator interface{ isTerm() }
 // Branch, BranchIf, Switch, Return, TailCall, Trap, Unreachable
 
 func Successors(t Terminator) []string // labels a terminator may transfer to
+
 ```
 
 ### Inline assembly
@@ -148,6 +151,7 @@ fb.BeginAsm().
         vir.AsmInstructionLine("syscall"),
     ).
     End()
+
 ```
 
 ---
@@ -158,38 +162,79 @@ fb.BeginAsm().
 
 ```go
 func Verify(m *Module) error
+
 ```
 
-1. **Target** — arch/OS/ABI must be canonical; a recognized alias (`amd64`, `arm64`, `darwin`, ...) fails with the canonical spelling named in the error, not silently rewritten.
-2. **Module-wide asm dialect** — if any function contains an asm block, the module must have a `Target` and an `AsmDialect`, and that dialect must be valid for the target's architecture (`IsDialectValidForArchitecture`). Checked once at module scope, not per block. If the module declares an `AsmDialect` but has no asm blocks, the dialect/architecture pairing is still validated whenever a `Target` is present.
-3. **Name resolution** — one flat namespace across structs, fnsigs, consts, globals, externs, functions, and block labels. Redeclaring a name, or using a reserved keyword, fails immediately with the conflicting kind named.
-4. **Per-section checks** — struct fields, fnsig signatures, const/global initializers (`checkInit` walks `ConstInit` recursively against the declared type), link-to-extern-group correspondence, filename derivation per target `BinFormat`.
-5. **Per-function body shape** — every block terminates, every label is both defined and referenced, `Successors` resolves.
-6. **Type fixation** — each value's type is computed once (`resultType`) and locked in at first assignment; a later assignment with a different type is rejected. Asm `out` bindings participate in the same fixation pass: a first-seen `out` ident's type is inferred from its bound register's width.
-7. **Definite assignment** — a forward must-analysis (`in`/`out` sets per block, meet-over-predecessors) confirms every read is preceded by an assignment on every path. Asm `in` bindings are treated as reads and `out` bindings as assignments in this same analysis.
-8. **Inline assembly structure** — register-table membership and width agreement for every binding, binding well-formedness (no duplicate `in` per register, no split `out` per register, no register both clobbered and `out`), and asm-local label scoping (`checkAsmBlockStructure`). Dialect/architecture legality itself is checked once at module scope in step 2, not per block.
+* **Target** — Arch/OS/ABI must be canonical; a recognized alias (`amd64`, `arm64`, `darwin`, ...) fails with the canonical spelling named in the error, not silently rewritten.
+
+
+* **Module-wide asm dialect** — If any function contains an asm block, the module must have a `Target` and an `AsmDialect`. That dialect must be valid for the target's architecture (`IsDialectValidForArchitecture`).
+
+
+* **Name resolution** — The module shares one flat namespace across structs, fnsigs, consts, globals, externs, functions, and block labels. Redeclaring a name, or using a reserved keyword, fails immediately.
+
+
+* **Per-section checks** — Struct fields, fnsig signatures, const/global initializers, link-to-extern-group correspondence, and filename derivation per target `BinFormat` are verified.
+
+
+* **Function Attributes** — At most one function may carry the `entry` attribute. Any function carrying `entry` must be exported, must not have `byval` or `sret` parameters, and must not carry the `noreturn` attribute.
+
+
+* **TLS Restrictions** — TLS on `os=none` requires the module's target feature tiers to include a TLS-capable tier (e.g., `tls_support`).
+
+
+* **Per-function body shape** — Every block must terminate, every label must be both defined and referenced, and `Successors` must resolve successfully.
+
+
+* **Per-instruction shape** — For every opcode, its registered operand count and operand-type constraint (§9.18) are checked generically off `opTable`. Opcode-specific structural checks are also enforced, such as `syscall` operand count/typing (§9.33), bulk-memory `len`/byte typing (§9.27), `bswap` on `i8` rejection (§9.20), and atomic ordering legality/no-align (§9.25–26).
+
+
+* **Type fixation** — Each value's type is computed once (`resultType`) and locked in at first assignment; a later assignment with a different type is rejected.
+
+
+* **Definite assignment** — A forward must-analysis (`in`/`out` sets per block, meet-over-predecessors) confirms every read is preceded by an assignment on every path. Asm `in` bindings are treated as reads and `out` bindings as assignments.
+
+
+* **Inline assembly structure** — Register-table membership and width agreement for every binding, binding well-formedness, and asm-local label scoping (`checkAsmBlockStructure`) are verified.
+
+
 
 ```go
 if err := vir.Verify(m); err != nil {
     // err names the exact rule violated, e.g.:
-    // "value \"sum\" assigned as i64 here but fixed as i32 at first
-    //  assignment (§5 rule 2)"
+    // "ctlz legal only on iN / vec[iN, W] (§9.18)"
 }
+
 ```
 
 ### Known gaps
 
 A handful of obligations are intentionally incomplete, each marked `TODO` at its call site rather than silently skipped:
 
-- Feature-tier tables — `Target.Tiers` entries aren't validated against per-target tier data yet.
-- Deep per-opcode operand-type unification against an instruction's suffix.
-- The `noreturn`→`unreachable` adjacency rule.
-- Shuffle-mask bounds checking for vector literals.
-- Full per-dialect mnemonic/operand-shape validation for asm lines (§9.38) — only arity/label-scoping is checked structurally today.
-- Full single-entry/single-exit control-flow validation for asm blocks beyond label-reference scoping (§9.40).
-- Barrier/fence semantics for asm blocks are a codegen concern and not independently verifier-checkable (§9.41).
-- TLS on `os=none` is rejected outright rather than allowed under a TLS-capable tier, pending the same tier-table work.
-- Only `x86_64`/`x86`, `aarch64`/`aarch64_be`, and `arm`/`armeb` have register tables wired up (`targets.go`); asm blocks on any other architecture are structurally rejected until that data lands. The same architectures are also the only ones listed in `DialectsForArchitecture`, so an asm block's dialect check and its register-table check fail together for any other arch.
+* Feature-tier tables — `Target.Tiers` entries aren't fully validated against per-target tier data yet.
+
+
+* Deep per-opcode operand-*shape* unification beyond the type-suffix constraint (e.g., confirming both operands of `add` are the same width as each other).
+
+
+* The `noreturn`→`unreachable` adjacency rule.
+
+
+* Shuffle-mask bounds checking for vector literals.
+
+
+* Exact operand counts for `splat`/`extract`/`insert`/reductions/`prefetch` — §4 doesn't pin these in the spec text, so `opTable` leaves them unchecked rather than inventing an arity.
+
+
+* Full per-dialect mnemonic/operand-shape validation for asm lines (§9.38) — only arity/label-scoping is checked structurally today.
+
+
+* Full single-entry/single-exit control-flow validation for asm blocks beyond label-reference scoping (§9.40).
+
+
+* Barrier/fence semantics for asm blocks are a codegen concern and not independently verifier-checkable (§9.41).
+
+
 
 ---
 
@@ -197,8 +242,10 @@ A handful of obligations are intentionally incomplete, each marked `TODO` at its
 
 **Nothing here is a serialization format.** `ir/vir` has no `[]byte` in or out — that's `format/`'s job entirely. This package only ever holds the in-memory shape and the rules it must satisfy.
 
-**Verification is centralized on purpose.** Every downstream package — lowering, object translation, container-file writing — is written under the assumption that whatever `Module` it receives already passed `Verify`. Putting all of that logic in one place means every consumer gets identical guarantees regardless of whether the module came from `.vir` text, `.vbyte` bytes, or a hand-written builder call.
+**Verification is centralized on purpose.** Every downstream package is written under the assumption that whatever `Module` it receives already passed `Verify`.
 
-**The builder never second-guesses you.** `DeclareFunction`, `Emit`, `Branch`, and friends all just append to the structure. If you want a hand-built module to be usable by anything downstream, you must call `Verify` yourself — nothing does it for you implicitly.
+**The builder never second-guesses you.** `DeclareFunction`, `Emit`, `Branch`, and friends all just append to the structure. Nothing calls `Verify` for you implicitly.
 
-**Dialect is a module property, not a block property.** `AsmBuilder.BeginAsm` takes no dialect argument and `AsmBlock` has no dialect field of its own; every asm block in a module is interpreted under whatever single dialect `Module.SetAsmDialect` established. This mirrors the `format/vbyte` v3 layout, which moved `AsmDialect` out of the per-block encoding and into the module header for the same reason — one asm syntax per module, never mixed.
+**Closed vocabularies are enums; open vocabularies are data.** `Opcode` covers §4's fixed instruction set and is a Go type the compiler and `opcode.go`'s `init()` both help keep exhaustive. Struct/field/label/link names and asm mnemonics/registers stay `string` because they're genuinely open — a new struct field or a new x86 mnemonic is data, not a new case the verifier needs to be taught by hand.
+
+**Dialect is a module property, not a block property.** `AsmBuilder.BeginAsm` takes no dialect argument and `AsmBlock` has no dialect field of its own; every asm block in a module is interpreted under whatever single dialect `Module.SetAsmDialect` established.

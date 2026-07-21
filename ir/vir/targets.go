@@ -1,6 +1,8 @@
 // targets.go
 package vir
 
+import "fmt"
+
 // Canonical target vocabularies (§10.1–§10.3) and the alias tables that are
 // resolved only at the build-system boundary (§10.5). The verifier consults
 // the canonical sets and *rejects* anything found in the alias maps.
@@ -84,12 +86,19 @@ var DialectsForArchitecture = map[string][]AsmDialect{
 	"arm":    {DialectA32, DialectT32},
 	"armeb":  {DialectA32, DialectT32},
 
-	"aarch64":    {DialectNative},
-	"aarch64_be": {DialectNative},
-	// TODO(§4): riscv/powerpc/mips/loongarch/s390x are native-dialect
-	// architectures per the grammar, but no register table is wired for
-	// them yet (below), so asm blocks on these targets are structurally
-	// rejected until that data lands.
+	"aarch64":     {DialectNative},
+	"aarch64_be":  {DialectNative},
+	"riscv32":     {DialectNative},
+	"riscv64":     {DialectNative},
+	"powerpc":     {DialectNative},
+	"powerpc64":   {DialectNative},
+	"powerpc64le": {DialectNative},
+	"mips32":      {DialectNative},
+	"mips32el":    {DialectNative},
+	"mips64":      {DialectNative},
+	"mips64el":    {DialectNative},
+	"loongarch64": {DialectNative},
+	"s390x":       {DialectNative},
 }
 
 func IsDialectValidForArchitecture(arch string, d AsmDialect) bool {
@@ -112,10 +121,10 @@ const (
 
 // RegisterInfo is one row of a dialect's register table (§4).
 type RegisterInfo struct {
-	WidthBits      int
-	Class          RegisterClass
-	PhysicalSlot   string
-	Reserved       bool
+	WidthBits    int
+	Class        RegisterClass
+	PhysicalSlot string
+	Reserved     bool
 }
 
 // X86RegisterTable covers the common x86_64 GPRs at both their 64-bit and
@@ -139,13 +148,21 @@ var X86RegisterTable = map[string]RegisterInfo{
 	"r15": {64, RegisterClassGeneralPurpose, "R15", false}, "r15d": {32, RegisterClassGeneralPurpose, "R15", false},
 }
 
-// AArch64RegisterTable covers the GPRs (x-form/w-form) plus the reserved
-// frame pointer / link register, per the spec's x0/x30 example.
 var AArch64RegisterTable = map[string]RegisterInfo{
 	"sp": {64, RegisterClassGeneralPurpose, "SP", true},
 }
 
+// Native Register Tables for remaining architectures
+var RISCVRegisterTable = map[string]RegisterInfo{
+	"x0": {64, RegisterClassGeneralPurpose, "X0", true}, // zero register
+}
+var PowerPCRegisterTable = map[string]RegisterInfo{}
+var MIPSRegisterTable = map[string]RegisterInfo{}
+var LoongArchRegisterTable = map[string]RegisterInfo{}
+var S390XRegisterTable = map[string]RegisterInfo{}
+
 func init() {
+	// AArch64
 	for i := 0; i <= 28; i++ {
 		name64 := registerName("x", i)
 		name32 := registerName("w", i)
@@ -157,6 +174,31 @@ func init() {
 	AArch64RegisterTable["w29"] = RegisterInfo{32, RegisterClassGeneralPurpose, "X29", true}
 	AArch64RegisterTable["x30"] = RegisterInfo{64, RegisterClassGeneralPurpose, "X30", true} // link register
 	AArch64RegisterTable["w30"] = RegisterInfo{32, RegisterClassGeneralPurpose, "X30", true}
+
+	// RISC-V (x1-x31)
+	for i := 1; i <= 31; i++ {
+		RISCVRegisterTable[fmt.Sprintf("x%d", i)] = RegisterInfo{64, RegisterClassGeneralPurpose, fmt.Sprintf("X%d", i), false}
+	}
+
+	// PowerPC (r0-r31)
+	for i := 0; i <= 31; i++ {
+		PowerPCRegisterTable[fmt.Sprintf("r%d", i)] = RegisterInfo{64, RegisterClassGeneralPurpose, fmt.Sprintf("R%d", i), false}
+	}
+
+	// MIPS (r0-r31)
+	for i := 0; i <= 31; i++ {
+		MIPSRegisterTable[fmt.Sprintf("r%d", i)] = RegisterInfo{64, RegisterClassGeneralPurpose, fmt.Sprintf("R%d", i), i == 0}
+	}
+
+	// LoongArch (r0-r31)
+	for i := 0; i <= 31; i++ {
+		LoongArchRegisterTable[fmt.Sprintf("r%d", i)] = RegisterInfo{64, RegisterClassGeneralPurpose, fmt.Sprintf("R%d", i), i == 0}
+	}
+
+	// s390x (r0-r15)
+	for i := 0; i <= 15; i++ {
+		S390XRegisterTable[fmt.Sprintf("r%d", i)] = RegisterInfo{64, RegisterClassGeneralPurpose, fmt.Sprintf("R%d", i), false}
+	}
 }
 
 func registerName(prefix string, n int) string {
@@ -191,6 +233,16 @@ func RegisterTableForArchitecture(arch string) map[string]RegisterInfo {
 		return AArch64RegisterTable
 	case "arm", "armeb":
 		return ARMRegisterTable
+	case "riscv32", "riscv64":
+		return RISCVRegisterTable
+	case "powerpc", "powerpc64", "powerpc64le":
+		return PowerPCRegisterTable
+	case "mips32", "mips32el", "mips64", "mips64el":
+		return MIPSRegisterTable
+	case "loongarch64":
+		return LoongArchRegisterTable
+	case "s390x":
+		return S390XRegisterTable
 	}
 	return nil
 }

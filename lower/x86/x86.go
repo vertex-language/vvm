@@ -1,41 +1,12 @@
 // Package x86 lowers verified vir modules to 32-bit x86 (IA-32) machine
 // code.
-//
-// vir.Module -> x86.Program, and nothing more. This is one flat package:
-// instruction selection, ABI/frame layout, slot resolution, syscall
-// conventions, and inline-assembly lowering are all facets of a single
-// lowering pipeline that runs in a fixed order and shares one Opr/Inst
-// vocabulary — splitting them into mcode/abi/regalloc/syscallabi/inlineasm
-// subpackages bought no real independence, and the only visible effect was
-// several copies of the same isa/x86 register constants re-exported under
-// new names. Register identity, condition codes, and ModRM/SIB facts are
-// used directly from isa/x86 (isax86.REAX, isax86.CondE, ...) — nothing
-// here re-declares them. (isa/x86's own README explains the split that
-// *is* load-bearing: ISA fact vs. lowering decision. That one stays.)
-//
-// This package knows x86 instruction encoding and the i386 System V cdecl
-// ABI; it knows nothing about ELF/COFF/Mach-O.
-//
-// ABI: cdecl. Arguments on the stack in 4-byte slots, first argument at the
-// lowest address, caller cleans up, result in EAX. EAX/ECX/EDX
-// caller-saved; EBX/ESI/EDI/EBP callee-saved; EBP is the frame pointer.
-//
-// Code model: non-PIC. Globals/function addresses are 32-bit absolute
-// (FixupAbs32); calls and cross-function jumps are 32-bit PC-relative
-// (FixupPCRel32).
-//
-// Coverage: the integer/pointer subset of Vertex IR, inline assembly
-// (Intel and AT&T dialects, curated mnemonic set), and syscalls
-// (per-target-OS trap convention). Floats, vectors, i64/i128 named values,
-// saturating arithmetic, and bitrev are still rejected with explicit
-// errors (TODO, tier work).
 package x86
 
 import (
 	"fmt"
 
-	"github.com/vertex-language/vvm/isa/x86/encoder"
 	"github.com/vertex-language/vvm/ir/vir"
+	"github.com/vertex-language/vvm/isa/x86/encoder"
 )
 
 // Program is a self-contained description of the lowered module:
@@ -63,10 +34,6 @@ type Global struct {
 	Fixups []Fixup
 }
 
-// Fixup/FixupKind are isa/x86/encoder's relocation vocabulary. This one
-// alias is deliberate and single-hop — downstream object writers get to
-// import only package x86 — unlike the register-constant copies this
-// redo removes, it doesn't duplicate a fact, it just re-exports one type.
 type Fixup = encoder.Fixup
 type FixupKind = encoder.FixupKind
 

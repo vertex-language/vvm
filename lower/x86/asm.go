@@ -1,31 +1,17 @@
-// asm.go lowers a verified vir.AsmBlock into an Inst sequence. It supports
-// the two x86 dialects (intel, att); a32/t32/native have no x86 meaning
-// and are never reached here — vir.IsDialectValidForArchitecture rejects
-// them upstream, before Verify even succeeds.
 package x86
 
 import (
 	"fmt"
 	"strings"
 
-	isax86 "github.com/vertex-language/vvm/isa/x86"
 	"github.com/vertex-language/vvm/ir/vir"
+	isax86 "github.com/vertex-language/vvm/isa/x86"
 )
 
-// SymbolResolver lets the asm lowerer resolve an ident used in an asm-line
-// immediate position back to the enclosing module's compile-time
-// entities, exactly like an ordinary instruction operand would: a
-// global/fn/extern-fn name yields its address, a const name yields its
-// value, and anything else is treated as a local value's home slot.
 type SymbolResolver interface {
 	Resolve(ident string) (Opr, error)
 }
 
-// asmDialect is the per-syntax-dialect plugin: register/addressing
-// parsing plus operand reordering for one asm-line grammar. The actual
-// per-mnemonic instruction semantics are dialect-independent and live in
-// lowerMnemonic below — only surface syntax and operand order differ
-// between Intel and AT&T.
 type asmDialect interface {
 	Register(name string) (r isax86.Reg, widthBits int, ok bool)
 	Lower(line vir.AsmCodeLine, label func(string) string) ([]Inst, error)
@@ -36,18 +22,6 @@ var dialectFactories = map[vir.AsmDialect]func(SymbolResolver) asmDialect{
 	vir.DialectATT:   func(r SymbolResolver) asmDialect { return attDialect{resolver: r} },
 }
 
-// LowerBlock translates one verified vir.AsmBlock into an Inst sequence:
-// it materializes `in` bindings from their value slots into the bound
-// physical registers, lowers the code body via the module's asm dialect,
-// and writes `out` bindings back to their value slots. `clobber` bindings
-// need no code — the frame gives every vir value its own stack slot (no
-// cross-block register residency), so a clobbered physical register holds
-// nothing the rest of the function depends on surviving. Per §9.41, the
-// block is a full optimization/memory barrier; that property falls out
-// for free here because isel emits this whole sequence as one indivisible
-// span and every live value crosses the boundary through its own memory
-// slot. uniqueLabel maps an asm-local label name to a function-unique
-// label (§9.39 scoping).
 func LowerBlock(dialect vir.AsmDialect, arch string, a *vir.AsmBlock, resolver SymbolResolver, uniqueLabel func(string) string) ([]Inst, error) {
 	if arch != "x86" {
 		return nil, fmt.Errorf("asm: inline assembly is only lowered for arch \"x86\" (32-bit); got %q", arch)
@@ -84,7 +58,7 @@ func LowerBlock(dialect vir.AsmDialect, arch string, a *vir.AsmBlock, resolver S
 			boundOut[bind.Ident] = r
 			outOrder = append(outOrder, bind.Ident)
 		case vir.BindingClobber:
-			// No code needed — see doc comment above.
+			// No code needed — optimization/memory barrier is implicit.
 		}
 	}
 
@@ -106,18 +80,11 @@ func LowerBlock(dialect vir.AsmDialect, arch string, a *vir.AsmBlock, resolver S
 	return insts, nil
 }
 
-// physicalSlot maps a vir.RegisterInfo's canonical physical-slot name onto
-// this 32-bit backend's isax86.Reg. Registers whose slot has no 32-bit-mode
-// encoding (r8..r15) are simply absent.
 var physicalSlot = map[string]isax86.Reg{
 	"RAX": isax86.REAX, "RCX": isax86.RECX, "RDX": isax86.REDX, "RBX": isax86.REBX,
 	"RSP": isax86.RESP, "RBP": isax86.REBP, "RSI": isax86.RESI, "RDI": isax86.REDI,
 }
 
-// resolveRegister looks a register token up in vir's own x86 register
-// table — the same table the verifier already checked it against (§9.35)
-// — and maps it onto this backend's physical register. It defensively
-// strips a leading '%' in case the AT&T sigil survived into the IR.
 func resolveRegister(name string) (r isax86.Reg, widthBits int, err error) {
 	name = strings.TrimPrefix(name, "%")
 	info, ok := vir.RegisterTableForArchitecture("x86")[name]
@@ -131,10 +98,6 @@ func resolveRegister(name string) (r isax86.Reg, widthBits int, err error) {
 	return pr, info.WidthBits, nil
 }
 
-// resolveImmediate converts a parsed asm-immediate's underlying
-// vir.Operand into an Opr. Ident operands are resolved through the
-// caller's SymbolResolver (§4 Addresses); floats aren't yet supported in a
-// raw operand position (TODO).
 func resolveImmediate(o vir.Operand, resolver SymbolResolver) (Opr, error) {
 	switch o.Kind {
 	case vir.OperandInt:
@@ -157,8 +120,6 @@ func resolveImmediate(o vir.Operand, resolver SymbolResolver) (Opr, error) {
 	return Opr{}, fmt.Errorf("asm: operand kind not legal in this position")
 }
 
-// jccTable maps jump mnemonics (shared across both dialects — condition
-// mnemonics don't vary by syntax dialect) to isax86 condition codes.
 var jccTable = map[string]byte{
 	"je": isax86.CondE, "jz": isax86.CondE,
 	"jne": isax86.CondNE, "jnz": isax86.CondNE,
@@ -185,12 +146,6 @@ func lowerJump(line vir.AsmCodeLine, isJcc bool, cc byte, label func(string) str
 	return []Inst{{Op: "jmp", Lbl: lbl}}, nil
 }
 
-// lowerMnemonic implements the shared, dialect-independent instruction
-// semantics once operands have been parsed and reordered into canonical
-// (dst, src) form by the calling dialect. This is intentionally a modest,
-// curated mnemonic table covering the common integer instructions that
-// appear in real-world inline asm — a full per-dialect mnemonic/operand-
-// shape table (§9.38) is otherwise TODO, as the verifier itself notes.
 func lowerMnemonic(mnemonic string, ops []Opr) ([]Inst, error) {
 	need := func(n int) error {
 		if len(ops) != n {

@@ -1,18 +1,24 @@
+
 # lower/x86
 
-`github.com/vertex-language/vvm/lower/x86`
+
+
+[github.com/vertex-language/vvm/lower/x86](https://github.com/vertex-language/vvm/lower/x86)
 
 Lowers a verified `vir.Module` (arch `"x86"`, i.e. 32-bit/IA-32) into concrete machine code: a `Program` of function bytes, global data, and relocations, ready for an object writer. This package assumes its input already passed `vir.Verify` — it does not re-check §9 obligations itself.
 
 ```go
 import "github.com/vertex-language/vvm/lower/x86"
+
 ```
 
 ---
 
 ## Package layout
 
-```
+
+
+```text
 lower/x86/
 ├── x86.go            Package doc, Program/Func/Global/Fixup, Lower() entry point,
 │                      the lowerer struct and its symbol-kind table
@@ -34,11 +40,14 @@ lower/x86/
 ├── globals.go           lowerGlobal/dataw: global initializer -> data bytes + fixups
 └── opr.go              Opr/Inst: the pre-encoding instruction vocabulary
                        instruction selection and inline-asm lowering share
+
 ```
 
 ---
 
 ## Design: one flat package
+
+
 
 Instruction selection, ABI/frame layout, slot resolution, syscall conventions, and inline-assembly lowering are all facets of a single lowering pipeline that runs in a fixed order and shares one `Opr`/`Inst` vocabulary (`opr.go`). They live in one package deliberately — splitting them into separate `mcode`/`abi`/`regalloc`/`syscallabi`/`inlineasm` packages bought no real independence, and the only visible effect was several copies of the same `isa/x86` register constants re-exported under new names.
 
@@ -52,6 +61,7 @@ This package knows x86 instruction encoding and the i386 System V cdecl ABI; it 
 
 ```go
 func Lower(m *vir.Module) (*Program, error)
+
 ```
 
 `m` must have passed `vir.Verify`, and if `m.Target` is set, its `Arch` must be `"x86"`. `Lower` walks `m.Globals` (via `lowerGlobal`) and `m.Functions` (via `lowerFunc`) in declaration order and returns a self-contained `Program`:
@@ -69,6 +79,7 @@ type Func struct {
     Export bool
     Fixups []Fixup
 }
+
 ```
 
 `Fixup`/`FixupKind` are a single-hop alias of `isa/x86/encoder`'s relocation vocabulary, so downstream object writers only need to import `lower/x86`.
@@ -81,24 +92,39 @@ if err := vir.Verify(m); err != nil {
     panic(err)
 }
 prog, err := x86.Lower(m)
+
 ```
 
 ---
 
 ## Pipeline (per function)
 
+
+
 `isel.go`'s `lowerFunc` runs the stages in this fixed order:
 
 1. **Type fixation** (`typeFunc`) — mirrors the verifier's result-type computation for the operators this backend actually supports (integers/pointers up to 32 bits; wider or float/vector types are rejected here with an explicit TODO error), including asm `out` bindings.
+
+
 2. **Instruction selection** (`selInst`/`selTerm`/`selAsm`/`selSyscall`/`selCall`) — walks every block and line, emitting `Inst`s over the EAX/ECX/EDX scratch set. Every named vir value is materialized through its own stack slot (`Slot`) rather than kept live across instructions — no cross-instruction register residency.
+
+
 3. **Frame building** (`frame.go`'s `BuildFrame`) — assigns every `OSlot` operand a distinct 4-byte EBP-relative home and every parameter its cdecl incoming offset.
+
+
 4. **Assembly** (`encode.go`'s `assemble`) — wraps the body in a prologue/epilogue, expands the `epi_ret`/`epi_jmp_sym`/`epi_jmp_r` pseudo-ops, resolves every `OSlot` to its concrete `[ebp+off]` operand, and hands the result to `isa/x86/encoder` for byte emission.
 
+
+
 ## `Opr`/`Inst` (`opr.go`)
+
+
 
 `Opr` is the operand vocabulary instruction selection builds against: `OReg`, `OImm` (optionally a symbol + addend), `OMem` (`[Base(+Index*Scale)+Disp]`, or absolute), and `OSlot` — a vir value's not-yet-placed stack home, the one addition over `isa/x86/encoder.Opr` and deliberately absent there. `resolveSlot` in `encode.go` is what erases the difference before final assembly; reaching `toEncoderInst` with an unresolved `OSlot` is treated as a bug in this package, reported rather than panicked.
 
 ## ABI
+
+
 
 **cdecl.** Arguments on the stack in 4-byte slots (byval structs take their own aligned size — see `callconv.go`'s `PlanCall`), first argument at the lowest address, caller cleans up, result in EAX. EAX/ECX/EDX are caller-saved; EBX/ESI/EDI/EBP are callee-saved and always pushed/popped by `encode.go`'s prologue/epilogue regardless of whether the function actually uses them (`SavedRegBytes` in `frame.go`).
 
@@ -110,10 +136,16 @@ prog, err := x86.Lower(m)
 
 ## Inline assembly (`asm.go`, `asm_dialects.go`)
 
+
+
 `LowerBlock` only runs for `arch == "x86"` and dispatches on `m.AsmDialect` (module-wide, per `ir/vir`'s design) to one of two `asmDialect`s:
 
-- **Intel** (`intelDialect`) — `(ptr-size "ptr")? [base(+index(*scale))?((+|-)disp)?]`, operands already in canonical `(dst, src)` order.
-- **AT&T** (`attDialect`) — `disp?(base?(,index(,scale)?)?)`, operands in `(src, dst)` order that `Lower` swaps into canonical order (and, for 3-operand `imul $imm, src, dst`, reorders into `dst, src, imm`). AT&T mnemonics also carry an operand-size suffix (`stripATTSizeSuffix`) that this backend only accepts in its 32-bit (`l`) form.
+* **Intel** (`intelDialect`) — `(ptr-size "ptr")? [base(+index(*scale))?((+|-)disp)?]`, operands already in canonical `(dst, src)` order.
+
+
+* **AT&T** (`attDialect`) — `disp?(base?(,index(,scale)?)?)`, operands in `(src, dst)` order that `Lower` swaps into canonical order (and, for 3-operand `imul $imm, src, dst`, reorders into `dst, src, imm`). AT&T mnemonics also carry an operand-size suffix (`stripATTSizeSuffix`) that this backend only accepts in its 32-bit (`l`) form.
+
+
 
 Both dialects funnel into a single dialect-independent mnemonic table, `lowerMnemonic` — a curated, non-exhaustive subset (mov/alu/shift/mul-div/stack/inc-dec/bswap/int/nop/cdq) covering the common integer instructions that appear in real-world inline asm. Jump mnemonics (`jmp`, the `jcc` family via `jccTable`) are dispatched directly since their operand is a bare local label, not a resolvable value.
 
@@ -123,18 +155,38 @@ Every register and memory operand is width-checked against this backend's 32-bit
 
 ## Known gaps
 
+
+
 Marked `TODO` at each call site rather than silently skipped:
 
-- **i64/i128 named values** — `checkValueType` in `isel.go` rejects any int wider than 32 bits (register-pair support TODO).
-- **Floats and vectors** — no x87/SSE tier yet; float ops, vector ops, and float bitcast/compare all return explicit "not lowered" errors.
-- **Saturating arithmetic** (`uadd_sat`/`sadd_sat`/`usub_sat`/`ssub_sat`) and **bitrev** are unimplemented.
-- **`sdiv`/`srem`** don't yet special-case narrow `INT_MIN / -1` (§6.1): the widened 32-bit `idiv` wraps instead of trapping for e.g. i8 `-128/-1`.
-- **AT&T 8/16-bit suffixes** (`movb`/`movw` etc.) are recognized but rejected — only the 32-bit (`l`) forms lower today.
-- **`f16` global initializers** aren't emitted (`globals.go`'s `dataw.lit`).
-- **Full per-dialect mnemonic/operand-shape validation** (§9.38) is still just the curated table in `lowerMnemonic`, matching the verifier's own note that this check is structural (arity/label-scoping) only.
-- **Frame-growing tail calls** — `selTailCall` only supports the case where the callee's argument bytes fit inside the caller's own incoming argument area; anything larger is rejected.
+* **i64/i128 named values** — `checkValueType` in `isel.go` rejects any int wider than 32 bits (register-pair support TODO).
+
+
+* **Floats and vectors** — no x87/SSE tier yet; float ops, vector ops, and float bitcast/compare all return explicit "not lowered" errors.
+
+
+* **Saturating arithmetic** (`uadd_sat`/`sadd_sat`/`usub_sat`/`ssub_sat`) and **bitrev** are unimplemented.
+
+
+* **`sdiv`/`srem**` don't yet special-case narrow `INT_MIN / -1` (§6.1): the widened 32-bit `idiv` wraps instead of trapping for e.g. i8 `-128/-1`.
+
+
+* **AT&T 8/16-bit suffixes** (`movb`/`movw` etc.) are recognized but rejected — only the 32-bit (`l`) forms lower today.
+
+
+* **`f16` global initializers** aren't emitted (`globals.go`'s `dataw.lit`).
+
+
+* **Full per-dialect mnemonic/operand-shape validation** (§9.38) is still just the curated table in `lowerMnemonic`, matching the verifier's own note that this check is structural (arity/label-scoping) only.
+
+
+* **Frame-growing tail calls** — `selTailCall` only supports the case where the callee's argument bytes fit inside the caller's own incoming argument area; anything larger is rejected.
+
+
 
 ## Design notes
+
+
 
 **Nothing here re-derives the register table.** `resolveRegister` looks tokens up in `vir.RegisterTableForArchitecture("x86")` — the same table `vir.Verify` already checked asm bindings against — and maps the result onto this backend's physical registers (`physicalSlot`); registers with no 32-bit encoding (r8..r15) are simply absent from that map.
 

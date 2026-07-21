@@ -3,6 +3,10 @@ package vir
 
 // Builder API. Mirrors the IR one-to-one — it constructs, it doesn't check;
 // Verify checks (README). Nothing here validates ordering, names, or types.
+// Op arguments are Opcode constants (opcode.go), not strings — the builder
+// itself won't stop you from misusing one (that's still Verify's job), but
+// a typo like "cltz" is now a compile error instead of a value the type
+// checker happily carries all the way to Verify.
 
 func NewModule(name string) *Module { return &Module{Name: name} }
 
@@ -96,7 +100,7 @@ func (fb *FunctionBuilder) appendInstruction(i Instruction) Operand {
 }
 
 // Emit appends one instruction and returns an ident operand for its result.
-func (fb *FunctionBuilder) Emit(result, op string, suffix Type, args ...Operand) Operand {
+func (fb *FunctionBuilder) Emit(result string, op Opcode, suffix Type, args ...Operand) Operand {
 	return fb.appendInstruction(Instruction{Result: result, Op: op, Suffix: suffix, Args: args})
 }
 
@@ -111,35 +115,35 @@ func (fb *FunctionBuilder) Location(file string, line, col int) {
 	if col > 0 {
 		args = append(args, IntLiteral(int64(col)))
 	}
-	fb.appendInstruction(Instruction{Op: "loc", Args: args})
+	fb.appendInstruction(Instruction{Op: OpLoc, Args: args})
 }
 
 // Common conveniences (thin wrappers over Emit).
-func (fb *FunctionBuilder) Add(n string, t Type, a, b Operand) Operand { return fb.Emit(n, "add", t, a, b) }
-func (fb *FunctionBuilder) Sub(n string, t Type, a, b Operand) Operand { return fb.Emit(n, "sub", t, a, b) }
-func (fb *FunctionBuilder) Mul(n string, t Type, a, b Operand) Operand { return fb.Emit(n, "mul", t, a, b) }
-func (fb *FunctionBuilder) Load(n string, t Type, p Operand) Operand   { return fb.Emit(n, "load", t, p) }
-func (fb *FunctionBuilder) Store(t Type, p, v Operand)                 { fb.Emit("", "store", t, p, v) }
+func (fb *FunctionBuilder) Add(n string, t Type, a, b Operand) Operand { return fb.Emit(n, OpAdd, t, a, b) }
+func (fb *FunctionBuilder) Sub(n string, t Type, a, b Operand) Operand { return fb.Emit(n, OpSub, t, a, b) }
+func (fb *FunctionBuilder) Mul(n string, t Type, a, b Operand) Operand { return fb.Emit(n, OpMul, t, a, b) }
+func (fb *FunctionBuilder) Load(n string, t Type, p Operand) Operand   { return fb.Emit(n, OpLoad, t, p) }
+func (fb *FunctionBuilder) Store(t Type, p, v Operand)                 { fb.Emit("", OpStore, t, p, v) }
 func (fb *FunctionBuilder) Alloca(n string, size Operand, align int) Operand {
-	return fb.EmitInstruction(Instruction{Result: n, Op: "alloca", Suffix: Ptr, Args: []Operand{size}, Align: align})
+	return fb.EmitInstruction(Instruction{Result: n, Op: OpAlloca, Suffix: Ptr, Args: []Operand{size}, Align: align})
 }
 func (fb *FunctionBuilder) FieldPointer(n string, p Operand, structName, field string) Operand {
-	return fb.Emit(n, "field", Ptr, p, Ident(structName), Ident(field))
+	return fb.Emit(n, OpField, Ptr, p, Ident(structName), Ident(field))
 }
 func (fb *FunctionBuilder) IndexPointer(n string, p Operand, elem Type, idx Operand) Operand {
-	return fb.Emit(n, "index", Ptr, p, TypeOperand(elem), idx)
+	return fb.Emit(n, OpIndex, Ptr, p, TypeOperand(elem), idx)
 }
 func (fb *FunctionBuilder) Call(n, callee string, args ...Operand) Operand {
-	return fb.Emit(n, "call", nil, append([]Operand{Ident(callee)}, args...)...)
+	return fb.Emit(n, OpCall, nil, append([]Operand{Ident(callee)}, args...)...)
 }
 func (fb *FunctionBuilder) CallIndirect(n, sig string, fp Operand, args ...Operand) Operand {
-	return fb.EmitInstruction(Instruction{Result: n, Op: "call", Sig: sig, Args: append([]Operand{fp}, args...)})
+	return fb.EmitInstruction(Instruction{Result: n, Op: OpCall, Sig: sig, Args: append([]Operand{fp}, args...)})
 }
 
 // Syscall executes a hardware-level system call trap (§4 Calls & Control).
 // sysNo is the syscall number; up to six scalar args follow.
 func (fb *FunctionBuilder) Syscall(n string, ret Type, sysNo Operand, args ...Operand) Operand {
-	return fb.Emit(n, "syscall", ret, append([]Operand{sysNo}, args...)...)
+	return fb.Emit(n, OpSyscall, ret, append([]Operand{sysNo}, args...)...)
 }
 
 // Terminators.
@@ -175,6 +179,13 @@ func (fb *FunctionBuilder) Unreachable() { fb.current.Term = Unreachable{} }
 // appended to the enclosing function's current basic block via End. The
 // dialect governing the block's `code:` syntax comes from the module-level
 // AsmDialect declaration (§1.2 rule 11), not from the block itself.
+//
+// Mnemonics/registers here stay string-typed (BeginAsm/Code take plain
+// strings): they index a per-architecture/dialect data table (targets.go),
+// which is deliberately open — a new arch or dialect adds table rows, not
+// new Go identifiers. That's a different shape of problem from core-IR
+// opcodes, which are a closed, spec-fixed set (opcode.go) and belong in a
+// Go enum for exactly the reason opcode.go exists.
 type AsmBuilder struct {
 	owner *FunctionBuilder
 	block AsmBlock
