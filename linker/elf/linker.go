@@ -120,6 +120,24 @@ func (l *Linker) AddSystemLibrary(soname string) error {
 	return nil
 }
 
+// AddSystemArchive locates name on the linker's configured search path
+// (same precedence as AddSystemLibrary — see searchDirs) and adds it as a
+// static-archive dependency, exactly as if its bytes had been handed to
+// AddArchive directly. Unlike AddSystemLibrary, no rpath list is
+// consulted: rpaths are a runtime-loader concept (baked into DT_RUNPATH
+// for the dynamic linker to consult at process start) and have no
+// bearing on resolving a build-time-only static archive.
+func (l *Linker) AddSystemArchive(name string) error {
+	for _, dir := range l.searchDirs() {
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return l.AddArchive(name, data)
+		}
+	}
+	return fmt.Errorf("static archive %q not found", name)
+}
+
 // AddDefaultNamespace adds whatever l.target's registered
 // DefaultNamespaceFunc says provides the target's default symbol namespace
 // (§7.4 — what an anonymous `extern :` group resolves against, e.g. libc
@@ -154,17 +172,14 @@ func (l *Linker) Link() ([]byte, error) {
 		return nil, fmt.Errorf("link: %w", err)
 	}
 
-	// Default entry point for position-dependent and PIE executables.
 	if l.outputType != OutputShared && l.entry == "" {
 		l.entry = "_start"
 	}
 
-	// Phase 1: transitive shared-library dependency walk.
 	if err := l.walkSharedDeps(); err != nil {
 		return nil, fmt.Errorf("link: dep walk: %w", err)
 	}
 
-	// Phase 2: symbol resolution.
 	symtab := NewSymbolTable()
 	allObjects := l.collectObjects()
 	if err := symtab.Ingest(allObjects, l.archives, l.shared); err != nil {
@@ -172,19 +187,13 @@ func (l *Linker) Link() ([]byte, error) {
 	}
 	allObjects = l.collectObjects()
 
-	// Phase 3: section merging.
 	layout, err := MergeSections(allObjects)
 	if err != nil {
 		return nil, fmt.Errorf("link: merge: %w", err)
 	}
 
-	// Phase 4: dead-code elimination.
-	// Must run BEFORE PLT injection — synthetic PLT sections have no Pieces,
-	// so GC's reachability walk never marks them and they'd be deleted if it
-	// ran after.
 	GC(layout, symtab, allObjects, l.outputType, l.entry)
 
-	// Phase 3b: PLT injection — sized per l.target's registered PLTPatcher.
 	pltSyms := CollectPLTSymbols(symtab, allObjects)
 	if len(pltSyms) > 0 {
 		if err := InjectPLTSections(layout, pltSyms, l.target); err != nil {
@@ -192,31 +201,26 @@ func (l *Linker) Link() ([]byte, error) {
 		}
 	}
 
-	// Phase 5: virtual address and file-offset assignment.
 	if err := AssignLayout(l.outputType, layout, 0); err != nil {
 		return nil, fmt.Errorf("link: layout: %w", err)
 	}
 
-	// Phase 6: resolve symbol virtual addresses.
 	if err := ResolveSymbolAddresses(symtab, layout); err != nil {
 		return nil, fmt.Errorf("link: resolve symbols: %w", err)
 	}
 
-	// Phase 7: write PLT stubs and assign stub VAddrs to shared symbols.
 	if len(pltSyms) > 0 {
-		pltPatcher, _ := LookupPLTPatcher(l.target) // presence guaranteed by mustRegistered above
+		pltPatcher, _ := LookupPLTPatcher(l.target)
 		if err := PatchPLT(pltPatcher, layout, pltSyms); err != nil {
 			return nil, fmt.Errorf("link: PLT patch: %w", err)
 		}
 	}
 
-	// Phase 8: relocation patching.
 	patcher, _ := LookupPatcher(l.target)
 	if err := PatchAll(layout, symtab, allObjects, patcher); err != nil {
 		return nil, fmt.Errorf("link: reloc patch: %w", err)
 	}
 
-	// Phase 9: collect DT_NEEDED / import list.
 	needed := collectNeeded(l.shared)
 	seen := make(map[string]bool, len(needed))
 	for _, n := range needed {
@@ -235,7 +239,6 @@ func (l *Linker) Link() ([]byte, error) {
 		}
 	}
 
-	// Phase 10: emit the binary.
 	req := &EmitRequest{
 		Target:     l.target,
 		OutputType: l.outputType,
@@ -255,12 +258,6 @@ func (l *Linker) Link() ([]byte, error) {
 	return out, nil
 }
 
-// ── search path / sysroot resolution ──────────────────────────────────────────
-
-// searchDirs returns, in priority order: explicit AddLibraryPath entries,
-// then sysroot-prefixed target dirs (if a sysroot is active), then the
-// unprefixed target dirs. Project-resolved paths always win over whatever
-// the host happens to have lying around.
 func (l *Linker) searchDirs() []string {
 	dirs := append([]string{}, l.libPaths...)
 	target := defaultSearchDirs(l.target)
@@ -317,11 +314,6 @@ func isNativeBuild(t Target) bool {
 	return t.Arch == hostArch() && t.OS == hostOS()
 }
 
-// probeSysroot tries a small set of conventional cross-sysroot locations
-// (as used by Debian/Ubuntu's cross-toolchain packaging) and returns the
-// first that exists on disk. This is intentionally conservative — it does
-// not attempt to invoke a cross-gcc to ask it for its own sysroot the way a
-// fuller AutoSysroot implementation would.
 func probeSysroot(t Target) (string, bool) {
 	triple := crossTripleGuess(t)
 	if triple == "" {

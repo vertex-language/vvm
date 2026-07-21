@@ -81,7 +81,7 @@ func toObjectBytes(m *vir.Module, t Target, f objFormat) ([]byte, error) {
 					"e_machine entry and BE support) — only flat is reachable today; " +
 					"see objectwriter/README.md 'Why arm has no elf.go'")
 		}
-		_ = secs // reachable once objectwriter/arm grows elf/coff/macho
+		_ = secs
 
 	case "aarch64":
 		arch := loweraarch64.ArchAArch64
@@ -107,11 +107,6 @@ func toObjectBytes(m *vir.Module, t Target, f objFormat) ([]byte, error) {
 }
 
 // --- objectfile/<format>.Target construction ---------------------------
-//
-// These are objectfile's own Target types (elf.Target{Arch,OS}, etc.) —
-// NOT linker/elf.Target and friends, which is a separate, richer type per
-// package by design (README "Design: no shared types across format
-// boundaries"). objectwriter's To<Format> calls take these.
 
 func elfObjTarget(t Target) ofelf.Target {
 	arch := ofelf.ArchAMD64
@@ -125,12 +120,6 @@ func elfObjTarget(t Target) ofelf.Target {
 	if t.OS == "none" {
 		os = ofelf.OSFreestanding
 	}
-	// NOTE: objectfile/elf's documented predefined targets only distinguish
-	// Linux vs. Freestanding — freebsd/netbsd/openbsd/android currently
-	// fold onto the Linux-shaped ELF encoding here, since the docs don't
-	// show a distinct OS value for them at this layer (only linker/elf,
-	// one stage later, actually varies default-interpreter/search-dirs by
-	// the full OS). Flag this if that assumption turns out wrong.
 	return ofelf.Target{Arch: arch, OS: os}
 }
 
@@ -152,25 +141,6 @@ func machoObjTarget(t Target) ofmacho.Target {
 
 // --- linker/<format> construction ---------------------------------------
 
-// newLinker builds the right linker/<format>.Linker for t, translating
-// vvm.Target into that package's own native triple grammar and string
-// spelling before calling its ParseTarget — exactly the translation step
-// each format's README says is this package's job, not theirs.
-//
-// entryPoint is what resolveEntryPoint (entrythunk.go) decided the actual
-// process entry symbol should be — either "_start" (raw, or the
-// newly-synthesized libc-style wrapper) or the `entry`-attributed fn's own
-// name (raw wiring on os=none/uefi, unrecognized signatures, or a fn
-// literally named "_start" already). For a shared-library build
-// (t.Kind == OutputSharedLibrary) no entry point is wired at all — shared
-// libraries have no process entry, only init/fini, which this package
-// doesn't yet synthesize.
-//
-// m is no longer consulted for a "default symbol namespace" concept: every
-// extern group must declare an explicit, non-empty Dependency matching a
-// prior `link` line (§1.2 rule 9, enforced in vir.Verify) — there is no
-// anonymous/default-namespace extern group left to detect, on any target,
-// so this package has nothing to auto-resolve here.
 func newLinker(m *vir.Module, t Target, entryPoint string) (linker interface {
 	SetEntryPoint(string)
 	AddObject(name string, data []byte) error
@@ -203,6 +173,16 @@ func newLinker(m *vir.Module, t Target, entryPoint string) (linker interface {
 			l.SetEntryPoint(entryPoint)
 		}
 
+		// Resolve the module's own §7.4 link section into real bytes.
+		// vir.Verify already confirmed every dependency here is
+		// well-formed (kind/extension agreement, no post-derivation
+		// duplicates) and that an ELF target never carries a `framework`
+		// dependency — this only has to load what Verify already
+		// approved, not re-validate it.
+		if err := addELFLinkDependencies(l, m, t); err != nil {
+			return nil, err
+		}
+
 		return l, nil
 
 	case formatMachO:
@@ -213,7 +193,7 @@ func newLinker(m *vir.Module, t Target, entryPoint string) (linker interface {
 		}
 		archMacho := t.baseArch()
 		if archMacho == "aarch64" {
-			archMacho = "arm64" // linker/macho spells it arm64, not aarch64
+			archMacho = "arm64"
 		}
 		sdk := map[string]string{
 			"macos": "macosx", "ios": "iphoneos", "watchos": "watchos",
@@ -228,18 +208,16 @@ func newLinker(m *vir.Module, t Target, entryPoint string) (linker interface {
 		if !l.Supported() {
 			return nil, fmt.Errorf("vvm: %s: no macho codegen backend registered", t)
 		}
-		// TODO: entrythunk.go has no registered thunk for any Mach-O
-		// (arch, os) yet, so entryPoint here is always just the raw
-		// `entry`-attributed fn's name (or "_start" with no `entry` fn at
-		// all) — same as before this change. Kept as the pre-existing
-		// hardcoded "_main" for now rather than wiring entryPoint through
-		// half-heartedly; revisit once a real macOS CRT thunk lands.
+		// TODO: same as before — entrythunk.go has no registered Mach-O
+		// thunk, and this package's Mach-O linker dependency resolution
+		// (frameworks / shared libs from m.Links) isn't wired yet either;
+		// only the ELF path resolves §7.4 dependencies so far.
 		l.SetEntryPoint("_main")
 
 		return l, nil
 
 	case formatPE:
-		archPE := t.Arch // pe spells aarch64 as-is; x86 -> i686
+		archPE := t.Arch
 		if archPE == "x86" {
 			archPE = "i686"
 		}
@@ -261,12 +239,69 @@ func newLinker(m *vir.Module, t Target, entryPoint string) (linker interface {
 		if !l.Supported() {
 			return nil, fmt.Errorf("vvm: %s: no pe codegen backend registered", t)
 		}
-		// TODO: same as Mach-O above — entrythunk.go has nothing registered
-		// for PE yet, so entry point is left at the arch's registered
-		// default (mainCRTStartup, etc.), same as before this change.
+		// TODO: same as Mach-O — no entry thunk, and PE dependency
+		// resolution from m.Links isn't wired yet either.
 
 		return l, nil
 	}
 
 	return nil, fmt.Errorf("vvm: unreachable format for %s", t)
+}
+
+// addELFLinkDependencies walks m.Links — the module's self-contained
+// dependency list (ir.md §7.4) — and resolves each into l via its
+// search-path-aware Add* methods. Without this, a module's
+// `link shared "..."` / `link static "..."` lines only ever passed
+// vir.Verify's name-matching check (§1.2 rule 9); nothing previously
+// turned them into actual bytes handed to the linker, so any symbol from
+// such a dependency came back "undefined reference" regardless of how
+// correctly the module declared it.
+func addELFLinkDependencies(l *linkelf.Linker, m *vir.Module, t Target) error {
+	format := vir.FormatOf(t.OS)
+	for _, link := range m.Links {
+		switch link.Kind {
+		case vir.LinkShared:
+			// "c" is libc's own conventional short name (ir.md §7.4's
+			// worked example). The plain short-name derivation yields
+			// "libc.so", which on most distros is only a dev-package
+			// linker script/symlink, not a loadable runtime object
+			// (§7.4 "Informative" note) — AddSystemLibrary would find
+			// and try to parse that, and fail or misbehave depending on
+			// the distro. Route it through the registered default
+			// namespace instead, which already resolves the real
+			// per-(arch,os,abi) runtime soname (e.g. libc.so.6 on gnu,
+			// a different musl soname) — see linker/elf/x86_64/register.go.
+			if link.Name == "c" {
+				if err := l.AddDefaultNamespace(); err != nil {
+					return fmt.Errorf("vvm: link shared %q: %w", link.Name, err)
+				}
+				continue
+			}
+			file, err := vir.DeriveLinkFile(link, format)
+			if err != nil {
+				return fmt.Errorf("vvm: link shared %q: %w", link.Name, err)
+			}
+			if err := l.AddSystemLibrary(file); err != nil {
+				return fmt.Errorf("vvm: link shared %q: %w", link.Name, err)
+			}
+
+		case vir.LinkStatic:
+			file, err := vir.DeriveLinkFile(link, format)
+			if err != nil {
+				return fmt.Errorf("vvm: link static %q: %w", link.Name, err)
+			}
+			if err := l.AddSystemArchive(file); err != nil {
+				return fmt.Errorf("vvm: link static %q: %w", link.Name, err)
+			}
+
+		case vir.LinkFramework:
+			// Unreachable in practice: vir.Verify rejects `framework` on
+			// any non-Mach-O target (§7.4/§9.8) before BuildModule's own
+			// Verify call ever lets execution reach here. Fail loudly
+			// rather than silently ignoring it, in case a caller ever
+			// hands BuildModule an unverified *vir.Module directly.
+			return fmt.Errorf("vvm: link framework %q: framework dependencies are not valid for an ELF target (§7.4)", link.Name)
+		}
+	}
+	return nil
 }
