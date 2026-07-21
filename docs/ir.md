@@ -67,7 +67,7 @@ global-decl   := "export"? "global" "tls"? ident type ("align" int-literal)? "="
 link-decl     := "link" lib-kind string-literal
 lib-kind      := "static" | "shared" | "framework"
 
-extern-group  := "extern" string-literal? ":"
+extern-group  := "extern" string-literal ":"
                  extern-fn*
                  "end"
 extern-fn     := "fn" ident "(" param-list? ")" type fn-attr*
@@ -81,7 +81,7 @@ param-list    := param ("," param)* ("," "...")?
 param         := ident type param-attr*
 param-attr    := "byval" "[" ident "]"
                | "sret" "[" ident "]"
-fn-attr       := "noreturn" | "readonly" | "inline" | "noinline" | "cold"
+fn-attr       := "noreturn" | "readonly" | "inline" | "noinline" | "cold" | "entry"
 
 const-init    := literal
                | "zero"
@@ -170,7 +170,7 @@ The section order is **fixed and enforced**: header, target, asmdialect, structs
 6. **Linkage.** Every `fn` and `global` is module-internal unless marked `export`. Exported names get external linkage with C symbol naming; internal names are invisible to the linker. `extern` declarations are always imports. `const`, `struct`, and `fnsig` are compile-time entities and never have linkage.
 7. **Thread-local storage.** `global tls` declares one instance per thread, initialized per thread. `addr` of a `tls` global yields the *current thread's* instance and is forbidden in static initializers (§8). `os = none` targets reject `tls` unless the feature tier supplies a TLS register convention.
 8. **Link declarations.** Each `link` line declares one library dependency (§7.4). Duplicate dependencies — after short-name derivation — are rejected. A `link` line with no matching `extern` group is legal (a link-only dependency, e.g. a framework reached indirectly).
-9. **Extern groups.** An `extern "X" :` group's string must byte-for-byte match a previously declared `link` string as written. Each `link` string may be referenced by at most one group. An anonymous group (`extern :`) imports from the target's default namespace; rejected on `os = none`/`uefi` unless the environment defines a symbol source. Groups contain only `extern-fn` lines; empty groups are rejected.
+9. **Extern groups.** Every `extern "X" :` group's string must byte-for-byte match a previously declared `link` string as written; a group with no matching `link` line is rejected — there is no default/anonymous namespace. Each `link` string may be referenced by at most one group. Groups contain only `extern-fn` lines; empty groups are rejected.
 10. **Target declaration.** A module may declare its own build target via `target arch os abi? tier-list?`, at most once, immediately after `module` and before any other section. `arch`/`os`/`abi` must be canonical spellings (§10.1–§10.3); aliases are rejected here as everywhere (§10.5). Tier-list entries must be tiers the target actually supports (§10.4). **Required** whenever a `link-decl` or `asm` block is present — such modules are already per-target by construction, and the `target-decl` makes that explicit and checkable. **Optional and typically absent** for pure-compute modules (no `link` section, no `asm` block), which remain buildable for any triple via build flags alone. A build invocation specifying a conflicting target is a build-time error, not a verifier error.
 11. **Asm dialect declaration.** A module may declare a file-wide inline assembly parsing syntax via `asmdialect dialect`, at most once, immediately after the target declaration and before structs. **Required** if the module contains any `asm` blocks. The declared dialect must be valid for the module's architecture.
 
@@ -214,7 +214,7 @@ Modules remain target-independent in their compute sections when no `target-decl
 ## 3. Lexical Structure
 
 * **Identifiers:** Bare names: `[A-Za-z_][A-Za-z0-9_]*`. No sigils.
-* **Keywords:** `module`, `target`, `asmdialect`, `struct`, `fnsig`, `const`, `global`, `export`, `tls`, `extern`, `link`, `shared`, `static`, `framework`, `fn`, `end`, `zero`, `addr`, `loc`, `align`, `syscall`, `asm`, `code`, `in`, `out`, `clobber`, dialect tokens (`intel`, `att`, `a32`, `t32`, `native`), attribute names, terminators, and orderings (`relaxed`, `acquire`, `release`, `acqrel`, `seqcst`) are reserved and may not be used as identifiers.
+* **Keywords:** `module`, `target`, `asmdialect`, `struct`, `fnsig`, `const`, `global`, `export`, `tls`, `extern`, `link`, `shared`, `static`, `framework`, `fn`, `end`, `zero`, `addr`, `loc`, `align`, `syscall`, `asm`, `code`, `in`, `out`, `clobber`, `entry`, dialect tokens (`intel`, `att`, `a32`, `t32`, `native`), attribute names, terminators, and orderings (`relaxed`, `acquire`, `release`, `acqrel`, `seqcst`) are reserved and may not be used as identifiers.
 * **Roles by punctuation:** trailing `:` marks a label (and opens a function, extern group, or the `code:` section of an asm block); `=` binds a result or initializer; `.` joins an opcode to its type suffix and appears nowhere else outside float literals and link strings.
 * **Literals:** Typed by context — integers (`42`, `-7`), floats (`1.0`, `2.5e3`, `NaN`, `Inf`, `-Inf`), booleans (`true`, `false` as `i1`), `null` (as `ptr`), byte strings (`"bytes\0"`, legal only as `array[i8, N]` initializers, §8), and vector literals (`(0, 4, 1, 5)`). A literal is only legal where the expected type is unambiguous from the opcode suffix or declaration.
 * **Orderings:** Contextual keywords parsing into the `ordering` operand, used only by atomic instructions and `fence` (§4).
@@ -511,7 +511,7 @@ Scalar (`iN`, `fN`, `ptr`, legal `vec`) parameters and returns are passed direct
 
 ### 7.3 Symbols
 
-`export`ed functions and globals get their IR name as an unmangled C symbol (plus any target-mandated decoration, e.g. legacy underscore prefixing on `macho`). Functions declared in `extern` groups bind to C symbols of their IR name; the group determines which dependency provides them (§7.4). Functions in an anonymous group (`extern :`) resolve against the target's default namespace. Internal definitions have no symbol obligations.
+`export`ed functions and globals get their IR name as an unmangled C symbol (plus any target-mandated decoration, e.g. legacy underscore prefixing on `macho`). Functions declared in `extern` groups bind to C symbols of their IR name; the group determines which dependency provides them (§7.4). Internal definitions have no symbol obligations.
 
 ### 7.4 Link dependencies
 
@@ -545,7 +545,7 @@ An exact name is emitted/consumed byte-for-byte, and its extension must agree wi
 
 **Duplicates.** Rejected after derivation: `link shared "SDL2"` and `link shared "libSDL2.so"` on an ELF target name the same file and may not coexist.
 
-**Attribution.** An `extern "X" :` group binds its symbols to the dependency whose `link` string is byte-for-byte `"X"` as written. A `link` line need not have a group (link-only dependencies); a group must have a `link` line, except the anonymous group `extern :`, which carries no dependency.
+**Attribution.** An `extern "X" :` group binds its symbols to the dependency whose `link` string is byte-for-byte `"X"` as written. A `link` line need not have a group (link-only dependencies); every group must have a matching `link` line — there is no anonymous/default-namespace group. libc, or any other implicit host dependency, must be declared with an ordinary `link` line like anything else.
 
 **Target-dependence.** Pure-compute modules (no link section) remain fully target-independent. Modules with a link section are per-target by construction and must carry a `target-decl` (§1.2 rule 10) naming that same triple explicitly.
 
@@ -568,7 +568,8 @@ extern "SDL2" :
     fn SDL_Init(flags i32) i32
 end
 
-extern :                            // default namespace (e.g. libc on hosted OSes)
+link shared "c"                     // libc.so / libc.dylib / (msvcrt/ucrt via abi, per target)
+extern "c" :
     fn malloc(size i64) ptr
     fn free(p ptr) void
 end
@@ -611,7 +612,7 @@ global on_tick ptr = addr default_tick_handler   // default_tick_handler declare
 
 ```
 
-Note: `addr` of an `extern fn` requires the function's `extern` group (or anonymous group) to appear before the `global` — which the fixed section order forbids, since links and externs follow globals. `addr` of extern functions is therefore unreachable in v1.2 and reserved; use a runtime store of the function name (which yields its `ptr`, §4) instead.
+Note: `addr` of an `extern fn` requires the function's `extern` group to appear before the `global` — which the fixed section order forbids, since links and externs follow globals. `addr` of extern functions is therefore unreachable in v1.2 and reserved; use a runtime store of the function name (which yields its `ptr`, §4) instead.
 
 `global` initializers may not reference `const`s by name, do arithmetic, or take offsets into objects (`addr` yields object bases only). Offset constants are future work.
 
@@ -625,6 +626,9 @@ Note: `addr` of an `extern fn` requires the function's `extern` group (or anonym
 2. **Declare-Before-Use:** every reference resolves to an earlier line; only direct self-recursion inside an `fn` body is exempt (§1.2).
 3. **Naming:** strict single flat namespace; zero shadowing; keywords are not identifiers. Extern-group functions live in the flat namespace like every other name. (Asm-local labels are block-scoped and are the sole exception, §4.)
 4. **Linkage:** `export` only on `fn`/`global`; `tls` only on `global`; `tls` rejected on targets without a TLS convention.
+
+4a. **`entry` attribute:** at most one `fn` in the module carries `entry`. A `fn` with `entry` must be `export`. `entry` is rejected on any `fn` whose param-list contains a `byval` or `sret` attribute, and rejected together with `noreturn` on the same `fn` (an entry point that never returns to its caller cannot also be the caller's own return target — moot, but kept explicit rather than silently ignored, consistent with this module's own return type).
+
 5. **Initializers:** `const` is one scalar literal; `global` initializers match §8 exactly (arity, types, byte-string length, `addr` legality, no `addr` of `tls`); `global align N` is a power of two ≥ natural alignment.
 6. **Variadics:** `...` only in `extern fn`/`fnsig`, once, final; variadic arguments cannot be `f32` or narrower than `i32`.
 
@@ -635,7 +639,7 @@ Note: `addr` of an `extern fn` requires the function's `extern` group (or anonym
 **Link section**
 
 8. **Link names:** strings containing `.` or a path separator are exact names whose extension must agree with the kind; strings with neither are short names derived by the §7.4 table. `framework` strings must be short names; `framework` is legal only on Mach-O targets. Duplicate dependencies after derivation are rejected.
-9. **Extern groups:** a named group's string byte-for-byte matches a previously declared `link` string as written; at most one group per `link` string; anonymous groups rejected on `none`/`uefi` targets; empty groups rejected; groups contain only `extern-fn` lines.
+9. **Extern groups:** a named group's string byte-for-byte matches a previously declared `link` string as written; at most one group per `link` string; a group with no matching `link` string is rejected on every target — there is no anonymous/default-namespace group; empty groups rejected; groups contain only `extern-fn` lines.
 
 **Body shape**
 

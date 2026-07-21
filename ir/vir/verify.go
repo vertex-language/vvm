@@ -30,7 +30,7 @@ var keywords = map[string]bool{
 	"global": true, "export": true, "tls": true, "extern": true, "link": true,
 	"shared": true, "static": true, "framework": true, "fn": true, "end": true,
 	"zero": true, "addr": true, "loc": true, "align": true, "syscall": true,
-	"noreturn": true, "readonly": true, "inline": true, "noinline": true, "cold": true,
+	"noreturn": true, "readonly": true, "inline": true, "noinline": true, "cold": true, "entry": true,
 	"br": true, "br_if": true, "switch": true, "return": true, "tailcall": true,
 	"trap": true, "unreachable": true,
 	"relaxed": true, "acquire": true, "release": true, "acqrel": true, "seqcst": true,
@@ -205,7 +205,9 @@ func (v *verifier) run() error {
 		derived[file] = l.Name
 	}
 
-	// Extern groups (§9.9).
+	// Extern groups (§9.9). There is no anonymous/default-namespace group:
+	// every group's Dependency must be non-empty and match a previously
+	// declared link string byte-for-byte (§1.2 rule 9, §7.4).
 	linkStrings := map[string]bool{}
 	for _, l := range m.Links {
 		linkStrings[l.Name] = true
@@ -213,18 +215,15 @@ func (v *verifier) run() error {
 	claimed := map[string]bool{}
 	for _, g := range m.Externs {
 		if g.Dependency == "" {
-			if m.Target != nil && (m.Target.OS == "none" || m.Target.OS == "uefi") {
-				return fmt.Errorf("anonymous extern group rejected on os=%s (§1.2 rule 9)", m.Target.OS)
-			}
-		} else {
-			if !linkStrings[g.Dependency] {
-				return fmt.Errorf("extern group %q: no matching link declaration (§1.2 rule 9)", g.Dependency)
-			}
-			if claimed[g.Dependency] {
-				return fmt.Errorf("extern group %q: link string already claimed by another group (§1.2 rule 9)", g.Dependency)
-			}
-			claimed[g.Dependency] = true
+			return fmt.Errorf("extern group has no dependency string; anonymous/default-namespace groups are rejected — declare a link line and name it explicitly (§1.2 rule 9)")
 		}
+		if !linkStrings[g.Dependency] {
+			return fmt.Errorf("extern group %q: no matching link declaration (§1.2 rule 9)", g.Dependency)
+		}
+		if claimed[g.Dependency] {
+			return fmt.Errorf("extern group %q: link string already claimed by another group (§1.2 rule 9)", g.Dependency)
+		}
+		claimed[g.Dependency] = true
 		if len(g.Functions) == 0 {
 			return fmt.Errorf("empty extern group %q rejected (§1.2 rule 9)", g.Dependency)
 		}
@@ -239,6 +238,8 @@ func (v *verifier) run() error {
 	}
 
 	// Functions.
+	entryCount := 0
+	var entryFn *Function
 	for _, f := range m.Functions {
 		if err := v.declare(f.Name, "fn"); err != nil {
 			return err
@@ -249,7 +250,18 @@ func (v *verifier) run() error {
 		if f.IsVariadic() {
 			return fmt.Errorf("fn %s: variadics are rejected in fn definitions (§1.2 rule 5)", f.Name)
 		}
+		if f.HasAttribute(AttributeEntry) {
+			entryCount++
+			entryFn = f
+			if err := v.checkEntryAttribute(f); err != nil {
+				return err
+			}
+		}
 	}
+	if entryCount > 1 {
+		return fmt.Errorf("module has %d fns carrying entry; at most one is permitted (§9.4a)", entryCount)
+	}
+	_ = entryFn
 	// Labels join the flat namespace (§1.3 rule 4) — declare before bodies.
 	for _, f := range m.Functions {
 		for _, b := range f.Blocks {
@@ -262,6 +274,24 @@ func (v *verifier) run() error {
 		if err := v.verifyFunction(f); err != nil {
 			return fmt.Errorf("fn %s: %w", f.Name, err)
 		}
+	}
+	return nil
+}
+
+// checkEntryAttribute enforces §9.4a: a fn carrying `entry` must be
+// export, must not have byval/sret parameters, and must not also carry
+// noreturn.
+func (v *verifier) checkEntryAttribute(f *Function) error {
+	if !f.Export {
+		return fmt.Errorf("fn %s: entry requires export (§9.4a)", f.Name)
+	}
+	for _, p := range f.Params {
+		if p.ByVal != "" || p.SRet != "" {
+			return fmt.Errorf("fn %s: entry is rejected on a fn with byval/sret parameters (§9.4a)", f.Name)
+		}
+	}
+	if f.HasAttribute(AttributeNoReturn) {
+		return fmt.Errorf("fn %s: entry and noreturn are rejected together (§9.4a)", f.Name)
 	}
 	return nil
 }

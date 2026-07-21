@@ -97,8 +97,13 @@ type Link struct {
 	Name string // short or exact name, as written
 }
 
+// ExternGroup declares imported functions and the dependency that provides
+// them (§7.4). There is no anonymous/default-namespace group: Dependency
+// must always be a non-empty string matching a previously declared Link's
+// Name byte-for-byte (§1.2 rule 9). Even libc must be declared via an
+// ordinary `link` line and named here explicitly.
 type ExternGroup struct {
-	Dependency string // byte-for-byte link string; "" = anonymous group
+	Dependency string // byte-for-byte link string; never "" (§1.2 rule 9)
 	Functions  []*ExternFunction
 }
 
@@ -110,6 +115,13 @@ const (
 	AttributeInline   FunctionAttribute = "inline"
 	AttributeNoInline FunctionAttribute = "noinline"
 	AttributeCold     FunctionAttribute = "cold"
+	// AttributeEntry marks the function as the platform handoff point
+	// (§1.1 fn-attr, §9.4a). At most one fn per module may carry it; the
+	// linker resolves what it's actually wired to (process entry, DLL
+	// load hook, driver entry, ...) at link time, based on the requested
+	// output kind — the IR module itself asserts only "this is the
+	// function you'd hand control to, if you hand control to anything."
+	AttributeEntry FunctionAttribute = "entry"
 )
 
 type Param struct {
@@ -133,7 +145,7 @@ type Function struct {
 	Ret    Type
 	Attrs  []FunctionAttribute
 	Export bool
-	Entry  *Block   // unlabeled, untargetable (§1.3 rule 1)
+	Entry  *Block   // unlabeled, untargetable (§1.3 rule 1) — the function's own entry BLOCK, distinct from the entry ATTRIBUTE above
 	Blocks []*Block // labeled blocks in textual order
 }
 
@@ -333,18 +345,12 @@ func Successors(t Terminator) []string {
 	return nil // return, tailcall, trap, unreachable
 }
 
-// AnonymousExternFunctions returns the functions declared in the module's
-// anonymous extern group (`extern :`), or nil if the module has none.
-// Per §1.2 rule 9 there is at most one anonymous group per module and
-// empty groups are rejected by the verifier, so the result — if non-nil —
-// is always non-empty. This is the "does this module need the target's
-// default symbol namespace (e.g. libc on hosted OSes)" signal (§7.4):
-// named extern groups always resolve against an explicit `link` line and
-// never trigger any implicit default-namespace lookup.
-func (m *Module) AnonymousExternFunctions() []*ExternFunction {
-	for _, g := range m.Externs {
-		if g.Dependency == "" {
-			return g.Functions
+// EntryFunction returns the module's single `entry`-attributed function, or
+// nil if none is declared (§9.4a). At most one exists in a verified module.
+func (m *Module) EntryFunction() *Function {
+	for _, f := range m.Functions {
+		if f.HasAttribute(AttributeEntry) {
+			return f
 		}
 	}
 	return nil
