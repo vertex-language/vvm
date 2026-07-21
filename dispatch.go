@@ -17,7 +17,6 @@ import (
 	lowerx86_64 "github.com/vertex-language/vvm/lower/x86_64"
 
 	objwaarch64 "github.com/vertex-language/vvm/objectwriter/aarch64"
-	objwarm "github.com/vertex-language/vvm/objectwriter/arm"
 	objwx86 "github.com/vertex-language/vvm/objectwriter/x86"
 	objwx86_64 "github.com/vertex-language/vvm/objectwriter/x86_64"
 
@@ -159,7 +158,7 @@ func machoObjTarget(t Target) ofmacho.Target {
 // each format's README says is this package's job, not theirs.
 func newLinker(t Target) (linker interface {
 	SetEntryPoint(string)
-	AddObject(name string, data []byte)
+	AddObject(name string, data []byte) error
 	Link() ([]byte, error)
 	Supported() bool
 }, err error) {

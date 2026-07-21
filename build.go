@@ -42,7 +42,9 @@ func BuildModule(m *vir.Module, t Target) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	l.AddObject("vvm_module.o", obj)
+	if err := l.AddObject("vvm_module.o", obj); err != nil {
+		return nil, fmt.Errorf("vvm: add object: %w", err)
+	}
 
 	out, err := l.Link()
 	if err != nil {

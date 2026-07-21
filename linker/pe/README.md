@@ -93,7 +93,10 @@ maps both `ArchX86_64` and `ArchARM64EC` to `IMAGE_FILE_MACHINE_AMD64`.
 A linked ARM64EC EXE/DLL's real ARM64EC-ness is meant to be signaled via
 CHPE metadata in `IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG`, not the header's
 machine field — and this package does not emit that metadata (see Known
-limitations).
+limitations). Object-level relocations against ARM64EC-native code still
+use ordinary `IMAGE_REL_ARM64_*` numeric types (`arm64ec`'s `Patcher`
+reuses the same encodings as `aarch64`), even though the final image's
+machine field reads `AMD64`.
 
 ### What's valid (`Target.Valid()`)
 
@@ -184,7 +187,7 @@ OSUEFI`, otherwise `SubsystemWindowsCUI`.
 only when `OutputType != OutputExec` **and** a `.reloc` section was
 actually produced — a PIE or DLL with no absolute-address relocations
 gets neither flag, even though it's non-`OutputExec`. `NX_COMPAT`/
-`TERMINAL_SERVER_AWARE` are always set.
+`TERMINAL_SERVER_AWARE` are always set, on every output type.
 
 ---
 
@@ -193,8 +196,11 @@ gets neither flag, even though it's non-`OutputExec`. `NX_COMPAT`/
 `Link()` runs, in order:
 
 ```
-walkSharedDeps          — transitive DLL dependency walk
-                          (api-ms-win-* / ext-ms-win-* API Sets skipped)
+walkSharedDeps          — NOT implemented; this step is a no-op today. The
+                          linker relies entirely on explicit
+                          AddDynamicLibrary calls to supply every needed
+                          shared library — there is no transitive DLL
+                          dependency walk yet.
     ↓
 SymbolTable.Ingest      — objects → shared libs → archives (repeated until no
                           new member is extracted) → error on any strong
@@ -209,8 +215,11 @@ GC                      — dead-section elimination (see below)
 [only if any PLT symbols exist]
 InjectPLTSections       — append synthetic .plt / .got.plt
 computeIATLayout        — group PLT symbols into per-DLL IAT slot ranges
-injectIdata             — append a placeholder .idata section, sized by
-                          computeIdataGeom
+computeIdataGeom        — compute the import directory's exact byte layout
+                          (sizes only — writes nothing yet)
+Layout.AppendAllocSection(".idata", ...) — append a placeholder .idata
+                          section, zero-filled and sized by that geometry,
+                          so it receives a VAddr during AssignLayout
     ↓
 AssignLayout            — assign VAddrs and advisory file offsets
     ↓
@@ -316,18 +325,21 @@ Classical left-to-right Unix semantics, same as `linker/elf`:
 `TableSymbol.Kind` has five values (`kindUndefined`, `kindLazy`,
 `kindShared`, `kindCommon`, `kindDefined`) though nothing in this
 package currently constructs a `kindLazy` symbol — it's handled
-identically to `kindUndefined` wherever it's checked, reserved for a
-future lazy-binding path.
+identically to `kindUndefined` in the shared-library resolution path,
+reserved for a future lazy-binding path.
 
 ---
 
 ## Dead-section elimination (`GC`)
 
 Roots are chosen by output type:
-- **`OutputShared`**: every symbol that is non-weak, strongly defined
-  (not a tentative common), and has a real section — i.e. there's no
-  actual export-directory filter (see Known limitations), so this is
-  "keep everything strongly defined," not "keep only what's exported."
+- **`OutputShared`**: every symbol that is non-weak, strongly or
+  tentatively defined, has an object-level `Binding == BindGlobal`, and
+  resolves to a non-empty section name. In practice this excludes
+  tentative (`common`) definitions anyway, since a common symbol's
+  section name is always empty — there's no actual export-directory
+  filter (see Known limitations), so this is "keep everything strongly
+  defined and named," not "keep only what's exported."
 - **`OutputExec`/`OutputPIE`**: just the entry symbol.
 
 If none of the chosen roots actually resolve to a section present in
@@ -361,7 +373,12 @@ can never disagree.
 Per-arch thunk *encoding* (the actual bytes written into `.plt`) is
 supplied by whatever `PLTPatcher` the target's subpackage registers —
 this package only fixes the slot sizes and grouping, not the
-instruction sequence.
+instruction sequence. `x64`'s thunk is a bare `FF 25` RIP-relative
+indirect jump through the IAT slot, padded with `NOP`s; `aarch64` and
+`arm64ec` both write the same four-instruction `ADRP x16 / LDR x16 /
+BR x16 / NOP` sequence, since ARM64EC-native code calls through the IAT
+with real ARM64 instructions — no x64-compatible thunk variant is
+emitted for ARM64EC (see Known limitations).
 
 **Delay-load imports (`.didat`) are out of scope** — only ordinary,
 eagerly-bound `.idata` imports are ever built;
@@ -433,22 +450,27 @@ func LookupPLTPatcher(t Target) (PLTPatcher, bool)
 `RegisterSearchDirs`/`lookupSearchDirs` are keyed by `ABI`, not `Arch` —
 DLL search-path conventions (System32/SysWOW64-style vs. a mingw-w64
 sysroot layout) are an ABI property in this package's model, shared
-across every arch under that ABI.
+across every arch under that ABI. In practice today all three
+implemented arches register the same System32/SysWOW64 paths for both
+`ABIMSVC` and `ABIGNU` (`x64` and `aarch64` each register both; `aarch64`
+duplicates the registration so it works standalone without also
+blank-importing `x64`); `arm64ec` only registers `ABIMSVC`, matching its
+msvc-only `Target.Valid()` restriction.
 
 ### Adding a new arch
 
 ```go
-// linker/pe/arm64ec/register.go
-package arm64ec
+// linker/pe/i686/register.go
+package i686
 
 import "github.com/vertex-language/vvm/linker/pe"
 
 func init() {
-    pe.RegisterPatcher(pe.ArchARM64EC, func(t pe.Target) pe.Patcher {
-        return arm64ecPatcher{}
+    pe.RegisterPatcher(pe.ArchI686, func(t pe.Target) pe.Patcher {
+        return i686Patcher{}
     })
-    pe.RegisterPLTPatcher(pe.ArchARM64EC, func(t pe.Target) pe.PLTPatcher {
-        return arm64ecPLTPatcher{}
+    pe.RegisterPLTPatcher(pe.ArchI686, func(t pe.Target) pe.PLTPatcher {
+        return i686PLTPatcher{}
     })
 }
 ```
@@ -492,16 +514,19 @@ linker/pe/
 ## Known limitations
 
 - **No PE export directory is ever emitted, for any output type.**
-  `Linker.SetDLLName`/`EmitRequest.DLLName` are plumbed all the way
-  through to `emitPE`, but `emitPE` never writes an
-  `IMAGE_DIRECTORY_ENTRY_EXPORT` (`dirExport`) entry or an export table
-  — `DLLName` is currently inert. `GC`'s `OutputShared` root selection
-  (see above) also doesn't restrict itself to a real export list, since
-  none exists. Practically: **an `OutputShared` build today produces a
+  `emitPE` never writes an `IMAGE_DIRECTORY_ENTRY_EXPORT` (`dirExport`)
+  entry or an export table. `GC`'s `OutputShared` root selection (see
+  above) also doesn't restrict itself to a real export list, since none
+  exists. Practically: **an `OutputShared` build today produces a
   structurally valid DLL that other binaries cannot actually import
   symbols from.** Treat `OutputShared` as "emits `IMAGE_FILE_DLL` and
   the right base-relocation/ASLR bits," not as "produces a usable
   import library counterpart."
+- **`Linker.SetDLLName` is a dead end.** It's stored on the `Linker`
+  struct, but `EmitRequest` (the struct `Link()` hands to `emitPE`) has
+  no `DLLName` field at all — the value never reaches `builder.go` and
+  has no effect on the output whatsoever, beyond being retrievable off
+  the `Linker` itself.
 - **`arm64ec`**: thunks and relocation patching are wired up and will
   link end-to-end, but two things are missing:
   1. The ARM64EC calling-convention adjustments (x64-shadow-space
@@ -519,6 +544,9 @@ linker/pe/
   inline-addend extraction (`coffReadAddend`) doesn't handle them
   either — `Linker.Supported()` will report `false` for these targets
   until a subpackage is added.
+- **`walkSharedDeps` is not implemented.** There is no transitive DLL
+  dependency walk; callers must call `AddDynamicLibrary` for every
+  shared library the link actually needs.
 - **Entry-point validation**: `emitPE` silently emits
   `AddressOfEntryPoint = 0` if the configured entry symbol can't be
   resolved, rather than erroring.

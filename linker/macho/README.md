@@ -2,7 +2,7 @@
 
 Mach-O sub-package for `github.com/vertex-language/vvm/linker`. This
 package emits the container format used by every Apple OS. Naming
-mirrors what `xcodebuild`, and `xcrun` actually print — a `Target`
+mirrors what `xcodebuild` and `xcrun` actually print — a `Target`
 in this package.
 
 ## Import
@@ -152,7 +152,7 @@ out, err := l.Link()
 `Target.Arch` — i.e. whether the relevant subpackage has been
 blank-imported. `Link()` fails fast with a clear error if it hasn't.
 
-### Linking against dylibs vs. frameworks
+### Linking against dylibs and frameworks
 
 Three ways to declare a shared-library dependency, in increasing order of
 how much the linker knows about it:
@@ -163,20 +163,13 @@ l.AddDynamicLibrary("libfoo.dylib", data)          // real parse: reads LC_ID_DY
 l.AddCachedDylib("libfoo.dylib", []string{"foo"})  // stub with pre-registered `_`-mangled exports
 ```
 
-`AddFramework` is a thin convenience wrapper over `AddCachedDylib` for the
-common case of linking against an Apple framework by its bare name, rather
-than requiring you to spell out the `<Name>.framework/<Name>` install-name
-convention yourself:
-
-```go
-l.AddFramework("Foundation", []string{"NSLog", "NSStringFromClass"})
-l.AddFramework("UIKit", nil) // declares the dependency; no exports pre-registered
-```
-
-This is equivalent to:
+There's no `AddFramework` convenience wrapper (yet) — linking against an
+Apple framework by name is just `AddCachedDylib` with the
+`<Name>.framework/<Name>` install-name convention spelled out yourself:
 
 ```go
 l.AddCachedDylib("Foundation.framework/Foundation", []string{"NSLog", "NSStringFromClass"})
+l.AddCachedDylib("UIKit.framework/UIKit", nil) // declares the dependency; no exports pre-registered
 ```
 
 Because `AddDynamicLibrary`/`AddCachedDylib` set `Soname` to the literal
@@ -188,13 +181,13 @@ name passed in (unlike parsing a real dylib, where `Soname` is derived via
 automatically — you never need to hardcode the `/System/Library/Frameworks`
 prefix yourself.
 
-Prefer `AddFramework`/`AddCachedDylib` with an explicit symbol list over a
-bare `AddDynamicLibrary(name, nil)` stub whenever you need specific symbols
-resolved against that framework: a plain stub has no `Exports`, so any
-undefined symbol left over after all other inputs are processed falls
-through to the blunt "first stub lib absorbs every remaining undefined"
-fallback in `SymbolTable.Ingest` (`symtab.go`), which doesn't verify the
-symbol is one that library actually provides.
+Prefer an explicit symbol list over a bare `AddDynamicLibrary(name, nil)`
+stub whenever you need specific symbols resolved against that library: a
+plain stub has no `Exports`, so any undefined symbol left over after all
+other inputs are processed falls through to the blunt "first stub lib
+absorbs every remaining undefined" fallback in `SymbolTable.Ingest`
+(`symtab.go`), which doesn't verify the symbol is one that library
+actually provides.
 
 ### `LC_BUILD_VERSION`, not `LC_VERSION_MIN_*`
 
@@ -273,6 +266,9 @@ Auto-detection order when no override is set:
 | `xrsimulator` | `XRSimulator.platform` |
 | `driverkit` | `DriverKit.platform` |
 
+`bridgeos` has no entry here — it has no public SDK/toolchain, so sysroot
+resolution errors out for it rather than resolving a path.
+
 ### Default dynamic linker (`dyld`)
 
 ```go
@@ -284,6 +280,10 @@ l.SetInterp(path string) // override; otherwise resolved from Target
 | `EnvNone` (device/native) | `/usr/lib/dyld` |
 | `EnvSimulator` | `/usr/lib/dyld_sim` |
 | `EnvMacCatalyst` | `/usr/lib/dyld` (Catalyst runs the native macOS dyld) |
+
+`arm64e` and `arm64_32` register `/usr/lib/dyld` unconditionally regardless
+of `Environment` — neither arch has a simulator variant in the valid-combo
+table, so the distinction never applies to them.
 
 ### Universal (fat) binaries
 
@@ -304,22 +304,34 @@ file offset would exceed 4 GiB.
 `ParseFat` only recovers `Arch` from each slice's cputype/cpusubtype — a
 `fat_arch` entry doesn't carry SDK, deployment target, or environment;
 those live in each slice's own `LC_BUILD_VERSION`. Parse the returned
-`Data` with the object/dylib parsers if you need the full `Target`.
+`Data` with the object/dylib parsers (via a `Linker`) if you need the full
+`Target`.
 
 ---
 
 ## Parsers
 
+`ParseArchive` and `ParseFat` are the only standalone, exported parsers in
+this package. Object (`MH_OBJECT`) and shared-library (`MH_DYLIB`) parsing
+is internal — reached only through `Linker.AddObject` /
+`Linker.AddArchive` / `Linker.AddDynamicLibrary`, which validate the
+input's `cputype`/`cpusubtype` against the `Linker`'s `Target` before
+handing back an `*Object`/`*SharedLib`. There's currently no public
+`ParseObject`/`ParseSharedLib` entry point for inspecting an object or
+dylib outside of a link.
+
 ```go
-obj, err    := macho.ParseObject("foo.o", data, target)   // MH_OBJECT; errors if the file's
-                                                           // cputype/cpusubtype don't match target.Arch
-ar, err     := macho.ParseArchive("libfoo.a", data, macho.ParseObject)
-lib, err    := macho.ParseSharedLib("libfoo.dylib", data) // MH_DYLIB
-slices, err := macho.ParseFat("libfoo.a", data)           // fat wrapper → per-Arch slices
+ar, err     := macho.ParseArchive("libfoo.a", data, parseObjFunc) // GNU/BSD ar
+slices, err := macho.ParseFat("libfoo.a", data)                   // fat wrapper → per-Arch slices
 ```
 
-All parsers require 64-bit Mach-O (`MH_MAGIC_64`); 32-bit input
-(`MH_MAGIC`) is out of scope — see below.
+`ParseArchive`'s second argument is the object-parsing callback; a
+`Linker` supplies its own internal one automatically via `AddArchive`, so
+you only need to pass one yourself if you're driving `ParseArchive`
+outside of a `Linker`.
+
+All object/dylib parsing requires 64-bit Mach-O (`MH_MAGIC_64`); 32-bit
+input (`MH_MAGIC`) is out of scope — see below.
 
 ---
 
@@ -501,7 +513,7 @@ linker/macho/
 ├── README.md
 ├── target.go        // Target, ParseTarget, SDK/Environment/Arch, Valid()
 ├── registry.go      // Patcher/PLTPatcher/interp factory registries, Supported()
-├── linker.go        // Linker struct, NewLinker, Link() pipeline, AddFramework
+├── linker.go        // Linker struct, NewLinker, Link() pipeline
 ├── builder.go        // Emitter: header, load commands, LINKEDIT
 ├── layout.go         // Layout, MergeSections, AssignLayout, ResolveSymbolAddresses
 ├── gc.go             // dead-section elimination
@@ -509,9 +521,9 @@ linker/macho/
 ├── buildversion.go    // LC_BUILD_VERSION / zippering platform resolution
 ├── sysroot.go          // xcrun-based SDK path resolution
 ├── notes.go            // content-derived UUID, LC_SOURCE_VERSION helper
-├── object.go           // parseObject (MH_OBJECT)
+├── object.go           // parseObject (MH_OBJECT, package-internal)
 ├── archive.go          // ParseArchive (GNU/BSD ar)
-├── shared.go           // parseSharedLib (MH_DYLIB, export trie + LC_SYMTAB fallback)
+├── shared.go           // parseSharedLib (MH_DYLIB, package-internal; export trie + LC_SYMTAB fallback)
 ├── lipo.go              // Lipo / ParseFat — universal-binary slicing
 ├── patch.go              // Patcher/PLTPatcher interfaces, PatchFunc adapter, PatchAll
 ├── reader.go              // bounds-checked reader, ULEB128/SLEB128
@@ -573,7 +585,10 @@ uniformly (same codegen, different resolved dyld path) without three
 near-duplicate subpackages. `Patcher` and `PLTPatcher` are stateless per
 call — the stub→GOT address mapping flows explicitly as a `StubMap`
 returned from `PatchPLT` and passed into every `Patcher.Apply` call, rather
-than being stashed on shared mutable state.
+than being stashed on shared mutable state. Note that each arch subpackage
+is self-contained: small helpers like `encodeADRP`/`encodeLDR64UnsignedOffset`
+are duplicated verbatim across `arm64`, `arm64e`, and `arm64_32` rather than
+imported from one another.
 
 ---
 
@@ -592,7 +607,14 @@ paths," not as a drop-in replacement for `ld`'s output for these targets:
   (the shared `gotEntrySize` constant in `dynamic.go` isn't yet
   parameterized per-arch), where a real watchOS ILP32 binary needs 4-byte
   pointers throughout. `ARM64_RELOC_UNSIGNED` in particular will write past
-  a real 4-byte pointer field.
+  a real 4-byte pointer field, and the PLT stub loads the GOT slot with a
+  64-bit `LDR` rather than the 32-bit load a correct ILP32 stub would use
+  (an unused `encodeLDR32UnsignedOffset` helper sketches the intended
+  encoding but isn't wired up yet).
+- **No `AddFramework` convenience wrapper**: linking against a framework
+  by bare name currently means spelling out
+  `AddCachedDylib("Name.framework/Name", symbols)` yourself; see
+  "Linking against dylibs and frameworks" above.
 - **`codesign`**: PKCS#12 (`.p12`) identity files are not supported —
   convert to PEM with `openssl pkcs12` first. DER-encoded entitlements
   (`derEntitlements`, 0xfade7172) are implemented but not yet wired into
