@@ -9,40 +9,36 @@ import "github.com/vertex-language/vvm/ir/vir"
 //	[fp]        saved FP (x29)
 //	[fp-8-8k]   one 8-byte home slot per vir value
 //
-// Prologue: stp x29, x30, [sp, #-16]!; mov x29, sp; sub sp, #local. The
-// first eight parameters arrive in x0-x7 and are normalized (AAPCS64
-// leaves narrow arguments' high bits unspecified) and spilled into
-// ordinary home slots by isel-emitted stores at function entry; parameters
-// 9+ are copied from their positive FP offsets into home slots at entry
-// too — unlike lower/arm, every parameter has a home slot, so the
-// zero-extended-slot invariant holds uniformly. local is rounded to 16 so
-// SP keeps AAPCS64 16-byte alignment; everything is FP-relative and the
-// epilogue restores SP from FP, which is what makes per-iteration alloca
-// (§4) safe.
-type frame struct {
-	off   map[string]int32 // value name -> FP-relative offset
-	local int32            // bytes to subtract in the prologue
+// Every parameter, and every value first produced by an asm out-binding,
+// gets its own home slot — the zero-extended-slot invariant holds
+// uniformly (unlike lower/arm).
+type Frame struct {
+	Off   map[string]int32
+	Local int32
 }
 
-func buildFrame(f *vir.Func, insts []minst) *frame {
-	fr := &frame{off: map[string]int32{}}
+// BuildFrame scans every OSlot operand a lowered function body references
+// (ordinary instructions and inline-asm in/out bindings alike — both
+// produce OSlot operands the same way) and assigns each a home offset.
+func BuildFrame(f *vir.Function, insts []Inst) *Frame {
+	fr := &Frame{Off: map[string]int32{}}
 	n := int32(0)
 	alloc := func(name string) {
-		if _, ok := fr.off[name]; !ok {
+		if _, ok := fr.Off[name]; !ok {
 			n++
-			fr.off[name] = -8 * n
+			fr.Off[name] = -8 * n
 		}
 	}
 	for _, p := range f.Params {
-		alloc(p.Name) // all params spilled/copied to home slots at entry
+		alloc(p.Name)
 	}
 	for _, in := range insts {
-		for _, o := range []opr{in.d, in.s, in.t, in.x} {
-			if o.k == oSlot {
-				alloc(o.slot)
+		for _, o := range []Opr{in.D, in.S, in.T, in.X} {
+			if o.Kind == OSlot {
+				alloc(o.Slot)
 			}
 		}
 	}
-	fr.local = (8*n + 15) &^ 15 // AAPCS64: SP 16-aligned at call boundaries
+	fr.Local = (8*n + 15) &^ 15 // AAPCS64: SP 16-aligned at call boundaries
 	return fr
 }

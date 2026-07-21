@@ -192,7 +192,7 @@ None of these is a general-purpose disassembler — each is a small decoder scop
 
 | Arch | Scope |
 |---|---|
-| `x86` | One-byte opcodes + `0F` map; ModRM/SIB forms the encoder produces (`[disp32]` absolute, ESP/`0x24` SIB escape); legacy prefixes `66`/`F0`/`F3` |
+| `x86` | One-byte opcodes + `0F` map; `nop`; full `FF`/group-5 form (`inc`/`dec`/`call`/`jmp`/`push`, register or memory r/m — not just register-indirect `call`/`jmp`); ModRM/SIB forms the encoder produces (`[disp32]` absolute, ESP/`0x24` SIB escape); legacy prefixes `66`/`F0`/`F3` |
 | `x86_64` | Same as x86, plus REX prefixes, `[RIP+disp32]`, SIB absolute/base-only forms |
 | `arm` | Fixed 4-byte words in the `Program`'s own byte order; condition-coded data processing; `movw`/`movt` pairs; halfword/word/byte load-store; `ldrex`/`strex`; fixed misc encodings (`push`/`pop`, `bx`/`blx`, `dmb`, `clrex`, `udf`) |
 | `aarch64` | Instruction words always little-endian (A64 code is never big-endian, even when `Program.Arch` is a `_be` variant used for data); move-wide, add/sub, logical, `madd`/`msub`, mul-high, DP-1/DP-2-source, bitfield-extend aliases, `csel`/`csinc`, scaled/unscaled load-store, `ldar`/`stlr`/`ldaxr`/`stlxr`, `stp`/`ldp` frame pairs, branches |

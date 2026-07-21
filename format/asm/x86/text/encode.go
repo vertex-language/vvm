@@ -8,6 +8,14 @@
 // are annotated with their symbols and kinds; unrecognized bytes degrade to
 // `db` lines rather than failing, so the listing stays useful if the encoder
 // grows ahead of this printer. Never an input format.
+//
+// Register spellings, condition-code mnemonics, ModRM/SIB layout, and the
+// opcode<->mnemonic correspondence are looked up from isa/x86 — the same
+// facts mcode's encoder uses — so this decoder can't silently drift out of
+// agreement with what mcode actually emits. Everything else here (the
+// byte-walking state machine, prefix handling, truncation/error recovery)
+// is this package's own independent traversal, deliberately not shared
+// with the encoder's control flow.
 package text
 
 import (
@@ -15,6 +23,7 @@ import (
 	"sort"
 	"strings"
 
+	isax86 "github.com/vertex-language/vvm/isa/x86"
 	x86 "github.com/vertex-language/vvm/lower/x86"
 )
 
@@ -77,21 +86,24 @@ func hexBytes(b []byte) string {
 // Decoder — exactly the lower/x86 encoding subset
 // ---------------------------------------------------------------------------
 
-var reg32 = [8]string{"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"}
-var reg16 = [8]string{"ax", "cx", "dx", "bx", "sp", "bp", "si", "di"}
-var reg8 = [8]string{"al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"}
-var ccName = [16]string{"o", "no", "b", "ae", "e", "ne", "be", "a",
-	"s", "ns", "p", "np", "l", "ge", "le", "g"}
-
-func regName(n byte, size string) string {
+// widthBits translates this package's size-name convention ("byte"/"word"/
+// dword-or-anything-else) into a bit width isa/x86.Reg.Name understands.
+func widthBits(size string) int {
 	switch size {
 	case "byte":
-		return reg8[n]
+		return 8
 	case "word":
-		return reg16[n]
+		return 16
 	}
-	return reg32[n]
+	return 32
 }
+
+func regName(n byte, size string) string {
+	return isax86.Reg(n).Name(widthBits(size))
+}
+
+func aluMROk(op byte) bool { _, ok := isax86.AluByMR(op); return ok }
+func aluRMOk(op byte) bool { _, ok := isax86.AluByRM(op); return ok }
 
 type truncated struct{}
 
@@ -134,14 +146,14 @@ func (d *dis) sym32() string {
 // rm decodes a ModRM byte (+SIB, +disp) into (reg field, r/m operand text).
 func (d *dis) rm(size string) (byte, string) {
 	m := d.u8()
-	mod, reg, rm := m>>6, m>>3&7, m&7
+	mod, reg, rm := isax86.UnpackModRM(m)
 	if mod == 3 {
 		return reg, regName(rm, size)
 	}
 	if mod == 0 && rm == 5 { // [disp32] absolute
 		return reg, fmt.Sprintf("%s ptr [%s]", size, d.sym32())
 	}
-	base := reg32[rm]
+	base := isax86.Reg(rm).String()
 	if rm == 4 {
 		d.u8() // SIB — lower/x86 only ever emits 0x24 (ESP base, no index)
 		base = "esp"
@@ -173,12 +185,6 @@ func (d *dis) rel32() string {
 	return fmt.Sprintf("0x%x", d.pos+int(rel))
 }
 
-var aluMR = map[byte]string{0x01: "add", 0x09: "or", 0x21: "and", 0x29: "sub", 0x31: "xor", 0x39: "cmp"}
-var aluRM = map[byte]string{0x03: "add", 0x0B: "or", 0x23: "and", 0x2B: "sub", 0x33: "xor", 0x3B: "cmp"}
-var aluExt = [8]string{"add", "or", "?", "?", "and", "sub", "xor", "cmp"}
-var shiftName = [8]string{"rol", "ror", "?", "?", "shl", "shr", "?", "sar"}
-var grp3Name = [8]string{"?", "?", "not", "neg", "mul", "imul", "div", "idiv"}
-
 func (d *dis) decodeOne() (text string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -196,13 +202,13 @@ func (d *dis) decodeOne() (text string, err error) {
 prefixes:
 	for {
 		switch d.b[d.pos] {
-		case 0x66:
+		case isax86.Prefix66:
 			d.u8()
 			size = "word"
-		case 0xF0:
+		case isax86.PrefixF0:
 			d.u8()
 			lock = "lock "
-		case 0xF3:
+		case isax86.PrefixF3:
 			d.u8()
 			rep = true
 		default:
@@ -216,13 +222,20 @@ prefixes:
 		return "rep movsb", nil
 	case rep && op == 0xAA:
 		return "rep stosb", nil
+	case rep && op == 0xB8: // this is actually a 0F-prefixed form; see below
+		// unreachable: popcnt is F3 0F B8, handled under the 0x0F case.
+		return "", fmt.Errorf("unknown opcode %02x", op)
 
-	case op == 0x55:
-		return "push ebp", nil
+	case op >= 0x40 && op <= 0x47: // inc r32 (inline-asm only)
+		return "inc " + isax86.Reg(op-0x40).String(), nil
+	case op >= 0x48 && op <= 0x4F: // dec r32 (inline-asm only)
+		return "dec " + isax86.Reg(op-0x48).String(), nil
 	case op >= 0x50 && op <= 0x57:
-		return "push " + reg32[op-0x50], nil
+		return "push " + isax86.Reg(op-0x50).String(), nil
 	case op >= 0x58 && op <= 0x5F:
-		return "pop " + reg32[op-0x58], nil
+		return "pop " + isax86.Reg(op-0x58).String(), nil
+	case op == 0x68: // push imm32 (e.g. syscallabi's stack-arg return-address placeholder)
+		return fmt.Sprintf("push 0x%x", d.u32()), nil
 	case op == 0xC3:
 		return "ret", nil
 	case op == 0x99:
@@ -231,9 +244,13 @@ prefixes:
 		return "cld", nil
 	case op == 0xFD:
 		return "std", nil
+	case op == 0x90:
+		return "nop", nil
+	case op == 0xCD: // int imm8 (syscallabi's int 0x80 trap)
+		return fmt.Sprintf("int 0x%02x", d.u8()), nil
 
 	case op >= 0xB8 && op <= 0xBF: // mov r32, imm32 (possibly a symbol address)
-		return fmt.Sprintf("mov %s, %s", reg32[op-0xB8], d.sym32()), nil
+		return fmt.Sprintf("mov %s, %s", isax86.Reg(op-0xB8).String(), d.sym32()), nil
 
 	case op == 0x88 || op == 0x89: // mov r/m, r
 		if op == 0x88 {
@@ -243,46 +260,64 @@ prefixes:
 		return fmt.Sprintf("mov %s, %s", rm, regName(reg, size)), nil
 	case op == 0x8B: // mov r32, r/m32
 		reg, rm := d.rm("dword")
-		return fmt.Sprintf("mov %s, %s", reg32[reg], rm), nil
+		return fmt.Sprintf("mov %s, %s", isax86.Reg(reg).String(), rm), nil
 	case op == 0xC7: // mov r/m32, imm32
 		_, rm := d.rm("dword")
 		return fmt.Sprintf("mov %s, %s", rm, d.sym32()), nil
 	case op == 0x8D: // lea
 		reg, rm := d.rm("dword")
-		return fmt.Sprintf("lea %s, %s", reg32[reg], rm), nil
+		return fmt.Sprintf("lea %s, %s", isax86.Reg(reg).String(), rm), nil
 
-	case aluMR[op] != "":
+	case aluMROk(op):
+		aluOp, _ := isax86.AluByMR(op)
 		reg, rm := d.rm(size)
-		return fmt.Sprintf("%s %s, %s", aluMR[op], rm, regName(reg, size)), nil
-	case aluRM[op] != "":
+		return fmt.Sprintf("%s %s, %s", aluOp.Name, rm, regName(reg, size)), nil
+	case aluRMOk(op):
+		aluOp, _ := isax86.AluByRM(op)
 		reg, rm := d.rm(size)
-		return fmt.Sprintf("%s %s, %s", aluRM[op], regName(reg, size), rm), nil
+		return fmt.Sprintf("%s %s, %s", aluOp.Name, regName(reg, size), rm), nil
 	case op == 0x81: // alu r/m32, imm32
 		ext, rm := d.rm("dword")
-		return fmt.Sprintf("%s %s, %s", aluExt[ext], rm, d.sym32()), nil
+		name := "?"
+		if a, ok := isax86.AluByExt(ext); ok {
+			name = a.Name
+		}
+		return fmt.Sprintf("%s %s, %s", name, rm, d.sym32()), nil
 
 	case op == 0x85: // test r/m32, r32
 		reg, rm := d.rm("dword")
-		return fmt.Sprintf("test %s, %s", rm, reg32[reg]), nil
+		return fmt.Sprintf("test %s, %s", rm, isax86.Reg(reg).String()), nil
 	case op == 0x69: // imul r32, r/m32, imm32
 		reg, rm := d.rm("dword")
-		return fmt.Sprintf("imul %s, %s, %s", reg32[reg], rm, d.sym32()), nil
+		return fmt.Sprintf("imul %s, %s, %s", isax86.Reg(reg).String(), rm, d.sym32()), nil
 	case op == 0xF7: // group 3
 		ext, rm := d.rm("dword")
-		return fmt.Sprintf("%s %s", grp3Name[ext], rm), nil
+		name := "?"
+		if g, ok := isax86.Group3ByExt(ext); ok {
+			name = g.Name
+		}
+		return fmt.Sprintf("%s %s", name, rm), nil
 
 	case op == 0xC0 || op == 0xC1: // shift r/m, imm8
 		if op == 0xC0 {
 			size = "byte"
 		}
 		ext, rm := d.rm(size)
-		return fmt.Sprintf("%s %s, %d", shiftName[ext], rm, d.u8()), nil
+		name := "?"
+		if s, ok := isax86.ShiftByExt(ext); ok {
+			name = s.Name
+		}
+		return fmt.Sprintf("%s %s, %d", name, rm, d.u8()), nil
 	case op == 0xD2 || op == 0xD3: // shift r/m, cl
 		if op == 0xD2 {
 			size = "byte"
 		}
 		ext, rm := d.rm(size)
-		return fmt.Sprintf("%s %s, cl", shiftName[ext], rm), nil
+		name := "?"
+		if s, ok := isax86.ShiftByExt(ext); ok {
+			name = s.Name
+		}
+		return fmt.Sprintf("%s %s, cl", name, rm), nil
 
 	case op == 0xE8:
 		return "call " + d.rel32(), nil
@@ -290,17 +325,17 @@ prefixes:
 		return "jmp " + d.rel32(), nil
 	case op == 0xFF: // call/jmp r
 		m := d.u8()
-		mod, ext, rm := m>>6, m>>3&7, m&7
+		mod, ext, rm := isax86.UnpackModRM(m)
 		if mod == 3 && ext == 2 {
-			return "call " + reg32[rm], nil
+			return "call " + isax86.Reg(rm).String(), nil
 		}
 		if mod == 3 && ext == 4 {
-			return "jmp " + reg32[rm], nil
+			return "jmp " + isax86.Reg(rm).String(), nil
 		}
 		return "", fmt.Errorf("unknown FF form")
 	case op == 0x87: // xchg r/m32, r32 (implicitly locked with memory)
 		reg, rm := d.rm("dword")
-		return fmt.Sprintf("xchg %s, %s", rm, reg32[reg]), nil
+		return fmt.Sprintf("xchg %s, %s", rm, isax86.Reg(reg).String()), nil
 
 	case op == 0x0F:
 		op2 := d.u8()
@@ -315,42 +350,42 @@ prefixes:
 				src = "word"
 			}
 			reg, rm := d.rm(src)
-			return fmt.Sprintf("movzx %s, %s", reg32[reg], rm), nil
+			return fmt.Sprintf("movzx %s, %s", isax86.Reg(reg).String(), rm), nil
 		case op2 == 0xBE || op2 == 0xBF: // movsx
 			src := "byte"
 			if op2 == 0xBF {
 				src = "word"
 			}
 			reg, rm := d.rm(src)
-			return fmt.Sprintf("movsx %s, %s", reg32[reg], rm), nil
+			return fmt.Sprintf("movsx %s, %s", isax86.Reg(reg).String(), rm), nil
 		case op2 == 0xAF:
 			reg, rm := d.rm("dword")
-			return fmt.Sprintf("imul %s, %s", reg32[reg], rm), nil
+			return fmt.Sprintf("imul %s, %s", isax86.Reg(reg).String(), rm), nil
 		case op2 == 0xB8 && rep: // popcnt (F3 0F B8)
 			reg, rm := d.rm("dword")
-			return fmt.Sprintf("popcnt %s, %s", reg32[reg], rm), nil
+			return fmt.Sprintf("popcnt %s, %s", isax86.Reg(reg).String(), rm), nil
 		case op2 == 0xBC:
 			reg, rm := d.rm("dword")
-			return fmt.Sprintf("bsf %s, %s", reg32[reg], rm), nil
+			return fmt.Sprintf("bsf %s, %s", isax86.Reg(reg).String(), rm), nil
 		case op2 == 0xBD:
 			reg, rm := d.rm("dword")
-			return fmt.Sprintf("bsr %s, %s", reg32[reg], rm), nil
+			return fmt.Sprintf("bsr %s, %s", isax86.Reg(reg).String(), rm), nil
 		case op2 >= 0x40 && op2 <= 0x4F: // cmovcc
 			reg, rm := d.rm("dword")
-			return fmt.Sprintf("cmov%s %s, %s", ccName[op2-0x40], reg32[reg], rm), nil
+			return fmt.Sprintf("cmov%s %s, %s", isax86.CondName(op2-0x40), isax86.Reg(reg).String(), rm), nil
 		case op2 >= 0x80 && op2 <= 0x8F: // jcc rel32
-			return fmt.Sprintf("j%s %s", ccName[op2-0x80], d.rel32()), nil
+			return fmt.Sprintf("j%s %s", isax86.CondName(op2-0x80), d.rel32()), nil
 		case op2 >= 0x90 && op2 <= 0x9F: // setcc r/m8
 			_, rm := d.rm("byte")
-			return fmt.Sprintf("set%s %s", ccName[op2-0x90], rm), nil
+			return fmt.Sprintf("set%s %s", isax86.CondName(op2-0x90), rm), nil
 		case op2 >= 0xC8 && op2 <= 0xCF:
-			return "bswap " + reg32[op2-0xC8], nil
+			return "bswap " + isax86.Reg(op2-0xC8).String(), nil
 		case op2 == 0xC1: // xadd (only ever emitted with lock)
 			reg, rm := d.rm("dword")
-			return fmt.Sprintf("%sxadd %s, %s", lock, rm, reg32[reg]), nil
+			return fmt.Sprintf("%sxadd %s, %s", lock, rm, isax86.Reg(reg).String()), nil
 		case op2 == 0xB1: // cmpxchg (only ever emitted with lock)
 			reg, rm := d.rm("dword")
-			return fmt.Sprintf("%scmpxchg %s, %s", lock, rm, reg32[reg]), nil
+			return fmt.Sprintf("%scmpxchg %s, %s", lock, rm, isax86.Reg(reg).String()), nil
 		}
 		return "", fmt.Errorf("unknown 0F %02x", op2)
 	}
