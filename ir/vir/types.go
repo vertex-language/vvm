@@ -20,8 +20,8 @@ type VecType struct {             // vec[T, N]
 
 // StructType names a struct (memory-only). Import is "" for a struct
 // declared in this module; otherwise it's the import path (§7.3) the
-// struct's shape came from, and lookups go through that ModuleShape
-// instead of the local Module.Structs table (see vmeta.go).
+// struct's shape claims to come from. This package doesn't resolve that
+// claim — the importer package does, against the real target module.
 type StructType struct {
 	Name   string
 	Import string
@@ -37,7 +37,7 @@ type ArrayType struct { // array[T, N] (memory-only)
 // unspecified on purpose so nothing can be written against its layout.
 // Legal only as an alloca result and a va_start/va_arg/va_end operand —
 // never a struct field, array element, global/const type, or ordinary
-// function parameter type (checked in verify.go, not here).
+// function parameter type (checked in ir/verify, not here).
 type ValistType struct{}
 
 func (IntType) isType()    {}

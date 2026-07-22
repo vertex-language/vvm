@@ -2,9 +2,9 @@
 package vir
 
 // Builder API. Mirrors the IR one-to-one — it constructs, it doesn't
-// check; Verify checks (README). Nothing here validates ordering, names,
-// or types. Op arguments are Opcode constants (opcode.go), not strings —
-// a typo like "cltz" is a compile error, not a value Verify has to catch.
+// check; ir/verify checks. Nothing here validates ordering, names, or
+// types. Op arguments are Opcode constants (opcode.go), not strings — a
+// typo like "cltz" is a compile error, not something a verifier has to catch.
 
 func NewModule(name string) *Module { return &Module{Name: name} }
 
@@ -17,14 +17,6 @@ func (m *Module) SetNamespace(ns string) *Module {
 
 func (m *Module) SetTarget(arch, os, abi string, tiers ...string) *Module {
 	m.Target = &Target{Arch: arch, OS: os, ABI: abi, Tiers: tiers}
-	return m
-}
-
-// SetAsmDialect declares the module-wide asmdialect (§2.1 step 4). Required
-// if the module contains any asm blocks; Verify checks it's valid for the
-// module's target architecture.
-func (m *Module) SetAsmDialect(d AsmDialect) *Module {
-	m.AsmDialect = &d
 	return m
 }
 
@@ -103,14 +95,14 @@ func (m *Module) DeclareFunction(name string, params []Param, ret Type, export b
 	return &FunctionBuilder{Function: f, current: f.Entry}
 }
 
-// SetVariadic marks the function's param-list as ending in "..." (§4.5),
+// SetVariadic marks the function's param-list as ending in "..." (§4.4),
 // enabling va_start/va_arg/va_end use inside the body.
 func (fb *FunctionBuilder) SetVariadic() *FunctionBuilder {
 	fb.Function.Variadic = true
 	return fb
 }
 
-// Label closes nothing (Verify enforces termination) and opens a new block.
+// Label closes nothing (ir/verify enforces termination) and opens a new block.
 func (fb *FunctionBuilder) Label(name string) {
 	b := &Block{Label: name}
 	fb.Function.Blocks = append(fb.Function.Blocks, b)
@@ -118,7 +110,7 @@ func (fb *FunctionBuilder) Label(name string) {
 }
 
 func (fb *FunctionBuilder) appendInstruction(i Instruction) Operand {
-	fb.current.Lines = append(fb.current.Lines, BodyLine{Instruction: &i})
+	fb.current.Lines = append(fb.current.Lines, &i)
 	return Ident(i.Result)
 }
 
@@ -151,7 +143,7 @@ func (fb *FunctionBuilder) Alloca(n string, size Operand, align int) Operand {
 	return fb.EmitInstruction(Instruction{Result: n, Op: OpAlloca, Suffix: Ptr, Args: []Operand{size}, Align: align})
 }
 
-// AllocaValist declares a fresh valist slot (§4.5, §5.1) — the sole legal
+// AllocaValist declares a fresh valist slot (§4.4, §5.1) — the sole legal
 // way to create one. No size/align operand: unlike alloca.ptr, its layout
 // is target-defined and not something a frontend sizes.
 func (fb *FunctionBuilder) AllocaValist(n string) Operand {
@@ -181,18 +173,18 @@ func (fb *FunctionBuilder) Syscall(n string, ret Type, sysNo Operand, args ...Op
 
 // VaStart initializes dst (a prior alloca.valist result) for reading
 // arguments after lastNamed, the function's final declared parameter
-// (§4.5). selfSig is decorative/self-referential — checked structurally
+// (§4.4). selfSig is decorative/self-referential — checked structurally
 // against the enclosing function, not looked up in FunctionSignatures.
 func (fb *FunctionBuilder) VaStart(selfSig, dst, lastNamed string) {
 	fb.EmitInstruction(Instruction{Op: OpVaStart, Sig: selfSig, Args: []Operand{Ident(dst), Ident(lastNamed)}})
 }
 
-// VaArg reads the next variadic argument from src as type t (§4.5).
+// VaArg reads the next variadic argument from src as type t (§4.4).
 func (fb *FunctionBuilder) VaArg(n string, t Type, src Operand) Operand {
 	return fb.Emit(n, OpVaArg, t, src)
 }
 
-// VaEnd closes src (§4.5); required before it's legally re-va_start-able
+// VaEnd closes src (§4.4); required before it's legally re-va_start-able
 // or before a returning terminator.
 func (fb *FunctionBuilder) VaEnd(src Operand) {
 	fb.Emit("", OpVaEnd, nil, src)
@@ -222,45 +214,3 @@ func (fb *FunctionBuilder) TailCallIndirect(sig string, fp Operand, args ...Oper
 }
 func (fb *FunctionBuilder) Trap()        { fb.current.Term = Trap{} }
 func (fb *FunctionBuilder) Unreachable() { fb.current.Term = Unreachable{} }
-
-// ---------------------------------------------------------------------------
-// Inline assembly builder (§4.4).
-// ---------------------------------------------------------------------------
-
-// AsmBuilder accumulates one asm block's bindings and code before it is
-// appended to the enclosing function's current block via End. The dialect
-// governing `code:` syntax comes from the module-level AsmDialect (§2.1
-// step 4), not from the block itself.
-type AsmBuilder struct {
-	owner *FunctionBuilder
-	block AsmBlock
-}
-
-func (fb *FunctionBuilder) BeginAsm() *AsmBuilder {
-	return &AsmBuilder{owner: fb, block: AsmBlock{}}
-}
-
-func (ab *AsmBuilder) In(register, ident string) *AsmBuilder {
-	ab.block.Bindings = append(ab.block.Bindings, AsmBinding{Kind: BindingIn, Register: register, Ident: ident})
-	return ab
-}
-
-func (ab *AsmBuilder) Out(register, ident string) *AsmBuilder {
-	ab.block.Bindings = append(ab.block.Bindings, AsmBinding{Kind: BindingOut, Register: register, Ident: ident})
-	return ab
-}
-
-func (ab *AsmBuilder) Clobber(registers ...string) *AsmBuilder {
-	ab.block.Bindings = append(ab.block.Bindings, AsmBinding{Kind: BindingClobber, Registers: registers})
-	return ab
-}
-
-func (ab *AsmBuilder) Code(lines ...AsmCodeLine) *AsmBuilder {
-	ab.block.Code = append(ab.block.Code, lines...)
-	return ab
-}
-
-func (ab *AsmBuilder) End() {
-	finished := ab.block
-	ab.owner.current.Lines = append(ab.owner.current.Lines, BodyLine{Asm: &finished})
-}

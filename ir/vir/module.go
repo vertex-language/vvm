@@ -7,7 +7,6 @@ type Module struct {
 	Name               string
 	Namespace          string // "" unless declared (§2.1 step 2, §6.3)
 	Target             *Target
-	AsmDialect         *AsmDialect
 	Structs            []*Struct
 	FunctionSignatures []*FunctionSignature
 	Constants          []*Constant
@@ -111,8 +110,8 @@ type ExternGroup struct {
 }
 
 // Import is one cross-module `import` declaration (§7.3). Path is either
-// "namespace/module" or bare "module", matching a ModuleShape's qualified
-// identity (see vmeta.go).
+// "namespace/module" or bare "module" — resolved against real modules by
+// the importer package, not by anything in this one.
 type Import struct {
 	Path string
 }
@@ -153,7 +152,7 @@ type ExternFunction struct {
 type Function struct {
 	Name     string
 	Params   []Param
-	Variadic bool // param-list ends in "..." (§4.5)
+	Variadic bool // param-list ends in "..." (§4.4)
 	Ret      Type
 	Attrs    []FunctionAttribute
 	Export   bool
@@ -179,17 +178,13 @@ func (f *Function) AllBlocks() []*Block {
 	return append(out, f.Blocks...)
 }
 
+// Block is one labeled (or, for the entry block, unlabeled) sequence of
+// instructions ending in exactly one terminator (§4.3). Lines holds every
+// non-terminator body-line, including `loc` (§2.3 body-line grammar).
 type Block struct {
 	Label string
-	Lines []BodyLine
+	Lines []*Instruction
 	Term  Terminator
-}
-
-// BodyLine is one body-line: an ordinary instruction (incl. `loc`) or an
-// inline-asm block. Exactly one of Instruction / Asm is set.
-type BodyLine struct {
-	Instruction *Instruction
-	Asm         *AsmBlock
 }
 
 // Instruction is one instruction body-line. Op holds the opcode
@@ -203,77 +198,6 @@ type Instruction struct {
 	Sig    string
 	Args   []Operand
 	Align  int
-}
-
-// ---------------------------------------------------------------------------
-// Inline assembly (§4.4).
-// ---------------------------------------------------------------------------
-
-type AsmDialect string
-
-const (
-	DialectIntel  AsmDialect = "intel"
-	DialectATT    AsmDialect = "att"
-	DialectA32    AsmDialect = "a32"
-	DialectT32    AsmDialect = "t32"
-	DialectNative AsmDialect = "native"
-)
-
-type AsmBindingKind string
-
-const (
-	BindingIn      AsmBindingKind = "in"
-	BindingOut     AsmBindingKind = "out"
-	BindingClobber AsmBindingKind = "clobber"
-)
-
-type AsmBinding struct {
-	Kind      AsmBindingKind
-	Register  string
-	Registers []string
-	Ident     string
-}
-
-type AsmOperandKind string
-
-const (
-	AsmOperandKindRegister  AsmOperandKind = "register"
-	AsmOperandKindImmediate AsmOperandKind = "immediate"
-	AsmOperandKindMemory    AsmOperandKind = "memory"
-	AsmOperandKindLabel     AsmOperandKind = "label"
-)
-
-type AsmOperand struct {
-	Kind      AsmOperandKind
-	Register  string
-	Immediate Operand
-	Memory    string
-	Label     string
-}
-
-func AsmRegister(r string) AsmOperand   { return AsmOperand{Kind: AsmOperandKindRegister, Register: r} }
-func AsmImmediate(o Operand) AsmOperand { return AsmOperand{Kind: AsmOperandKindImmediate, Immediate: o} }
-func AsmMemory(text string) AsmOperand  { return AsmOperand{Kind: AsmOperandKindMemory, Memory: text} }
-func AsmLabelReference(name string) AsmOperand {
-	return AsmOperand{Kind: AsmOperandKindLabel, Label: name}
-}
-
-type AsmCodeLine struct {
-	LabelDeclaration string
-	Mnemonic         string
-	Operands         []AsmOperand
-}
-
-func AsmInstructionLine(mnemonic string, ops ...AsmOperand) AsmCodeLine {
-	return AsmCodeLine{Mnemonic: mnemonic, Operands: ops}
-}
-func AsmLabelDeclaration(name string) AsmCodeLine {
-	return AsmCodeLine{LabelDeclaration: name}
-}
-
-type AsmBlock struct {
-	Bindings []AsmBinding
-	Code     []AsmCodeLine
 }
 
 // ---------------------------------------------------------------------------

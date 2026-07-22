@@ -7,14 +7,13 @@ import (
 )
 
 // DeriveLinkFile computes the on-disk filename l implies for output format
-// f, using exactly the short/exact-name rules Verify enforces (§7.2/§7.4):
+// f, using exactly the short/exact-name rules ir/verify enforces (§7.2/§7.4):
 // a name containing '.' or a path separator is exact and returned
 // byte-for-byte; otherwise it's a short name expanded per §7.2 (e.g.
 // shared "SDL2" -> "libSDL2.so" on ELF).
 //
-// Exported so build-layer code (vvm's dispatch.go) can resolve the same
-// filename this package's own Verify already validated, rather than
-// re-implementing the derivation a second time.
+// Exported so build-layer code (vvm's dispatch.go, ir/verify) can resolve
+// the same filename without re-implementing the derivation a second time.
 func DeriveLinkFile(l *Link, f BinFormat) (string, error) {
 	if isExactName(l.Name) {
 		if err := checkExactExtension(l, f); err != nil {
