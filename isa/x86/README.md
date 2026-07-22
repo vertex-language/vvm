@@ -1,63 +1,82 @@
 # isa/x86
 
-`github.com/vertex-language/vvm/isa/x86`
-
-The static, data-only description of the IA-32 (x86, 32-bit) instruction set: register identity, condition codes, ModRM/SIB bit layout, and the opcode↔mnemonic correspondence. Both `lower/x86` (instruction selection) and `isa/x86/encoder` (byte emission) build on it, as does the debug disassembler in `format/asm/x86/text`.
-
 ```go
 import isax86 "github.com/vertex-language/vvm/isa/x86"
 ```
 
-There is no control flow of consequence in this package — only declarations, plus a handful of mechanical reverse-index maps built once in `init()`. Nothing here encodes or decodes an instruction stream; that's `isa/x86/encoder`'s job on the way in and `format/asm/x86/text`'s on the way out.
+Static, data-only description of the IA-32 (x86) instruction set: register
+identity, condition codes, ModRM/SIB bit layout, and the opcode<->mnemonic
+correspondence.
 
----
+Two things import this package:
 
-## Package layout
+- **`isa/x86/encoder`** (`github.com/vertex-language/vvm/isa/x86/encoder`)
+  — the generic assembler. It turns a fully-resolved `Inst` stream into
+  machine bytes using the tables and packing helpers here.
+- **`format/asm/x86/text`** — the debug disassembler/printer. It decodes
+  bytes and looks up mnemonics using the same tables, in reverse.
 
-```
-isa/x86/
-├── registers.go   Reg, the eight GPR constants (REAX..REDI), RNone, and
-│                  the width-indexed reg32/reg16/reg8 name tables
-├── condcodes.go   Cond* constants (Intel tttn 4-bit encoding), condName,
-│                  CondName()
-├── encoding.go    PackModRM/UnpackModRM, PackSIB/UnpackSIB, ScaleBits,
-│                  legacy prefix byte constants
-└── opcodes.go     AluOp/ShiftOp/Group3Op tables plus their By-lookup
-                   accessors, built from reverse-index maps in init()
-```
+Nothing in this package has control flow of consequence. It's constants,
+lookup tables, and small pure functions, plus the reverse-index maps built
+once in `init()` (`condByName`, `aluByName`, `aluByMR`, and so on). If a
+change here needs a design decision rather than a citation, it probably
+belongs somewhere else.
 
----
+## What belongs here
 
-## The test: ISA fact vs. lowering decision
+The test: **is this a fact about the IA-32 machine, true regardless of what
+any particular compiler chooses to emit?**
 
-Everything in this package is true of IA-32 independent of any particular compiler's choices — a register's encoding number, which condition code bit pattern means "signed less than," which `/ext` digit selects `neg` under the `0xF7` group. None of it depends on how `lower/x86` decides to allocate registers, build a frame, or select instructions.
+That includes facts nobody currently exercises. `AluOps` lists `adc` and
+`sbb` even though no lowering in this repository emits them, and
+`Group3Op`'s comment is explicit that the table's job is naming encodings,
+not describing how each one's operand is used. `CondName`/`ParseCond` round
+-trip the *canonical* mnemonic spelling only — the synonym constants
+(`CondC`, `CondZ`, ...) are Go-level conveniences for call sites, not a
+second textual vocabulary, and deliberately aren't accepted by `ParseCond`.
 
-The dividing line: if a fact would still be true even if `lower/x86` were deleted and rewritten from scratch with a completely different register-allocation strategy, it belongs here. If it's a decision *this compiler* makes about how to use those facts — which registers are scratch vs. callee-saved, how stack slots are laid out, which mnemonics a curated inline-asm table supports — it belongs in `lower/x86` instead. `lower/x86`'s own README points back to this one for the same reason: the split is deliberately the only one of its kind in the `lower/<arch>` packages that's actually load-bearing, everything else (`mcode`/`abi`/`regalloc`-style splits) having been tried and found to buy no independence.
+Concretely, this package owns:
 
-One naming wrinkle this discipline produces: `Group3Ops` uses the real assembly mnemonics `mul`/`imul` for the one-operand, EDX:EAX-writing group-3 forms, even though `lower/x86/mcode` internally spells these `mul32`/`imul32` to disambiguate from the unrelated two/three-operand `imul` it also emits. That disambiguation is `mcode`'s own routing concern, translated at its call site into the real mnemonic before it ever reaches this package's table — this package doesn't know or care that the ambiguity exists downstream.
+- Register identity and naming (`registers.go`): the eight encodable GPRs,
+  `RNone`, width-indexed name tables, and the `ByteAddressable` irregularity
+  (AH/CH/DH/BH occupy indices 4-7 instead of the low byte of ESP/EBP/ESI/EDI).
+- Condition codes (`condcodes.go`): the tttn encoding shared by `jcc`/`setcc`
+  /`cmovcc`, its canonical and synonym spellings, and the negate-by-XOR-1
+  fact.
+- ModRM/SIB bit layout (`encoding.go`): field packing/unpacking, the four
+  irregular escape values (`RMSIB`, `RMDisp32`, `SIBNoIndex`, `SIBNoBase`)
+  and *why* they're irregular, scale-factor encoding, and the disp8-fits
+  check.
+- Opcode/mnemonic tables (`opcodes.go`): the ALU group, shift/rotate group,
+  and group-3 (F6/F7) tables, plus the three-way `imul` opcode split that's
+  a genuine property of the ISA (one mnemonic, three unrelated encodings).
 
----
+## What doesn't belong here
 
-## Registers (`registers.go`)
+- **Anything that's a choice rather than a fact.** Which encoding an
+  instruction selector picks for a given IR node, how operands get
+  allocated to registers, whether to prefer the imm8 or imm32 ALU form for
+  a given constant — that's `lower/x86` and `isa/x86/encoder`'s `Encode`,
+  not this package. This package supplies the menu; it doesn't order from
+  it.
+- **Unresolved/symbolic state.** `isa/x86/encoder`'s `Opr` is described as
+  "never a not-yet-placed value" on purpose — a not-yet-resolved slot is a
+  `lower/x86` concept (its own near-identical `Inst` type) that only
+  collapses to this package's shapes once every slot is a real register or
+  `[ebp+disp]` operand.
+- **Printer formatting policy.** `format/asm/x86/text` may reuse
+  `CondName`/`reg32`-style tables, but decisions about disassembly output
+  format, column layout, or diagnostic verbosity live in the printer, not
+  here.
+- **Anything with control flow of consequence.** If a proposed addition
+  needs a conditional beyond "is this input in range" or "default narrow
+  width to 4", it's saying something about *how to use* an ISA fact, which
+  means it belongs one layer up.
 
-`Reg` is a `byte`-sized physical IA-32 GPR identifier: `REAX`..`REDI` (0-7, matching the ModRM/SIB encoding order), plus `RNone` (`0xFF`) as the "absent" sentinel used throughout `isa/x86/encoder` and `lower/x86` for optional base/index operands.
+## Diagnostic behavior
 
-Three width-indexed tables (`reg32`, `reg16`, `reg8`) give each register's assembly spelling at 32-, 16-, and 8-bit widths; `(Reg).Name(widthBits)` looks one up, defaulting to the 32-bit spelling for any width other than 8 or 16. Byte-register naming is the one irregular case worth knowing: indices 4-7 name AH/CH/DH/BH rather than a low byte of ESP/EBP/ESI/EDI — reaching SPL/BPL/SIL/DIL would require a REX prefix, which this 32-bit-only backend never emits, so that distinction simply isn't representable here. `(Reg).String()` is the width-free 32-bit spelling, for diagnostics that don't care about operand width (e.g. naming which physical register an inline-asm binding resolved to).
-
-## Condition codes (`condcodes.go`)
-
-The sixteen `Cond*` constants (`CondO`..`CondG`) are Intel's 4-bit `tttn` encoding, shared verbatim across `0F 8x` (`jcc`), `0F 9x` (`setcc`), and `0F 4x` (`cmovcc`). They're left as untyped constants rather than a distinct `Cond` type, matching how both `isa/x86/encoder` (an `Inst.CC` byte) and the disassembler (a decoded ModRM/opcode nibble) actually use them — as plain byte values, not a type worth wrapping. `CondName(cc)` returns the mnemonic suffix (e.g. `4` → `"e"`, so `jcc` prints `je`, `setcc` prints `sete`, `cmovcc` prints `cmove`).
-
-## Encoding primitives (`encoding.go`)
-
-`PackModRM`/`UnpackModRM` and `PackSIB`/`UnpackSIB` convert between a byte and its three bit-packed fields (`mod/reg/rm` and `scale/index/base` respectively) — pure bit arithmetic, used by both the encoder assembling bytes and the disassembler pulling them back apart. `ScaleBits` maps a SIB scale factor (1, 2, 4, or 8 — 0 and 1 both mean "no scaling," and share the same 2-bit encoding) to its packed field value, reporting `ok == false` for anything else. The legacy prefix byte constants (`Prefix66`, `PrefixF0`, `PrefixF3`) round out the set of encoding-level facts both consumers need named rather than left as bare hex literals.
-
-## Opcode tables (`opcodes.go`)
-
-Three parallel tables, each with a `Name`-keyed and opcode-keyed reverse index built in `init()`:
-
-- **`AluOp`** — the six two-operand ALU instructions (`add`/`or`/`and`/`sub`/`xor`/`cmp`), each carrying its MR opcode (`r/m, r`), RM opcode (`r, r/m`), and its `/ext` digit under the `0x81 r/m,imm32` group. Looked up by name (`AluByName`) or by any of its three opcode forms (`AluByMR`/`AluByRM`/`AluByExt`).
-- **`ShiftOp`** — the five shift/rotate mnemonics (`rol`/`ror`/`shl`/`shr`/`sar`), each just a `/ext` digit shared by the `0xC0`/`0xC1` (immediate-count) and `0xD2`/`0xD3` (count-in-CL) opcode groups. `ShiftByName`/`ShiftByExt`.
-- **`Group3Op`** — the six single-operand instructions under the `0xF7` group ("group 3" in Intel's manual): `not`/`neg`/`mul`/`imul`/`div`/`idiv`, each just a `/ext` digit. `Group3ByName`/`Group3ByExt`.
-
-All three follow the same shape deliberately: a small ordered slice as the source of truth (readable, easy to diff), with the `by*` maps existing purely as a mechanical, `init()`-built reverse index rather than a second hand-maintained source.
+Lookup functions here are total, not partial: `CondName` returns `"?"` for
+an out-of-range code, `Reg.Name` returns `"?"` for a non-GPR, and `String()`
+methods never panic. These are called from disassembly/diagnostic paths,
+and a printer trying to describe a malformed or unsupported operand should
+say "there isn't one" rather than take the process down.

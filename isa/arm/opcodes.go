@@ -1,122 +1,179 @@
 package arm
 
-// DPOp describes one data-processing instruction's 4-bit opcode field
-// (A32 bits 24:21). Cmp is true for the compare-only forms (tst/cmp/cmn)
-// that always set flags and never write a destination register.
-type DPOp struct {
-	Name string
-	Code uint32
-	Cmp  bool
-}
-
-var DPOps = []DPOp{
-	{"and", 0x0, false},
-	{"eor", 0x1, false},
-	{"sub", 0x2, false},
-	{"rsb", 0x3, false},
-	{"add", 0x4, false},
-	{"tst", 0x8, true},
-	{"cmp", 0xA, true},
-	{"cmn", 0xB, true},
-	{"orr", 0xC, false},
-	{"bic", 0xE, false},
-}
-
-var dpByName = map[string]DPOp{}
-
-func init() {
-	for _, d := range DPOps {
-		dpByName[d.Name] = d
-	}
-}
-
-func DPByName(name string) (DPOp, bool) { d, ok := dpByName[name]; return d, ok }
-
-// ShiftOp describes one shift/rotate mnemonic's 2-bit shift-type field
-// (A32 bits 6:5), shared by the register-shifted-register form and by
-// LSL/LSR/ASR/ROR used standalone.
-type ShiftOp struct {
-	Name string
-	Code uint32
-}
-
-var ShiftOps = []ShiftOp{
-	{"lsl", 0}, {"lsr", 1}, {"asr", 2}, {"ror", 3},
-}
-
-var shiftByName = map[string]ShiftOp{}
-
-func init() {
-	for _, s := range ShiftOps {
-		shiftByName[s.Name] = s
-	}
-}
-
-func ShiftByName(name string) (ShiftOp, bool) { s, ok := shiftByName[name]; return s, ok }
-
-// Fixed A32 base words for instructions that have exactly one encoded
-// form. Register fields (Rd/Rn/Rm/Rs/RdHi/RdLo) are zero in each Base;
-// isa/arm/encoder ORs them in at the fixed bit positions noted below —
-// that placement is itself an ISA fact (would still be true for any A32
-// assembler), just not one that fits a uniform Name->Base table the way
-// the DP/shift forms above do, since each shape's field layout differs.
+// ---------------------------------------------------------------------------
+// Data-processing group.
+// ---------------------------------------------------------------------------
 //
-// Forms that bake in cond=AL (0xE, unconditional) are the ones this ISA
-// never varies the condition on in practice; forms whose cond nibble is
-// left zero are meant to be OR'd with a caller-supplied cond<<28.
-const (
-	BaseMOVR  uint32 = 0xE1A00000 // MOV Rd,Rm            -- Rd:12 Rm:0
-	BaseMVN   uint32 = 0xE1E00000 // MVN Rd,Rm            -- Rd:12 Rm:0
-	BaseMOVW  uint32 = 0xE3000000 // MOVW Rd,#imm16       -- Rd:12 imm4:16 imm12:0
-	BaseMOVT  uint32 = 0xE3400000 // MOVT Rd,#imm16       -- Rd:12 imm4:16 imm12:0
-	BaseMOVCCI uint32 = 0x03A00000 // + cond<<28: MOVcc Rd,#imm8  -- Rd:12 imm8:0
-	BaseMOVCCR uint32 = 0x01A00000 // + cond<<28: MOVcc Rd,Rm    -- Rd:12 Rm:0
+// The sixteen data-processing operations share one encoding family
+// (Cond 00 I opcode S Rn Rd Operand2); the operation is selected by the
+// 4-bit opcode in bits 24:21. The group is *not* homogeneous in how its
+// operands are used, and — as with isa/x86's Group3Op — that irregularity
+// is the point of tabulating it rather than just listing names:
+//
+//   - The full arithmetic/logical ops (and, eor, sub, rsb, add, adc, sbc,
+//     rsc, orr, bic) compute Rd := Rn <op> Operand2.
+//   - The move ops (mov, mvn) ignore Rn entirely: Rd := Operand2 (or its
+//     bitwise NOT). Rn should be encoded zero.
+//   - The test ops (tst, teq, cmp, cmn) write no Rd; they exist only to set
+//     flags, and so always have the S bit set. An assembler forces S for
+//     these even when the mnemonic omits it, and Rd should be encoded zero.
+type DataProcOp struct {
+	Name   string
+	Opcode byte // bits 24:21
+	// WritesRd is false for the four test-only ops.
+	WritesRd bool
+	// UsesRn is false for the two move ops.
+	UsesRn bool
+	// ForcesS marks the test-only ops, which must always set the S bit.
+	ForcesS bool
+}
 
-	BaseMUL   uint32 = 0xE0000090 // MUL Rd,Rm,Rs             -- Rd:16 Rs:8 Rm:0
-	BaseMLS   uint32 = 0xE0600090 // MLS Rd,Rm,Rs,Ra          -- Rd:16 Ra:12 Rs:8 Rm:0
-	BaseUMULL uint32 = 0xE0800090 // UMULL RdLo,RdHi,Rm,Rs    -- RdHi:16 RdLo:12 Rs:8 Rm:0
-	BaseSMULL uint32 = 0xE0C00090 // SMULL RdLo,RdHi,Rm,Rs    -- RdHi:16 RdLo:12 Rs:8 Rm:0
-	BaseUDIV  uint32 = 0xE730F010 // UDIV Rd,Rn,Rm            -- Rd:16 Rm:8 Rn:0
-	BaseSDIV  uint32 = 0xE710F010 // SDIV Rd,Rn,Rm            -- Rd:16 Rm:8 Rn:0
+// DataProcOps is the complete sixteen-entry group in opcode order.
+var DataProcOps = []DataProcOp{
+	{"and", 0, true, true, false},
+	{"eor", 1, true, true, false},
+	{"sub", 2, true, true, false},
+	{"rsb", 3, true, true, false},
+	{"add", 4, true, true, false},
+	{"adc", 5, true, true, false},
+	{"sbc", 6, true, true, false},
+	{"rsc", 7, true, true, false},
+	{"tst", 8, false, true, true},
+	{"teq", 9, false, true, true},
+	{"cmp", 10, false, true, true},
+	{"cmn", 11, false, true, true},
+	{"orr", 12, true, true, false},
+	{"mov", 13, true, false, false},
+	{"bic", 14, true, true, false},
+	{"mvn", 15, true, false, false},
+}
 
-	BaseCLZ  uint32 = 0xE16F0F10 // CLZ Rd,Rm  -- Rd:12 Rm:0
-	BaseRBIT uint32 = 0xE6FF0F30 // RBIT Rd,Rm -- Rd:12 Rm:0
-	BaseREV  uint32 = 0xE6BF0F30 // REV Rd,Rm  -- Rd:12 Rm:0
-	BaseUXTB uint32 = 0xE6EF0070 // UXTB Rd,Rm -- Rd:12 Rm:0
-	BaseUXTH uint32 = 0xE6FF0070 // UXTH Rd,Rm -- Rd:12 Rm:0
-	BaseSXTB uint32 = 0xE6AF0070 // SXTB Rd,Rm -- Rd:12 Rm:0
-	BaseSXTH uint32 = 0xE6BF0070 // SXTH Rd,Rm -- Rd:12 Rm:0
-
-	// CMP Rn, Rm, ASR #31 (a fixed shift-immediate compare, not a general
-	// shifted-operand form): Rn:16, imm5=31 baked into bits 11:7, shift
-	// type ASR baked into bits 6:5, Rm:0.
-	BaseCMPASR31 uint32 = 0xE1500000
-
-	BaseLDR   uint32 = 0xE5100000 // LDR  Rt,[Rn,#+/-imm12] -- U:23 Rn:16 Rt:12 imm12:0
-	BaseSTR   uint32 = 0xE5000000 // STR  Rt,[Rn,#+/-imm12]
-	BaseLDRB  uint32 = 0xE5500000 // LDRB Rt,[Rn,#+/-imm12]
-	BaseSTRB  uint32 = 0xE5400000 // STRB Rt,[Rn,#+/-imm12]
-	BaseLDRH  uint32 = 0xE15000B0 // LDRH  Rt,[Rn,#+/-imm8] -- U:23 Rn:16 Rt:12 imm8 split 11:8/3:0
-	BaseSTRH  uint32 = 0xE14000B0 // STRH  Rt,[Rn,#+/-imm8]
-	BaseLDRSB uint32 = 0xE15000D0 // LDRSB Rt,[Rn,#+/-imm8]
-	BaseLDRSH uint32 = 0xE15000F0 // LDRSH Rt,[Rn,#+/-imm8]
-
-	BaseLDRBR uint32 = 0xE7D00000 // LDRB Rt,[Rn,Rm] -- Rn:16 Rt:12 Rm:0
-	BaseSTRBR uint32 = 0xE7C00000 // STRB Rt,[Rn,Rm] -- Rn:16 Rt:12 Rm:0
-
-	BaseLDREX uint32 = 0xE1900F9F // LDREX Rt,[Rn] -- Rn:16 Rt:12
-	BaseSTREX uint32 = 0xE1800F90 // STREX Rd,Rt,[Rn] -- Rn:16 Rd:12 Rt:0
-	BaseCLREX uint32 = 0xF57FF01F // CLREX
-	BaseDMB   uint32 = 0xF57FF05B // DMB ISH
-
-	BaseB    uint32 = 0xEA000000 // B <label>       (cond AL baked in)
-	BaseBcc  uint32 = 0x0A000000 // + cond<<28: Bcc <label>
-	BaseBL   uint32 = 0xEB000000 // BL <symbol>     (cond AL baked in)
-	BaseBLXR uint32 = 0xE12FFF30 // BLX Rm -- Rm:0
-	BaseBXR  uint32 = 0xE12FFF10 // BX Rm  -- Rm:0
-
-	BasePUSH uint32 = 0xE92D0000 // STMDB sp!, {reglist} -- reglist:0-15
-	BasePOP  uint32 = 0xE8BD0000 // LDMIA sp!, {reglist} -- reglist:0-15
-
-	BaseUDF uint32 = 0xE7F000F0 // UDF #0 -- canonical deterministic halt
+var (
+	dpByName   = map[string]DataProcOp{}
+	dpByOpcode = map[byte]DataProcOp{}
 )
+
+func init() {
+	for _, d := range DataProcOps {
+		dpByName[d.Name] = d
+		dpByOpcode[d.Opcode] = d
+	}
+	if len(dpByOpcode) != 16 {
+		panic("isa/arm: DataProcOps does not cover all sixteen opcodes")
+	}
+}
+
+func DataProcByName(name string) (DataProcOp, bool) { d, ok := dpByName[name]; return d, ok }
+func DataProcByOpcode(op byte) (DataProcOp, bool)   { d, ok := dpByOpcode[op]; return d, ok }
+
+// ---------------------------------------------------------------------------
+// Barrel-shifter shift types.
+// ---------------------------------------------------------------------------
+//
+// When Operand2 is a register, the barrel shifter applies one of four shift
+// types, selected by a 2-bit field. The type is part of the operand
+// encoding, not a separate opcode.
+const (
+	ShiftLSL byte = 0 // logical left
+	ShiftLSR byte = 1 // logical right
+	ShiftASR byte = 2 // arithmetic right
+	ShiftROR byte = 3 // rotate right
+)
+
+var shiftName = [4]string{"lsl", "lsr", "asr", "ror"}
+
+// ShiftName returns the canonical mnemonic for a 2-bit shift type; "?" for
+// out of range.
+func ShiftName(t byte) string {
+	if int(t) >= len(shiftName) {
+		return "?"
+	}
+	return shiftName[t]
+}
+
+var shiftByName = map[string]byte{
+	"lsl": ShiftLSL,
+	"lsr": ShiftLSR,
+	"asr": ShiftASR,
+	"ror": ShiftROR,
+	"asl": ShiftLSL, // documented synonym: ASL assembles identically to LSL
+}
+
+// ParseShift resolves a shift mnemonic. The four canonical names plus the
+// asl->lsl synonym are accepted. Note two things ParseShift deliberately
+// does *not* handle, because they are not shift *types* but immediate-form
+// special cases of ROR that live in the shift-amount field:
+//
+//   - RRX (rotate right with extend) is encoded as ROR with a shift amount
+//     of zero.
+//   - LSR #0, ASR #0, and ROR #0 do not exist as written; the assembler
+//     rewrites LSR #0 and ASR #0 to LSL #0, and the "amount 0" encodings of
+//     LSR/ASR are reused to mean shift-by-32.
+func ParseShift(s string) (byte, bool) {
+	t, ok := shiftByName[s]
+	return t, ok
+}
+
+// ---------------------------------------------------------------------------
+// Single data transfer (LDR/STR) flag bits.
+// ---------------------------------------------------------------------------
+//
+// The load/store encoding (Cond 01 I P U B W L Rn Rd Offset) carries five
+// one-bit modifiers. Their values are facts; *which* combination a given
+// addressing mode needs is encoder work.
+const (
+	LSBitL byte = 1 << 0 // 1 = load, 0 = store
+	LSBitW byte = 1 << 1 // 1 = write back the (modified) base
+	LSBitB byte = 1 << 2 // 1 = byte transfer, 0 = word
+	LSBitU byte = 1 << 3 // 1 = add offset to base (up), 0 = subtract (down)
+	LSBitP byte = 1 << 4 // 1 = pre-indexed, 0 = post-indexed
+)
+
+// ---------------------------------------------------------------------------
+// Block data transfer (LDM/STM) addressing modes.
+// ---------------------------------------------------------------------------
+//
+// A block transfer's addressing is fixed by the P (pre/post) and U (up/down)
+// bits together with L (load/store). The architecture documents two naming
+// vocabularies for the same bit patterns: a stack-oriented one (full/empty,
+// ascending/descending) and a generic one (increment/decrement,
+// before/after). They are the same four (P,U) encodings viewed two ways —
+// the stack names' meaning depends on whether you are loading or storing,
+// which is exactly why both vocabularies exist. This mirrors the
+// condition-code synonyms: one set of encodings, two textual spellings.
+type BlockMode struct {
+	Generic string // IA, IB, DA, DB
+	P       bool   // pre-indexed (before)
+	U       bool   // up (increment)
+	// StackLoad / StackStore are the full/empty stack spellings that map to
+	// this (P,U) under LDM and STM respectively.
+	StackLoad  string
+	StackStore string
+}
+
+// BlockModes lists the four generic addressing modes with their stack
+// aliases. Under load, IA=FD, IB=ED, DA=FA, DB=EA; under store the pairing
+// flips (IA=EA, IB=FA, DA=ED, DB=FD), which is captured per-column below.
+var BlockModes = []BlockMode{
+	{"ia", false, true, "fd", "ea"},  // increment after
+	{"ib", true, true, "ed", "fa"},   // increment before
+	{"da", false, false, "fa", "ed"}, // decrement after
+	{"db", true, false, "ea", "fd"},  // decrement before
+}
+
+var blockByGeneric = map[string]BlockMode{}
+
+func init() {
+	for _, m := range BlockModes {
+		blockByGeneric[m.Generic] = m
+	}
+}
+
+// BlockModeByGeneric resolves a generic addressing-mode name (ia/ib/da/db).
+// The stack spellings (fd/ed/fa/ea) are load/store-dependent and so are not
+// resolved here without knowing the direction; a caller with that context
+// can scan BlockModes' StackLoad/StackStore columns.
+func BlockModeByGeneric(name string) (BlockMode, bool) {
+	m, ok := blockByGeneric[name]
+	return m, ok
+}

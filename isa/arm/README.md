@@ -1,63 +1,98 @@
 # isa/arm
 
-`github.com/vertex-language/vvm/isa/arm`
-
-The static, data-only description of the A32 (32-bit ARM) instruction set: register identity, condition-code numbering, rotated-immediate and shift bit encodings, and the opcode↔mnemonic correspondence for data-processing ops. `isa/arm/encoder` (the generic A32 assembler, see `encode.go`/`inst.go`) builds on it directly, as will `lower/arm`'s instruction selection once it exists.
-
-```go
+​```go
 import isaarm "github.com/vertex-language/vvm/isa/arm"
-```
+​```
 
-There is no control flow of consequence in this package — only declarations, plus a couple of mechanical reverse-index maps built once in `init()`. Nothing here decodes or encodes an instruction stream; that's `isa/arm/encoder`'s job on the way in, and a future disassembler's on the way out.
+Static, data-only description of the 32-bit ARM (A32, "ARM state")
+instruction set: register identity, the universal condition field,
+instruction-word layout, the modified-immediate encoding, and the
+opcode<->mnemonic correspondence.
 
----
+This is the AArch32 counterpart to `isa/aarch64`. It covers the **A32**
+encoding only — not T32/Thumb and not A64, which are distinct instruction
+sets. It serves both the `arm` (little-endian) and `armeb` (big-endian)
+Go targets: endianness governs how data words sit in memory, not these
+tables, so one description covers both.
 
-## Package layout
+Two things import this package:
 
-```
-isa/arm/
-├── registers.go   Reg, the sixteen GPR constants (R0..R10, RFP/RIP/RSP/RLR/RPC),
-│                  RNone, and the regName spelling table
-├── condcodes.go   Cond* constants (A32 cond field, bits 31:28), condName,
-│                  CondName()
-├── encoding.go    PackImm12/UnpackImm12 (rotated-immediate Operand2),
-│                  SplitImm16 (MOVW/MOVT halves), PCBias
-└── opcodes.go     DPOp/ShiftOp tables plus their By-lookup accessors (built
-                   from reverse-index maps in init()), and the fixed Base*
-                   instruction words for single-shape forms
-```
+- **`isa/arm/encoder`** — the generic assembler. It turns a fully-resolved
+  `Inst` stream into machine words using the tables and helpers here.
+- **`format/asm/arm/text`** — the debug disassembler/printer. It decodes
+  words and looks up mnemonics using the same tables, in reverse.
 
----
+Nothing here has control flow of consequence: constants, lookup tables,
+small pure functions, and the reverse-index maps built once in `init()`. If
+a change needs a design decision rather than a citation, it belongs
+somewhere else.
 
-## The test: ISA fact vs. lowering decision
+## What belongs here
 
-Everything in this package is true of A32 independent of any particular compiler's choices — a register's encoding number, which `tttn` bit pattern means "unsigned higher," which data-processing opcode selects `bic`, how a rotated immediate is packed. None of it depends on how a future `lower/arm` decides to allocate registers, build a frame, or select instructions.
+The test: **is this a fact about the A32 machine, true regardless of what
+any particular compiler chooses to emit?**
 
-The dividing line: if a fact would still be true even if `lower/arm` were deleted and rewritten from scratch with a completely different register-allocation strategy, it belongs here. If it's a decision *this compiler* makes about how to use those facts — which registers are scratch vs. callee-saved, how stack slots are laid out, which mnemonics an inline-asm table supports — it belongs in `lower/arm` instead, the same split `isa/x86` and `isa/x86_64` draw against their own `lower/<arch>` packages.
+What makes A32 different from the x86 packages, and drives most of what this
+package pins down:
 
-`isa/arm/encoder` already leans on this split even without `lower/arm` existing yet: it's a generic pseudo-instruction assembler with no notion of a stack frame or calling convention — a caller wanting a prologue/epilogue builds it out of ordinary `push`/`mov`/`sub`/`pop`/`b` `Inst` values itself. `RIP` (r12) being reserved as encoder-internal immediate-materialization scratch is one such caller-facing convention; it's real, but it's `isa/arm/encoder`'s convention, not an A32 fact, so it's documented there rather than here.
+- **Every instruction is conditional.** Bits 31:28 are a 4-bit condition
+  field (`condcodes.go`) checked against the CPSR flags on nearly every
+  encoding. Unlike x86, where a condition nibble belongs only to
+  jcc/setcc/cmovcc, here it is a property of the whole instruction set, so
+  `SetCond`/`Cond` in `encoding.go` are the one field accessor that is
+  universal. The tttn-style negate-by-XOR-1 holds, with one wrinkle x86
+  lacks: `al`/`nv` (14/15) are the final pair, so `NegateCond(CondAL)` is
+  the reserved `nv` code, not a usable "never" (see `CondNV`).
+- **Register fields are a flat four bits.** All sixteen GPRs are named by a
+  contiguous 4-bit field (`Reg.Field`), with no REX-style low-3/high-bit
+  split — there is deliberately nothing here resembling `isa/x86_64`'s
+  `Low3`/`NeedsREXBit`.
+- **The PC is a register.** `r15` *is* the program counter and appears
+  directly in register fields (`RPC`); `r14`/`RLR` is the hardware link
+  register; `r13`/`RSP` is the stack pointer by convention. `registers.go`
+  records which of those roles are architectural and which are convention.
+- **Immediates are rotated bytes.** A data-processing immediate is an 8-bit
+  value rotated right by an even amount (`EncodeModImm`/`DecodeModImm`),
+  the A32 analog of x86's `FitsImm32` — but the representable set is
+  scattered, not a contiguous range.
 
----
+Concretely, this package owns register identity and naming (`registers.go`),
+the condition field and its canonical/synonym spellings (`condcodes.go`),
+instruction-word layout — width, condition-field position, the
+modified-immediate codec, and the branch word-offset codec (`encoding.go`) —
+and the opcode/mnemonic tables: the sixteen data-processing operations, the
+barrel-shifter shift types, the load/store flag bits, and the LDM/STM
+addressing modes with their stack-name synonyms (`opcodes.go`).
 
-## Registers (`registers.go`)
+That includes facts nobody currently exercises: `DataProcOps` lists all
+sixteen operations including `rsc` and the test-only `teq` whether or not
+any lowering emits them, because a disassembler must still name them.
+`CondName`/`ParseCond` round-trip the *canonical* spelling only — the
+synonyms (`hs`/`lo`, `sp`/`lr`/`pc`, `asl`) are call-site conveniences, not
+a second textual vocabulary, matching how the x86 packages treat their
+synonym constants.
 
-`Reg` is a `byte`-sized physical A32 general-purpose register identifier: `R0`..`R10` (0-10), `RFP` (11, frame pointer), `RIP` (12, intra-procedure-call scratch), `RSP` (13, stack pointer), `RLR` (14, link register), `RPC` (15, program counter), plus `RNone` (`0xFF`) as the "absent" sentinel.
+## What doesn't belong here
 
-The single `regName` table gives each register's canonical assembler spelling. Indices 11-15 use their AAPCS/assembler names (`fp`/`ip`/`sp`/`lr`/`pc`) rather than `r11`-`r15` — the same convention every A32 assembler and disassembler follows, mirroring how `isa/x86`'s `reg32` table spells encoding 4 `"esp"` rather than a numbered form. `(Reg).String()` looks up that spelling, for diagnostics; there's no width parameter here the way `isa/x86`/`isa/x86_64` need one, since A32 GPRs don't have sub-register width forms.
+- **Anything that's a choice rather than a fact.** How to build a constant
+  that fails `EncodeModImm` (a MOV/MOVT pair vs. a literal-pool load),
+  which addressing mode to pick, how the +8 PC-read offset turns a target
+  into a branch field — that's `lower/arm` and the encoder's `Encode`, not
+  this package. This package supplies the menu; it doesn't order from it.
+- **Unresolved/symbolic state.** A not-yet-placed operand is a `lower/arm`
+  concept that only collapses to this package's shapes once every field is
+  a real register or immediate.
+- **Printer formatting policy.** `format/asm/arm/text` may reuse these
+  tables, but disassembly output format, whether to print `al`, and whether
+  to prefer `sp`/`lr`/`pc` over `r13`/`r14`/`r15` are printer decisions.
+- **Anything with control flow of consequence.** If a proposed addition
+  needs a conditional beyond "is this input in range", it's saying
+  something about *how to use* an ISA fact, and belongs one layer up.
 
-## Condition codes (`condcodes.go`)
+## Diagnostic behavior
 
-The fifteen `Cond*` constants (`CondEQ`..`CondAL`) are the A32 cond field carried in bits 31:28 of every conditionally executed instruction word. They're left as untyped constants rather than a distinct `Cond` type, matching how both the encoder (an `Inst.CC` byte) and a future decoder (a fetched word's top nibble) actually use them — as plain byte values. `CondName(cc)` returns the mnemonic suffix (e.g. `0x0` → `"eq"`, so a conditional branch prints `beq`, a conditional move `moveq`); `condName`'s sixteenth entry is the empty string, reserved for the `AL`-adjacent encoding this backend never emits a suffix for.
-
-## Encoding primitives (`encoding.go`)
-
-`PackImm12`/`UnpackImm12` convert to and from A32's rotated-immediate `Operand2` form — an 8-bit value rotated right by an even count — the shape every data-processing instruction's immediate operand accepts; `PackImm12` reports `ok == false` when no rotation makes the value fit. `SplitImm16` splits a 16-bit value into the `imm4:imm12` halves that `MOVW`/`MOVT` each pack into their own instruction word, so materializing a full 32-bit immediate takes one call per half. `PCBias` is the fixed 8-byte lead A32's PC reads ahead of the currently executing instruction — the bias every PC-relative fixup (branch offsets, symbol-relative `MOVW`/`MOVT` pairs) measures from.
-
-## Opcode tables (`opcodes.go`)
-
-- **`DPOps`** — the ten data-processing mnemonics this backend names (`and`/`eor`/`sub`/`rsb`/`add`/`tst`/`cmp`/`cmn`/`orr`/`bic`), each carrying its 4-bit opcode field (bits 24:21) and a `Cmp` flag marking the compare-only forms (`tst`/`cmp`/`cmn`) that always set flags and never write a destination register. Looked up by name via `DPByName`.
-- **`ShiftOps`** — the four shift/rotate mnemonics (`lsl`/`lsr`/`asr`/`ror`), each just its 2-bit shift-type field (bits 6:5), shared by the register-shifted-register form and by standalone shift instructions. `ShiftByName`.
-
-Both follow the same shape: a small ordered slice as the source of truth, with a `*ByName` map existing purely as a mechanical, `init()`-built reverse index.
-
-The remaining `Base*` constants are fixed A32 instruction words — `mov`/`mvn`/`movw`/`movt`/`movcc` in their several shapes, `mul`/`mls`/`umull`/`smull`/`udiv`/`sdiv`, `clz`/`rbit`/`rev`/`uxtb`/`uxth`/`sxtb`/`sxth`, the `ldr`/`str` family (word, byte, halfword, signed, register-offset), `ldrex`/`strex`/`clrex`/`dmb`, branches (`b`/`bcc`/`bl`/`blx`/`bx`), `push`/`pop` (`stmdb`/`ldmia` with writeback), and `udf` — for forms outside a systematic group, each with its register-field bit positions noted in a comment. That placement is itself an ISA fact (true for any A32 assembler), just not one that fits a uniform `Name`-keyed table the way the DP/shift forms above do, since each instruction's field layout differs.
+Lookup functions are total, not partial: `CondName` and `ShiftName` return
+`"?"` for an out-of-range code, `Reg.Name` returns `"?"` for a non-GPR, and
+`String()` methods never panic. They are called from disassembly/diagnostic
+paths, where describing a malformed operand should say "there isn't one"
+rather than take the process down.

@@ -1,64 +1,102 @@
 # isa/x86_64
 
-`github.com/vertex-language/vvm/isa/x86_64`
-
-The static, data-only description of the x86-64 (AMD64) instruction set: register identity, condition-code numbering, REX/ModRM/SIB bit layout, and the opcode↔mnemonic correspondence. `isa/x86_64/encoder` (byte emission, see `encode.go`/`inst.go`) builds on it directly, as does `lower/x86_64` — both its instruction selection and its inline-asm mnemonic parser (`lower/x86_64/inlineasm`).
-
 ```go
-import x86_64 "github.com/vertex-language/vvm/isa/x86_64"
+import isax64 "github.com/vertex-language/vvm/isa/x86_64"
 ```
 
-There is no control flow of consequence in this package — only declarations. Unlike some sibling ISA packages, nothing here is built by an `init()`-time reverse index: `opcodes.go`'s tables (`ALUOpcodes`, `ShiftExt`, `Grp3Ext`, `Grp5Ext`) are already mnemonic-keyed map literals, and there's no opcode→mnemonic direction because nothing under this repo currently disassembles x86-64 — only `isa/x86_64/encoder` consumes these facts, on the way in.
+Static, data-only description of the x86-64 (AMD64 / Intel 64, "long mode")
+instruction set: register identity, the REX prefix, condition codes,
+ModRM/SIB bit layout, and the opcode<->mnemonic correspondence.
 
----
+Two things import this package:
 
-## Package layout
+- **`isa/x86_64/encoder`** (`github.com/vertex-language/vvm/isa/x86_64/encoder`)
+  — the generic assembler. It turns a fully-resolved `Inst` stream into
+  machine bytes using the tables and packing helpers here, computing a REX
+  prefix from the operands where one is needed.
+- **`format/asm/x86_64/text`** — the debug disassembler/printer. It decodes
+  bytes and looks up mnemonics using the same tables, in reverse.
 
-```
-isa/x86_64/
-├── registers.go   Reg, the sixteen GPR constants (RAX..R15), RNone, and
-│                  the width-indexed Name64/Name32/Name16/Name8 tables
-├── condcodes.go   Cond* constants (Intel tttn encoding), CondMnemonics,
-│                  CondName
-├── encoding.go    PackModRM/UnpackModRM, PackSIB, PackREX, HiBit/LoBits,
-│                  ModRM/SIB special-value constants, legacy prefix bytes
-└── opcodes.go     ALUOpcodes/ShiftExt/Grp3Ext/Grp5Ext tables plus fixed
-                   opcode/ext constants for forms outside a systematic group
-```
+Nothing in this package has control flow of consequence. It's constants,
+lookup tables, and small pure functions, plus the reverse-index maps built
+once in `init()` (`condByName`, `aluByName`, `aluByMR`, and so on). If a
+change here needs a design decision rather than a citation, it probably
+belongs somewhere else.
 
----
+## What belongs here
 
-## The test: ISA fact vs. lowering decision
+The test: **is this a fact about the x86-64 machine, true regardless of what
+any particular compiler chooses to emit?**
 
-Everything in this package is true of x86-64 independent of any particular compiler's choices — a register's 4-bit encoding, which REX bit extends which ModRM/SIB field, which condition-code number means "signed less than," which `/ext` digit selects `neg` under the `F6/F7` group. None of it depends on how `lower/x86_64` decides to allocate registers, build a frame, or select instructions.
+That includes facts nobody currently exercises. `AluOps` lists `adc` and
+`sbb` even though no lowering in this repository emits them, and
+`Group3Op`'s comment is explicit that the table's job is naming encodings,
+not describing how each one's operand is used. `CondName`/`ParseCond` round
+-trip the *canonical* mnemonic spelling only — the synonym constants
+(`CondC`, `CondZ`, ...) are Go-level conveniences for call sites, not a
+second textual vocabulary, and deliberately aren't accepted by `ParseCond`.
 
-The dividing line: if a fact would still be true even if `lower/x86_64` were deleted and rewritten from scratch with a completely different register-allocation strategy, it belongs here. If it's a decision *this compiler* makes about how to use those facts — which registers are scratch vs. callee-saved, how stack slots are laid out, which mnemonics an inline-asm table supports — it belongs in `lower/x86_64` instead.
+Concretely, this package owns:
 
-One naming wrinkle worth knowing: `Grp3Ext` spells the one-operand, implicit-RAX:RDX group-3 forms `mul1`/`imul1` rather than the real assembly mnemonics `mul`/`imul`, precisely so this package's own table can't collide with the unrelated two/three-operand `imul` forms (`OpImulRM`, `OpImul3`) it also names. That disambiguation lives here, at the source of truth, rather than being translated at a downstream call site.
+- Register identity and naming (`registers.go`): the sixteen encodable
+  GPRs, `RNone`, width-indexed name tables, `Low3`/`NeedsREXBit` for
+  splitting an encoding across the ModRM/SIB field and its REX bit, and the
+  byte-register irregularity: without a REX prefix, indices 4-7 are always
+  AH/CH/DH/BH; with one, they're reclassified as SPL/BPL/SIL/DIL. So
+  `ByteAddressable` takes a REX argument: a byte operand on SPL/BPL/SIL/DIL
+  *requires* a REX prefix, one on AH/CH/DH/BH *forbids* one, and the two can
+  never share an instruction.
+- The REX prefix (`rex.go`): the fixed `0x40` high nibble, the W/R/X/B
+  payload bits (`REXW=8`, `REXR=4`, `REXX=2`, `REXB=1`), `PackREX`, and the
+  fact that this range claims opcodes `0x40`-`0x4F` — which is *why* the
+  one-byte `inc`/`dec` short forms don't exist and must be spelled with the
+  group-5 ModRM forms instead.
+- Condition codes (`condcodes.go`): the tttn encoding shared by `jcc`/`setcc`
+  /`cmovcc`, its canonical and synonym spellings, and the negate-by-XOR-1
+  fact.
+- ModRM/SIB bit layout (`encoding.go`): field packing/unpacking, scale-
+  factor encoding, the disp8-fits check, and the irregular escape values —
+  including two whose meaning takes some care: `RMRIP` (`mod=00 rm=101`) is
+  RIP-relative `[rip+disp32]`, while a true absolute address goes through
+  the SIB no-base form (`SIBNoBase`) instead. An RBP/r13 base can never use
+  `mod=00`, and RSP/r12 in `rm` always forces a SIB byte.
+- Opcode/mnemonic tables (`opcodes.go`): the ALU group, shift/rotate group,
+  and group-3 (F6/F7) tables, plus the three-way `imul` opcode split that's
+  a genuine property of the ISA (one mnemonic, three unrelated encodings).
 
----
+## What doesn't belong here
 
-## Registers (`registers.go`)
+- **Anything that's a choice rather than a fact.** Which encoding an
+  instruction selector picks, how operands get allocated to registers,
+  whether to prefer the imm8 or imm32 ALU form, whether to reach a global
+  by RIP-relative or absolute addressing, whether a 64-bit constant is worth
+  a `movabs` or should be built up — that's `lower/x86_64` and the encoder's
+  `Encode`, not this package. This package supplies the menu; it doesn't
+  order from it.
+- **Whether to emit a REX prefix.** *That* a REX prefix carries these four
+  bits and claims this opcode range is a machine fact and lives here.
+  *When* one is required for a given instruction — deciding it from the
+  operands' widths and register numbers — is encoding logic and lives in the
+  encoder (`rexNeed` in `encode.go`).
+- **Unresolved/symbolic state.** The encoder's `Opr` is "never a not-yet-
+  placed value" on purpose — a not-yet-resolved slot is a `lower/x86_64`
+  concept (its own near-identical `Inst` type) that only collapses to this
+  package's shapes once every slot is a real register or memory operand.
+- **Printer formatting policy.** `format/asm/x86_64/text` may reuse
+  `CondName`/`reg64`-style tables, but decisions about disassembly output
+  format, column layout, or diagnostic verbosity live in the printer.
+- **Anything with control flow of consequence.** If a proposed addition
+  needs a conditional beyond "is this input in range" or "default width to
+  8", it's saying something about *how to use* an ISA fact, which means it
+  belongs one layer up.
 
-`Reg` is a `byte`-sized general-purpose register identifier: `RAX`..`R15` (0-15), plus `RNone` (`0xFF`) as the "absent" sentinel used throughout `isa/x86_64/encoder` for optional base operands. Bit 3 of the encoding is the REX extension bit (selects r8-r15 when set); bits 0-2 are the raw ModRM/SIB field value.
+## Diagnostic behavior
 
-Four width-indexed tables (`Name64`, `Name32`, `Name16`, `Name8`) give each register's assembly spelling at 64-, 32-, 16-, and 8-bit widths; `NameForWidth(r, width)` looks one up by byte width (1/2/4/8), defaulting to the 64-bit spelling for any other value. The 8-bit row always uses the REX-requiring `spl`/`bpl`/`sil`/`dil` spellings for RSP/RBP/RSI/RDI rather than the legacy REX-free `ah`/`ch`/`dh`/`bh` forms — this table has no representation of the high-byte registers at all, matching the fact that `isa/x86_64/encoder` never omits REX when addressing RSP/RBP/RSI/RDI at 8-bit width.
-
-## Condition codes (`condcodes.go`)
-
-The sixteen `Cond*` constants (`CondO`..`CondG`) are Intel's 4-bit `tttn` encoding, shared verbatim across `0F 8x` (`jcc`), `0F 9x` (`setcc`), and `0F 4x` (`cmovcc`). `CondMnemonics` maps every mnemonic-suffix spelling assemblers accept — including redundant aliases such as `jc`/`jnae` both meaning `CondB`, or `jz`/`je` both meaning `CondE` — to its condition-code number; `CondName` is the inverse, canonical (non-aliased) direction, for printing rather than parsing a `jCC`/`setCC`/`cmovCC` mnemonic. Before this package existed, `lower/x86_64/inlineasm/common.go` kept `CondMnemonics`'s exact contents as its own unexported table, purely to parse condition-code mnemonics — duplicating a fact the encoder already depended on, with nothing to catch the two drifting apart.
-
-## Encoding primitives (`encoding.go`)
-
-`PackModRM`/`UnpackModRM` convert a ModRM byte to and from its three fields (`mod`/`reg`/`rm`); `reg` and `rm` are taken as their low 3 bits only, since REX.R/B extension is a separate concern folded in by the caller via `HiBit`. `PackSIB` assembles a SIB byte the same way, using the same low-3-bits convention. `HiBit(r)` extracts a register's REX extension bit (bit 3, selecting r8-r15); `LoBits(r)` extracts its 3-bit ModRM/SIB field value with that bit stripped off — callers fold `HiBit` into whichever of REX.R/X/B corresponds to the field the register occupies. `PackREX(w, r, x, b)` assembles a REX prefix byte from those four bits.
-
-The mod-field constants (`ModDisp0`, `ModDisp8`, `ModDisp32`, `ModReg`) and the rm/SIB special-value constants (`RMNeedsSIB`, `RMRipOrDisp32`, `SIBNoIndex`, `SIBBaseEscape`) name the x86-64 addressing quirks `isa/x86_64/encoder`'s `memBody` relies on together: rm==4 (RSP/R12) always forces a SIB byte, mod==0 with rm==5 means `[RIP+disp32]` rather than `[RBP/R13]` bare, and an absolute `[disp32]` needs the SIB base-escape encoding. The legacy prefix byte constants (`PrefixOperandSize`, `PrefixLock`, `PrefixRepne`, `PrefixRep`) round out the set of encoding-level facts the encoder needs named rather than left as bare hex literals.
-
-## Opcode tables (`opcodes.go`)
-
-- **`ALUOpcodes`** (`map[string]ALUOp`) — the six two-operand ALU instructions (`add`/`or`/`and`/`sub`/`xor`/`cmp`), each an `ALUOp{MR, RM, Ext byte}`: its MR opcode (`r/m, reg`), RM opcode (`reg, r/m`), and its `/ext` digit under the `80`/`81`/`83` (`r/m, imm`) group.
-- **`ShiftExt`** (`map[string]byte`) — the `/ext` digit for `rol`/`ror`/`shl`/`shr`/`sar`, shared by the `C0`/`C1` (immediate-count) and `D0`-`D3` (by-1 / by-CL) opcode groups.
-- **`Grp3Ext`** (`map[string]byte`) — the `/ext` digit for the `F6`/`F7` group: `not`, `neg`, and the implicit-RAX:RDX one-operand `mul1`/`imul1`/`div`/`idiv` forms.
-- **`Grp5Ext`** (`map[string]byte`) — the `/ext` digit this encoder uses from the `FE`/`FF` group: register/memory `inc`/`dec`. (`FF`'s other extensions — `call`/`jmp`/`push r/m` — are named individually as `OpCallRegExt`/`OpJmpRegExt` below, since this encoder only ever reaches them via register operands.)
-
-The remaining `Op*` constants are fixed opcode bytes and `/ext` digits for forms outside a systematic group — `mov` in its several shapes, `movzx`/`movsx`/`movsxd`, `lea`, `imul`'s two/three-operand forms, `jcc`/`setcc`/`cmovcc` base opcodes (added to a condition code), `push`/`pop` base opcodes (folded with a register's low 3 bits), and single-purpose instructions like `ret`, `ud2`, `syscall`, `bsr`/`bsf`/`bswap`, `xchg`, the `lock_`-prefixed RMW forms, `mfence`, `popcnt`, and the string-op opcodes (`rep_movsb`/`rep_stosb`).
+Lookup functions here are total, not partial: `CondName` returns `"?"` for
+an out-of-range code, `Reg.Name` returns `"?"` for a non-GPR, and `String()`
+methods never panic. These are called from disassembly/diagnostic paths,
+and a printer trying to describe a malformed or unsupported operand should
+say "there isn't one" rather than take the process down. Note `Reg.NameByte`
+takes a REX flag for the same reason `ByteAddressable` does: the correct
+byte spelling of indices 4-7 depends on whether the instruction being
+described carries a REX prefix.

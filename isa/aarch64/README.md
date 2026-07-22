@@ -1,78 +1,117 @@
 # isa/aarch64
 
-`github.com/vertex-language/vvm/isa/aarch64`
+​```go
+import isaa64 "github.com/vertex-language/vvm/isa/aarch64"
+​```
 
-The static, data-only description of the A64 (64-bit ARM) instruction set: register identity, condition-code numbering, and the bit-layout/opcode↔mnemonic tables a generic assembler needs to turn an instruction stream into machine words. `isa/aarch64/encoder` (byte emission, see `encode.go`/`inst.go`) builds on it directly, as will `lower/aarch64`'s instruction selection once it exists.
+Static, data-only description of the AArch64 (ARM64, "A64") instruction
+set: register identity, the condition field, instruction-word layout, the
+move-wide and bitmask immediate codecs, and the opcode<->mnemonic
+correspondence.
 
-```go
-import isaaarch64 "github.com/vertex-language/vvm/isa/aarch64"
-```
+This is the 64-bit counterpart to `isa/arm`. It covers the **A64** encoding
+only — not A32 ("ARM state") and not T32/Thumb, which are distinct
+instruction sets with their own encodings and live in `isa/arm`. A64 is
+little-endian for instruction fetch; data endianness is a memory property,
+not one of these tables.
 
-There is no control flow of consequence in this package — only declarations, plus a single mechanical reverse-index map built once in `init()`. Nothing here encodes or decodes an instruction stream; that's `isa/aarch64/encoder`'s job on the way in, and a future disassembler's on the way out.
+Two things import this package:
 
----
+- **`isa/aarch64/encoder`** — the generic assembler. It turns a fully-
+  resolved `Inst` stream into machine words using the tables and helpers
+  here.
+- **`format/asm/aarch64/text`** — the debug disassembler/printer. It decodes
+  words and looks up mnemonics using the same tables, in reverse.
 
-## Package layout
+Nothing here has control flow of consequence: constants, lookup tables,
+small pure functions, and the reverse-index maps built once in `init()`. If
+a change needs a design decision rather than a citation, it belongs
+somewhere else.
 
-```
-isa/aarch64/
-├── registers.go   Reg, the thirty-one GPR constants (X0..X30), the shared
-│                  SP/ZR encoding-31 value, FP/LR/IP0/IP1/PR aliases, and
-│                  the width-indexed XNames/WNames tables
-├── condcodes.go   Cond* constants (A64 4-bit cond field), CondNames,
-│                  CondMnemonics, CondName-equivalent lookup, Invert()
-├── encoding.go    Sf/Idx64/SizeBits width helpers, the BFM base words plus
-│                  PackBFM, and PackPair for STP/LDP
-└── opcodes.go     DPImmOpcodes/DPRegOpcodes/DP2Opcodes/DP1Opcodes,
-                   LdClasses/StClasses, and the fixed Op* words for forms
-                   outside a systematic group
-```
+## What belongs here
 
----
+The test: **is this a fact about the A64 machine, true regardless of what
+any particular compiler chooses to emit?**
 
-## The test: ISA fact vs. lowering decision
+What makes A64 different from the `isa/arm` (A32) sibling, and drives most
+of what this package pins down:
 
-Everything in this package is true of A64 independent of any particular compiler's choices — a register's 5-bit encoding, which `cond` field value means "unsigned higher," which `/opcode` subfield selects `udiv` under the data-processing-2-source group, how an `STP`/`LDP` pair instruction packs its scaled displacement. None of it depends on how a future `lower/aarch64` decides to allocate registers, build a frame, or select instructions.
+- **There is no X31.** The 5-bit register field takes values 0-31, but 31
+  is not a general register: depending on the instruction it denotes either
+  the zero register (`RZR`, reading as 0, discarding writes) or the stack
+  pointer (`RSP`). Both spell to encoding 31 — which one is meant is a
+  per-operand-role fact of the instruction, not a property of the value.
+  So `Reg.Name` takes a `sp` argument, exactly as `isa/x86_64`'s `NameByte`
+  takes a REX flag: the correct spelling of encoding 31 depends on context
+  the register value alone doesn't carry.
+- **Width is a per-instruction bit, not a register number.** Every GPR has
+  a 64-bit (`x0`-`x30`) and a 32-bit (`w0`-`w30`) view of the *same*
+  register, selected by the `sf` bit; a `w` write zeroes the upper half.
+  The register field is a flat five bits with no REX-style low-3/high-bit
+  split, so `Reg.Name` takes a `Width`, and there is deliberately nothing
+  resembling `isa/x86_64`'s `Low3`/`NeedsREXBit`.
+- **The PC is not a general register.** Unlike A32's `r15`, the program
+  counter never appears in a register field; only `ADR`/`ADRP` and the
+  branches compute PC-relative values. There is deliberately no `RPC`.
+- **The condition field is not universal.** Unlike A32, where bits 31:28 of
+  nearly every instruction are a condition, A64 conditionality is confined
+  to `B.cond`, the conditional-select family (`csel`/`cset`/...), and the
+  conditional-compare family (`ccmp`/`ccmn`). So the condition codes here
+  are a per-instruction nibble, like x86's, not a field on the whole
+  instruction set.
+- **Immediates come in three scattered/shaped forms.** The move-wide
+  immediate is a 16-bit value placed at one of four halfword positions
+  (`hw`); the arithmetic immediate is a 12-bit value optionally shifted left
+  12; the logical immediate is a *bitmask* — a single run of ones within a
+  2/4/8/16/32/64-bit element, replicated across the register, or its inverse
+  (`EncodeBitmaskImm`/`DecodeBitmaskImm`). The bitmask form is the A64 analog
+  of A32's rotated modified immediate: the question "can the machine carry
+  this constant inline?" with a representable set that is scattered, not a
+  contiguous range.
 
-The dividing line: if a fact would still be true even if `lower/aarch64` were deleted and rewritten from scratch with a completely different register-allocation strategy, it belongs here. If it's a decision *this compiler* makes about how to use those facts — which registers are scratch vs. callee-saved, how stack slots are laid out, which mnemonics an inline-asm table supports — it belongs in `lower/aarch64` instead, the same split `isa/x86`, `isa/x86_64`, and `isa/arm` draw against their own `lower/<arch>` packages.
+Concretely, this package owns register identity and naming (`registers.go`),
+the condition field and its canonical/synonym spellings (`condcodes.go`),
+instruction-word layout — the fixed 4-byte width, register-field positions,
+the move-wide `hw` codec, the shifted-12 arithmetic-immediate check, the
+bitmask-immediate codec, and the branch word-offset codecs for the three
+field widths (`encoding.go`) — and the opcode/mnemonic tables: the logical
+group with its negated variants and `N` bit, the move-wide group, the
+barrel-shift types, the data-processing two-source operations, and the
+add/sub `op`/`S` naming (`opcodes.go`).
 
-`isa/aarch64/encoder` already leans on this split even without `lower/aarch64` existing yet: `Encode` turns a fully resolved `Inst` stream into machine words with no prologue/epilogue splicing of its own — a caller wanting a frame builds it out of ordinary `stp_pre`/`mov_r_sp`/`sub_sp`/`mov_to_sp`/`ldp_post`/`ret` `Inst` values itself, the same way `isa/arm/encoder` treats prologue construction as the caller's concern rather than the assembler's.
+That includes facts nobody currently exercises: `LogicalOps` lists `eon` and
+the flag-setting `bics` whether or not any lowering emits them, because a
+disassembler must still name them. `CondName`/`ParseCond` round-trip the
+*canonical* spelling only — the synonyms (`hs`/`lo`) are call-site
+conveniences, not a second textual vocabulary, matching how `isa/arm` and
+the x86 packages treat their synonym constants.
 
----
+## What doesn't belong here
 
-## Registers (`registers.go`)
+- **Anything that's a choice rather than a fact.** How to build a constant
+  that fits neither `EncodeBitmaskImm` nor a single move-wide (a
+  `MOVZ`/`MOVK` sequence vs. a literal-pool load), whether to reach a global
+  by `ADRP`+add or a literal load, which of the add/sub/logical operand
+  forms to select, whether encoding 31 should be `sp` or `xzr` for a given
+  operand — that's `lower/aarch64` and the encoder's `Encode`, not this
+  package. This package supplies the menu; it doesn't order from it.
+- **Unresolved/symbolic state.** A not-yet-placed operand is a
+  `lower/aarch64` concept that only collapses to this package's shapes once
+  every field is a real register or immediate.
+- **Printer formatting policy.** `format/asm/aarch64/text` may reuse these
+  tables, but disassembly output format, whether to print an omitted `LSL
+  #0`, and whether to prefer `lr` over `x30` are printer decisions.
+- **Anything with control flow of consequence.** If a proposed addition
+  needs a conditional beyond "is this input in range", it's saying something
+  about *how to use* an ISA fact, and belongs one layer up.
 
-`Reg` is a `byte`-sized physical A64 general-purpose register encoding, 0-31. `X0`..`X30` name the thirty-one addressable GPRs directly; encoding 31 is architecturally context-dependent rather than a fixed register, so `SP` and `ZR` are declared as the same value — which meaning applies is determined by which field of which instruction carries it, not by anything this package decides.
+## Diagnostic behavior
 
-`FP` and `LR` alias `X29`/`X30`, the AAPCS64 names — and for `LR` specifically, more than a naming convention: `BL`/`BLR` write it implicitly and a bare `RET` reads it implicitly, so that fact is true of the architecture itself. `IP0`/`IP1`/`PR` alias `X16`/`X17`/`X18`, the intra-procedure-call scratch registers and platform register AAPCS64 reserves; whether this compiler's own pipeline actually uses them that way is a `lower/aarch64` decision, not one this package makes.
-
-`XNames`/`WNames` give each register's 64-bit (`Xn`) and 32-bit (`Wn`) assembly spelling for encodings 0-30. Encoding 31's spelling depends on which of SP/ZR applies at the call site, so it isn't folded into these arrays — `XName(r, isSP)`/`WName(r, isSP)` handle it explicitly, picking `sp`/`wsp` or `xzr`/`wzr` accordingly.
-
-## Condition codes (`condcodes.go`)
-
-The sixteen `Cond*` constants (`CondEQ`..`CondNV`) are the condition-code field carried by `B.cond`, the `CSET`/`CSEL`/`CSINC` family, and `CCMP`/`CCMN`. `CondNames` gives the mnemonic suffix for each value; `CondMnemonics` is the reverse index, built once in `init()`, so a future inline-asm parser reads it directly rather than hand-typing a second copy of the same table — a duplication this package's own doc comment calls out as the failure mode `isa/x86_64`'s README documents for its `jccTable`.
-
-`Invert(cc)` returns the complementary condition — a fixed architectural pairing where bit 0 of the 4-bit field toggles sense for every pair below `AL`/`NV`, not a policy choice. `AL` and `NV` have no complement and are returned unchanged.
-
-## Encoding primitives (`encoding.go`)
-
-`Sf(sz)` returns the "sf" (size flag) bit, positioned at its fixed bit 31, for a 32-bit (`sz==4`) or 64-bit (`sz==8`) data-processing form. `Idx64(sz)` picks which half of a `[W-form, X-form]` opcode-table entry (as used by `DPImmOpcodes`, `DPRegOpcodes`, `DP1Opcodes`) applies for a given size — the two are separate helpers because not every caller needs a full instruction word back, just an index. `SizeBits(sz)` packs a load/store-exclusive/ordered access size (1/2/4/8 bytes) into its fixed 2-bit `size` field at bits `[31:30]`, returning an error for anything else.
-
-The `OpUBFMW`/`OpUBFMX`/`OpSBFMW`/`OpSBFMX` base words are the bitfield-move family that `UXTB`/`UXTH`/`SXTB`/`SXTH`/`SXTW` and the `LSR`/`LSL`/`ASR`-by-immediate pseudo-ops are all specific `(immr, imms)` encodings of. `PackBFM` lays out one such instruction word from a base plus the two 6-bit shift/width fields and the usual `Rn`/`Rd` register fields; picking which `(immr, imms)` pair a given pseudo-op needs is left to the caller, since that depends on the pseudo-op and operand width rather than anything true of the bit layout itself. `PackPair` lays out one `STP`(pre-index)/`LDP`(post-index) 64-bit pair instruction word from a base, the pre-scaled 7-bit displacement, and the `Rt`/`Rt2`/`Rn` register fields.
-
-## Opcode tables (`opcodes.go`)
-
-- **`DPImmOpcodes`** (`map[string][2]uint32`) — the data-processing-immediate `add`/`adds`/`sub`/`subs` family, `[W-form, X-form]` base words; the 12-bit unsigned immediate and `Rn`/`Rd` are filled in by the caller.
-- **`DPRegOpcodes`** (`map[string][2]uint32`) — the data-processing-register (shifted) `add`/`adds`/`sub`/`subs`/`and`/`orr`/`eor`/`bic` family, `[W-form, X-form]` base words; `Rm`/`Rn`/`Rd` filled in by the caller.
-- **`OpAddExtX`/`OpSubExtX`** — the extended-register `ADD`/`SUB` form used for SP-relative addresses that overflow the immediate form's 24-bit range. X-form only, since this compiler never needs a W-form SP computation.
-- **`OpMovReg`/`OpMovRegX`/`OpMvnReg`/`OpMvnRegX`/`OpNegReg`/`OpNegRegX`** — `mov_r`/`mvn`/`neg`'s shifted-register forms with `Rn` fixed to `ZR`, named directly as a mechanical specialization of the `DPRegOpcodes`/`DP1Opcodes`-shaped instructions rather than composed at every call site.
-- **`DP2Opcodes`** (`map[string]uint32`) — the 3-bit opcode subfield shared by the data-processing-2-source family (`udiv`/`sdiv`/`lslv`/`lsrv`/`asrv`/`rorv`); the shared base word (`OpDP2Base`) is separate since it also carries the sf bit.
-- **`DP1Opcodes`** (`map[string][2]uint32`) — the data-processing-1-source family (`rbit`/`rev16`/`rev`/`clz`), `[W-form, X-form]` base words.
-- The 3-source multiply family (`OpMul`/`OpMSub`/`OpSMulH`/`OpUMulH`/`OpSMull`/`OpUMull`) — fixed base words with `Rd`/`Rn`/`Rm`/`Ra` filled in by the caller. `MUL` is `MADD` with `Ra=ZR` baked into the base word rather than named as a separate opcode.
-- **`OpCSet`/`OpCSel`** — `CSET` is `CSINC Rd, ZR, ZR, invert(cond)` with a fixed base word; `CSEL` carries the sf bit itself via `Sf`.
-- **`LdStClass`** and **`LdClasses`/`StClasses`** (`map[int]LdStClass`, keyed by access size 1/2/4/8) — each entry pairs one integer load or store's scaled unsigned-immediate form with its unscaled (`LDUR`-style) form and the scale the scaled form's immediate is a multiple of.
-- **`OpLdrbReg`/`OpStrbReg`** — byte load/store, register-offset form (`LDRB`/`STRB Wt, [Xn, Xm]`).
-- The load-acquire/store-release/exclusive family (`OpLdar`/`OpStlr`/`OpLdaxr`/`OpStlxr`/`OpClrex`/`OpDmb`) — the shared 2-bit size field is packed separately via `SizeBits` rather than baked into each constant.
-- Branch/system fixed words (`OpB`/`OpBL`/`OpBCond`/`OpCBase`/`OpBLR`/`OpBR`/`OpRet`/`OpSVC`/`OpBrk`) — `B`/`BL`/`B.cond`/`CBZ`/`CBNZ` leave their label/symbol-relative field for a fixup or patch to fill in; `RET`'s implicit-`X30` form and `SVC`/`BRK`'s fixed encodings need nothing further.
-- **`OpMovnX`/`OpMovzX`/`OpMovkX`** — `MOVZ`/`MOVN`/`MOVK`, X-form only, since this compiler never needs a W-form 64-bit-immediate sequence. The 2-bit `hw` shift-amount field and 16-bit immediate are filled in by the caller.
-- **`OpSTPPre64`/`OpLDPPost64`** — the `STP`(pre-index)/`LDP`(post-index) pair used to save/restore FP/LR as ordinary instructions, since the encoder doesn't splice a frame in automatically; `imm7 = disp/8`, packed by `PackPair`.
+Lookup functions are total, not partial: `CondName` and `ShiftName` return
+`"?"` for an out-of-range code, `Reg.Name` returns `"?"` for `RNone` or an
+out-of-range value, and `String()` methods never panic. They are called from
+disassembly/diagnostic paths, where describing a malformed operand should
+say "there isn't one" rather than take the process down. The immediate
+*decoders* are the one honest exception to "total": a bitmask field has
+genuinely-reserved encodings, so `DecodeBitmaskImm` reports `ok=false`
+rather than inventing a value — but it still never panics.

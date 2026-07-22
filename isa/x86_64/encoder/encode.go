@@ -1,21 +1,21 @@
+// encoder/encode.go
 package encoder
 
 import (
 	"fmt"
 
-	x86_64 "github.com/vertex-language/vvm/isa/x86_64"
+	isax64 "github.com/vertex-language/vvm/isa/x86_64"
 )
 
-// Encode turns a resolved Inst stream into x86-64 machine bytes. It does
-// not know what a function is: no prologue, no epilogue, no frame size —
-// callers that want those emit the corresponding mov/push/pop/sub
-// instructions into insts themselves, as ordinary Insts, before calling
-// Encode.
+// Encode turns a fully-resolved Inst stream into x86-64 machine bytes.
+// Like the 32-bit encoder it knows nothing about stack frames or calling
+// conventions — a caller that wants those builds them as ordinary
+// push/mov/sub/lea/pop Insts and prepends/appends them itself.
 func Encode(insts []Inst) ([]byte, []Fixup, error) {
 	e := &enc{labels: map[string]int{}}
 	for i := range insts {
 		if err := e.one(&insts[i]); err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("encode: %s: %w", insts[i].Op, err)
 		}
 	}
 	for _, p := range e.patches {
@@ -23,8 +23,7 @@ func Encode(insts []Inst) ([]byte, []Fixup, error) {
 		if !ok {
 			return nil, nil, fmt.Errorf("encode: undefined label %q", p.lbl)
 		}
-		rel := int32(t - (p.pos + 4))
-		putLE32(e.b[p.pos:], uint32(rel))
+		putLE32(e.b[p.pos:], uint32(int32(t-(p.pos+4))))
 	}
 	return e.b, e.fx, nil
 }
@@ -43,343 +42,1125 @@ type enc struct {
 
 func (e *enc) u8(v ...byte) { e.b = append(e.b, v...) }
 func (e *enc) u32(v uint32) { e.b = append(e.b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24)) }
-func (e *enc) u64(v uint64) { e.u32(uint32(v)); e.u32(uint32(v >> 32)) }
+func (e *enc) u64(v uint64) {
+	e.b = append(e.b,
+		byte(v), byte(v>>8), byte(v>>16), byte(v>>24),
+		byte(v>>32), byte(v>>40), byte(v>>48), byte(v>>56))
+}
 func putLE32(b []byte, v uint32) {
 	b[0], b[1], b[2], b[3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
 }
 
-// rex emits a REX prefix if any of W/R/B demands one. X (SIB.index
-// extension) is always false — this encoder never uses an index register.
-func (e *enc) rex(w bool, regField byte, m Opr) {
-	r := regField>>3&1 != 0
-	var b bool
-	switch m.K {
-	case KReg:
-		b = x86_64.HiBit(m.Reg) == 1
-	case KMem:
-		if m.Base != x86_64.RNone {
-			b = x86_64.HiBit(m.Base) == 1
-		}
+// ---------------------------------------------------------------------------
+// Operand-level helpers.
+// ---------------------------------------------------------------------------
+
+// width normalizes an Inst.Sz into an operand width in bytes. Zero means
+// unset, which in a 64-bit backend means 8.
+func width(sz int) (int, error) {
+	switch sz {
+	case 0, 8:
+		return 8, nil
+	case 4:
+		return 4, nil
+	case 2:
+		return 2, nil
+	case 1:
+		return 1, nil
 	}
-	if w || r || b {
-		e.u8(x86_64.PackREX(w, r, false, b))
+	return 0, fmt.Errorf("operand size %d is not 1, 2, 4, or 8", sz)
+}
+
+// sizePrefix emits the operand-size override for 16-bit operands. The
+// 8-bit forms use distinct opcode bytes, and 64-bit operand size comes
+// from REX.W rather than a prefix, so only width 2 produces anything.
+func (e *enc) sizePrefix(w int) {
+	if w == 2 {
+		e.u8(isax64.Prefix66)
 	}
 }
 
-// memBody emits the ModRM (+SIB, +disp) bytes addressing operand m, with
-// the low 3 bits of regField in ModRM.reg (the caller already folded bit
-// 3 into REX.R via rex). Handles the x86-64 special cases: rm==RSP/R12
-// always forces a SIB byte, mod=00 rm=101 means [RIP+disp32] (so RBP/R13
-// bases always carry a displacement, and RIP-relative operands use
-// exactly this form), and absolute [disp32] needs the SIB escape.
-func (e *enc) memBody(regField byte, m Opr) error {
-	rf := regField & 7
-	switch m.K {
-	case KReg:
-		e.u8(x86_64.PackModRM(x86_64.ModReg, rf, x86_64.LoBits(m.Reg)))
+// reg validates that an operand is an encodable register and returns its
+// full 0-15 value. Callers split it into the low 3 bits (ModRM/SIB field)
+// and the high bit (a REX slot) themselves, via the rex helper below.
+func reg(o Opr, role string) (Reg, error) {
+	if o.Kind != OReg {
+		return 0, fmt.Errorf("%s operand must be a register", role)
+	}
+	if !o.Reg.IsGPR() {
+		return 0, fmt.Errorf("%s operand names no encodable register", role)
+	}
+	return o.Reg, nil
+}
+
+// rexNeed accumulates the facts that force, or shape, a REX prefix for one
+// instruction. It is built up as the operands are inspected and then
+// emitted once, immediately before the opcode.
+type rexNeed struct {
+	w    bool // 64-bit operand size (REX.W)
+	r    bool // ModRM.reg is an extended register (REX.R)
+	x    bool // SIB.index is an extended register (REX.X)
+	b    bool // ModRM.rm / SIB.base / opcode-reg is extended (REX.B)
+	must bool // a byte operand on spl/bpl/sil/dil forces REX even if 0x40
+	no   bool // a byte operand on ah/ch/dh/bh forbids REX
+}
+
+// emit writes the REX prefix if one is needed, and reports an error if the
+// instruction both requires and forbids one (a byte operand on
+// spl/bpl/sil/dil together with ah/ch/dh/bh, which can never coexist).
+// It must be called after any legacy/mandatory prefix and immediately
+// before the opcode (or its 0F escape).
+func (rn rexNeed) emit(e *enc) error {
+	if rn.no && (rn.w || rn.r || rn.x || rn.b || rn.must) {
+		return fmt.Errorf("instruction needs a REX prefix but also uses ah/ch/dh/bh, which forbids one")
+	}
+	if rn.no {
 		return nil
-	case KRIP:
-		e.u8(x86_64.PackModRM(x86_64.ModDisp0, rf, x86_64.RMRipOrDisp32))
-		e.fx = append(e.fx, Fixup{Offset: uint32(len(e.b)), Symbol: m.Sym, Kind: FixupPCRel32, Addend: int64(m.Disp) - 4})
-		e.u32(uint32(0xFFFFFFFC + uint32(m.Disp))) // A = disp - 4, REL-style
+	}
+	if rn.w || rn.r || rn.x || rn.b || rn.must {
+		e.u8(isax64.PackREX(rn.w, rn.r, rn.x, rn.b))
+	}
+	return nil
+}
+
+// byteRegREX folds a byte-operand register into the REX requirement: an
+// spl/bpl/sil/dil source/dest forces a prefix, an ah/ch/dh/bh one forbids
+// it. Only relevant at width 1.
+func (rn *rexNeed) byteRegREX(r Reg) {
+	switch r {
+	case RRSP, RRBP, RRSI, RRDI: // spl/bpl/sil/dil — need REX
+		rn.must = true
+	case RRAX, RRCX, RRDX, RRBX:
+		// al/cl/dl/bl — fine either way
+	default:
+		// r8b-r15b need REX via the .b/.r bit, handled by the caller
+	}
+}
+
+// memREX sets the X and B bits for a memory operand's index and base
+// (or the rm register in the register-direct case). Called before emit.
+func (rn *rexNeed) memREX(m Opr) {
+	if m.Kind == OReg {
+		rn.b = m.Reg.NeedsREXBit()
+		return
+	}
+	if m.Base != RNone {
+		rn.b = m.Base.NeedsREXBit()
+	}
+	if m.Index != RNone {
+		rn.x = m.Index.NeedsREXBit()
+	}
+}
+
+// imm emits an immediate of the given width (1/2/4), recording an absolute
+// fixup first when the operand names a symbol. A symbolic immediate is an
+// address; at these widths it can only be a 32-bit abs32 relocation. A full
+// 64-bit symbol address goes through movabs, not here.
+func (e *enc) imm(w int, o Opr) error {
+	if o.Sym != "" {
+		if w != 4 {
+			return fmt.Errorf("symbolic immediate %q needs a 4-byte field, got %d", o.Sym, w)
+		}
+		e.fx = append(e.fx, Fixup{
+			Offset: uint32(len(e.b)), Symbol: o.Sym, Kind: FixupAbs32, Addend: o.Imm,
+		})
+	}
+	switch w {
+	case 1:
+		e.u8(byte(o.Imm))
+	case 2:
+		e.u8(byte(o.Imm), byte(o.Imm>>8))
+	default:
+		e.u32(uint32(o.Imm))
+	}
+	return nil
+}
+
+// mem emits the ModRM (+SIB, +disp) bytes addressing operand m, with
+// regField (low 3 bits) in ModRM.reg. REX bits for the base/index must
+// already have been folded into rn by the caller via memREX. Handles the
+// long-mode special cases: an index or an RSP/r12 base forces a SIB byte;
+// a RIP-relative operand uses mod=00 rm=101; an absolute address uses the
+// SIB no-base form; an RBP/r13 base always carries a displacement.
+func (e *enc) mem(regField byte, m Opr) error {
+	if m.Kind == OReg {
+		if !m.Reg.IsGPR() {
+			return fmt.Errorf("r/m operand names no encodable register")
+		}
+		e.u8(isax64.PackModRM(isax64.ModReg, regField, m.Reg.Low3()))
 		return nil
-	case KMem:
-		if m.Base == x86_64.RNone { // absolute [disp32]: SIB escape, no base
-			e.u8(x86_64.PackModRM(x86_64.ModDisp0, rf, x86_64.RMNeedsSIB))
-			e.u8(x86_64.PackSIB(0, x86_64.SIBNoIndex, x86_64.SIBBaseEscape))
+	}
+	if m.Kind != OMem {
+		return fmt.Errorf("operand is not a memory operand")
+	}
+
+	// RIP-relative: mod=00, rm=101, disp32 is a PC-relative fixup.
+	if m.RIPSym != "" {
+		if m.Base != RNone || m.Index != RNone {
+			return fmt.Errorf("RIP-relative operand %q cannot carry a base or index", m.RIPSym)
+		}
+		e.u8(isax64.PackModRM(isax64.ModIndir, regField, isax64.RMRIP))
+		// Reference point is the end of the instruction. The disp32 field
+		// is the last four bytes, so its own end is that point: addend =
+		// disp - 4.
+		e.fx = append(e.fx, Fixup{
+			Offset: uint32(len(e.b)), Symbol: m.RIPSym,
+			Kind: FixupPCRel32, Addend: int64(m.Disp) - 4,
+		})
+		e.u32(uint32(0xFFFFFFFC))
+		return nil
+	}
+
+	hasBase := m.Base != RNone
+	hasIndex := m.Index != RNone
+	if hasBase && !m.Base.IsGPR() {
+		return fmt.Errorf("memory base names no encodable register")
+	}
+	if hasIndex && !m.Index.IsGPR() {
+		return fmt.Errorf("memory index names no encodable register")
+	}
+
+	// Absolute [disp32], with or without a symbol: the SIB no-base form.
+	// mod=00, rm=100 (SIB follows), SIB index=100 (none), base=101 (none).
+	if !hasBase && !hasIndex {
+		e.u8(isax64.PackModRM(isax64.ModIndir, regField, isax64.RMSIB))
+		e.u8(isax64.PackSIB(0, isax64.SIBNoIndex, isax64.SIBNoBase))
+		if m.MSym != "" {
+			e.fx = append(e.fx, Fixup{
+				Offset: uint32(len(e.b)), Symbol: m.MSym,
+				Kind: FixupAbs32, Addend: int64(m.Disp),
+			})
+		}
+		e.u32(uint32(m.Disp))
+		return nil
+	}
+	if m.MSym != "" {
+		return fmt.Errorf("symbolic absolute operand %q cannot carry a base or index", m.MSym)
+	}
+	if m.Index == RRSP {
+		return fmt.Errorf("rsp cannot be used as a SIB index register")
+	}
+
+	// A SIB byte is needed for any index, and for an RSP/r12 base (both
+	// share the low-3 encoding 100, which in ModRM.rm means "SIB follows").
+	needSIB := hasIndex || m.Base.Low3() == isax64.RMSIB
+
+	// An RBP/r13 base (low-3 encoding 101) has no mod=00 form — that slot
+	// means RIP-relative in ModRM.rm and "no base" in SIB.base — so it
+	// always carries at least a disp8, even at displacement zero.
+	baseIsBPLike := hasBase && m.Base.Low3() == isax64.RMRIP
+
+	var mod byte
+	switch {
+	case !hasBase:
+		mod = isax64.ModIndir // [index*scale+disp32], no base
+	case m.Disp == 0 && !baseIsBPLike:
+		mod = isax64.ModIndir
+	case isax64.FitsDisp8(m.Disp):
+		mod = isax64.ModDisp8
+	default:
+		mod = isax64.ModDisp32
+	}
+
+	rm := isax64.RMSIB
+	if !needSIB {
+		rm = m.Base.Low3()
+	}
+	e.u8(isax64.PackModRM(mod, regField, rm))
+
+	if needSIB {
+		scaleBits, ok := isax64.ScaleBits(m.Scale)
+		if !ok {
+			return fmt.Errorf("scale %d is not 1, 2, 4, or 8", m.Scale)
+		}
+		indexField := isax64.SIBNoIndex
+		if hasIndex {
+			indexField = m.Index.Low3()
+		}
+		baseField := isax64.SIBNoBase
+		if hasBase {
+			baseField = m.Base.Low3()
+		}
+		e.u8(isax64.PackSIB(scaleBits, indexField, baseField))
+		if !hasBase {
 			e.u32(uint32(m.Disp))
 			return nil
 		}
-		disp := m.Disp
-		var mod byte
-		switch {
-		case disp == 0 && x86_64.LoBits(m.Base) != 5: // RBP/R13 base forces a disp
-			mod = x86_64.ModDisp0
-		case disp >= -128 && disp <= 127:
-			mod = x86_64.ModDisp8
-		default:
-			mod = x86_64.ModDisp32
-		}
-		e.u8(x86_64.PackModRM(mod, rf, x86_64.LoBits(m.Base)))
-		if x86_64.LoBits(m.Base) == x86_64.RMNeedsSIB { // RSP/R12 base needs SIB
-			e.u8(x86_64.PackSIB(0, x86_64.SIBNoIndex, x86_64.LoBits(m.Base)))
-		}
-		switch mod {
-		case x86_64.ModDisp8:
-			e.u8(byte(int8(disp)))
-		case x86_64.ModDisp32:
-			e.u32(uint32(disp))
-		}
-		return nil
 	}
-	return fmt.Errorf("encode: operand is not a register or memory operand")
-}
-
-// op emits [66] [REX] opcode ModRM… for a reg-and-r/m instruction.
-func (e *enc) op(sz int, regField byte, m Opr, opc ...byte) error {
-	if sz == 2 {
-		e.u8(x86_64.PrefixOperandSize)
+	switch mod {
+	case isax64.ModDisp8:
+		e.u8(byte(int8(m.Disp)))
+	case isax64.ModDisp32:
+		e.u32(uint32(m.Disp))
 	}
-	e.rex(sz == 8, regField, m)
-	e.u8(opc...)
-	return e.memBody(regField, m)
+	return nil
 }
 
-func (e *enc) fixupJump(opcode byte, sym string) {
-	e.u8(opcode) // E8 call rel32 / E9 jmp rel32
-	e.fx = append(e.fx, Fixup{Offset: uint32(len(e.b)), Symbol: sym, Kind: FixupPCRel32Call, Addend: -4})
-	e.u32(uint32(0xFFFFFFFC)) // -4 written into the field for REL-style consumers
+// relFix emits a one-byte opcode followed by a PC-relative rel32 fixup —
+// shared by call_sym and jmp_sym.
+func (e *enc) relFix(opcode byte, sym string) error {
+	if sym == "" {
+		return fmt.Errorf("no target symbol")
+	}
+	e.u8(opcode)
+	e.fx = append(e.fx, Fixup{
+		Offset: uint32(len(e.b)), Symbol: sym, Kind: FixupPCRel32, Addend: -4,
+	})
+	e.u32(uint32(0xFFFFFFFC))
+	return nil
 }
 
-func fitsI32(v int64) bool { return v >= -(1 << 31) && v < 1<<31 }
-func fitsU32(v int64) bool { return uint64(v)>>32 == 0 }
+// ---------------------------------------------------------------------------
+// The instruction switch.
+// ---------------------------------------------------------------------------
 
 func (e *enc) one(in *Inst) error {
-	sz := in.Sz
-	if sz == 0 {
-		sz = 8
+	w, err := width(in.Sz)
+	if err != nil {
+		return err
 	}
+
 	switch in.Op {
 	case "label":
+		if in.Lbl == "" {
+			return fmt.Errorf("label has no name")
+		}
+		if _, dup := e.labels[in.Lbl]; dup {
+			return fmt.Errorf("label %q defined twice", in.Lbl)
+		}
 		e.labels[in.Lbl] = len(e.b)
 
 	case "mov":
-		d, s := in.D, in.S
-		switch {
-		case d.K == KReg && s.K == KSym:
-			return e.op(8, byte(d.Reg), Opr{K: KRIP, Sym: s.Sym, Disp: int32(s.Imm)}, x86_64.OpLea)
-		case d.K == KReg && s.K == KImm:
-			switch {
-			case fitsU32(s.Imm): // mov r32, imm32 zero-extends to 64
-				if x86_64.HiBit(d.Reg) != 0 {
-					e.u8(0x41)
-				}
-				e.u8(x86_64.OpMovImmR + x86_64.LoBits(d.Reg))
-				e.u32(uint32(s.Imm))
-			case fitsI32(s.Imm): // REX.W C7 /0 sign-extends imm32
-				e.rex(true, 0, R(d.Reg))
-				e.u8(x86_64.OpMovImm32, x86_64.PackModRM(x86_64.ModReg, 0, x86_64.LoBits(d.Reg)))
-				e.u32(uint32(s.Imm))
-			default: // movabs REX.W B8+r imm64
-				e.u8(0x48 | x86_64.HiBit(d.Reg))
-				e.u8(x86_64.OpMovImmR + x86_64.LoBits(d.Reg))
-				e.u64(uint64(s.Imm))
-			}
-		case d.K == KReg && s.K == KReg:
-			return e.op(sz, byte(s.Reg), R(d.Reg), x86_64.OpMovRM)
-		case d.K == KReg && (s.K == KMem || s.K == KRIP):
-			return e.op(sz, byte(d.Reg), s, x86_64.OpMovMR)
-		case (d.K == KMem || d.K == KRIP) && s.K == KReg:
-			if sz == 1 {
-				return e.op(4, byte(s.Reg), d, x86_64.OpMovRM8) // no REX.W; AL..BL sources only
-			}
-			return e.op(sz, byte(s.Reg), d, x86_64.OpMovRM)
-		case d.K == KMem && s.K == KImm:
-			if !fitsI32(s.Imm) {
-				return fmt.Errorf("encode: mov m, imm beyond int32")
-			}
-			if err := e.op(sz, 0, d, x86_64.OpMovImm32); err != nil {
-				return err
-			}
-			e.u32(uint32(s.Imm))
-		default:
-			return fmt.Errorf("encode: bad mov operands")
-		}
+		return e.mov(in, w)
 
-	case "movzx":
-		if sz == 4 { // mov r32, r/m32 zero-extends to 64 by definition
-			return e.op(4, byte(in.D.Reg), in.S, x86_64.OpMovMR)
-		}
-		op2 := byte(x86_64.OpMovzx8)
-		if sz == 2 {
-			op2 = x86_64.OpMovzx16
-		}
-		return e.op(4, byte(in.D.Reg), in.S, 0x0F, op2)
+	case "movabs":
+		return e.movabs(in)
 
-	case "movsx":
-		if sz == 4 { // movsxd r64, r/m32
-			return e.op(8, byte(in.D.Reg), in.S, x86_64.OpMovsxd)
+	case "movzx", "movsx":
+		if in.Sz != 1 && in.Sz != 2 {
+			return fmt.Errorf("source width must be 1 or 2, got %d", in.Sz)
 		}
-		op2 := byte(x86_64.OpMovsx8)
-		if sz == 2 {
-			op2 = x86_64.OpMovsx16
-		}
-		return e.op(8, byte(in.D.Reg), in.S, 0x0F, op2) // sign-extend to 64
-
-	case "lea":
-		return e.op(8, byte(in.D.Reg), in.S, x86_64.OpLea)
-
-	case "add", "or", "and", "sub", "xor", "cmp":
-		alu := x86_64.ALUOpcodes[in.Op]
-		d, s := in.D, in.S
-		switch {
-		case d.K == KReg && s.K == KReg:
-			return e.op(sz, byte(s.Reg), R(d.Reg), alu.MR)
-		case d.K == KReg && s.K == KMem:
-			return e.op(sz, byte(d.Reg), s, alu.RM)
-		case d.K == KMem && s.K == KReg:
-			return e.op(sz, byte(s.Reg), d, alu.MR)
-		case s.K == KImm:
-			if !fitsI32(s.Imm) {
-				return fmt.Errorf("encode: %s imm beyond int32 (materialize via mov first)", in.Op)
-			}
-			if err := e.op(sz, alu.Ext, d, 0x81); err != nil {
-				return err
-			}
-			e.u32(uint32(s.Imm))
-		default:
-			return fmt.Errorf("encode: bad %s operands", in.Op)
-		}
-
-	case "test":
-		return e.op(sz, byte(in.S.Reg), R(in.D.Reg), x86_64.OpTest)
-
-	case "imul": // imul r, r/m
-		return e.op(sz, byte(in.D.Reg), in.S, 0x0F, x86_64.OpImulRM)
-
-	case "imul3": // imul r, r/m, imm32
-		if !fitsI32(in.Imm) {
-			return fmt.Errorf("encode: imul3 imm beyond int32")
-		}
-		if err := e.op(sz, byte(in.D.Reg), in.S, x86_64.OpImul3); err != nil {
+		dr, err := reg(in.D, "destination")
+		if err != nil {
 			return err
 		}
-		e.u32(uint32(in.Imm))
+		var rn rexNeed
+		rn.w = true // movzx/movsx target a full register; REX.W is the 64-bit widen
+		rn.r = dr.NeedsREXBit()
+		rn.memREX(in.S)
+		if in.Sz == 1 && in.S.Kind == OReg {
+			if in.S.Reg == RRAX || in.S.Reg == RRCX || in.S.Reg == RRDX || in.S.Reg == RRBX {
+				// al/cl/dl/bl — fine
+			} else {
+				rn.byteRegREX(in.S.Reg)
+			}
+		}
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		op2 := byte(0xB6) // movzx r, r/m8
+		switch {
+		case in.Op == "movzx" && in.Sz == 2:
+			op2 = 0xB7
+		case in.Op == "movsx" && in.Sz == 1:
+			op2 = 0xBE
+		case in.Op == "movsx" && in.Sz == 2:
+			op2 = 0xBF
+		}
+		e.u8(0x0F, op2)
+		return e.mem(dr.Low3(), in.S)
 
-	case "not", "neg", "mul1", "imul1", "div", "idiv":
-		return e.op(sz, x86_64.Grp3Ext[in.Op], in.S, 0xF7)
+	case "lea":
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		if in.S.Kind != OMem {
+			return fmt.Errorf("source must be a memory operand")
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = dr.NeedsREXBit()
+		rn.memREX(in.S)
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x8D)
+		return e.mem(dr.Low3(), in.S)
+
+	case "add", "or", "and", "sub", "xor", "cmp":
+		return e.alu(in, w)
+
+	case "test":
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		sr, err := reg(in.S, "source")
+		if err != nil {
+			return err
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = sr.NeedsREXBit() // reg field carries the source here
+		rn.b = dr.NeedsREXBit()
+		if w == 1 {
+			rn.byteRegREX(sr)
+			rn.byteRegREX(dr)
+		}
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		op := byte(0x85)
+		if w == 1 {
+			op = 0x84
+		}
+		e.u8(op, isax64.PackModRM(isax64.ModReg, sr.Low3(), dr.Low3()))
+
+	case "imul2": // 0F AF /r
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = dr.NeedsREXBit()
+		rn.memREX(in.S)
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(isax64.Imul2Esc, isax64.Imul2Op)
+		return e.mem(dr.Low3(), in.S)
+
+	case "imul3": // 69 / 6B /r
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = dr.NeedsREXBit()
+		rn.memREX(in.S)
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		if isax64.FitsImm8(in.Imm) {
+			e.u8(isax64.Imul3Imm8)
+			if err := e.mem(dr.Low3(), in.S); err != nil {
+				return err
+			}
+			e.u8(byte(in.Imm))
+			break
+		}
+		e.u8(isax64.Imul3Imm32)
+		if err := e.mem(dr.Low3(), in.S); err != nil {
+			return err
+		}
+		// imm32 even at width 8: the field is sign-extended to 64 bits.
+		return e.imm(4, Imm(in.Imm))
+
+	case "not", "neg", "mul", "imul1", "div", "idiv":
+		name := in.Op
+		if name == "imul1" {
+			name = "imul"
+		}
+		g3, ok := isax64.Group3ByName(name)
+		if !ok || g3.HasImm {
+			return fmt.Errorf("not a single-operand group-3 instruction")
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.memREX(in.S)
+		if w == 1 && in.S.Kind == OReg {
+			rn.byteRegREX(in.S.Reg)
+		}
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		if w == 1 {
+			e.u8(isax64.Group3Byte)
+		} else {
+			e.u8(isax64.Group3)
+		}
+		return e.mem(g3.Ext, in.S)
 
 	case "inc", "dec":
-		return e.op(sz, x86_64.Grp5Ext[in.Op], in.S, 0xFF)
+		// The one-byte 0x40+r / 0x48+r forms are gone in long mode — those
+		// bytes are REX prefixes now. inc/dec must use the group-5 ModRM
+		// forms: FF /0 (inc) and FF /1 (dec), FE for the byte width.
+		var rn rexNeed
+		rn.w = w == 8
+		rn.memREX(in.D)
+		if w == 1 && in.D.Kind == OReg {
+			rn.byteRegREX(in.D.Reg)
+		}
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		if w == 1 {
+			e.u8(0xFE)
+		} else {
+			e.u8(0xFF)
+		}
+		ext := byte(0) // inc
+		if in.Op == "dec" {
+			ext = 1
+		}
+		return e.mem(ext, in.D)
 
-	case "cdq":
-		e.u8(x86_64.OpCdq)
 	case "cqo":
-		e.u8(x86_64.PackREX(true, false, false, false), x86_64.OpCdq)
+		// REX.W CDQ (0x99) sign-extends RAX into RDX:RAX. Without REX.W
+		// this is CDQ (EAX into EDX:EAX); the 64-bit backend wants the
+		// wide form by default.
+		if w == 8 {
+			e.u8(isax64.PackREX(true, false, false, false))
+		} else {
+			e.sizePrefix(w)
+		}
+		e.u8(0x99)
 
 	case "shl", "shr", "sar", "rol", "ror":
-		ext := x86_64.ShiftExt[in.Op]
-		if in.S.K == KImm { // Cx /ext ib
-			opc := byte(0xC1)
-			if sz == 1 {
-				opc = 0xC0
+		sh, ok := isax64.ShiftByName(in.Op)
+		if !ok {
+			return fmt.Errorf("unknown shift op")
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.memREX(in.D)
+		if w == 1 && in.D.Kind == OReg {
+			rn.byteRegREX(in.D.Reg)
+		}
+		e.sizePrefix(w)
+		if in.S.Kind == OImm {
+			if in.S.Sym != "" {
+				return fmt.Errorf("shift count cannot be a symbol")
 			}
-			if err := e.op(sz, ext, in.D, opc); err != nil {
+			if in.S.Imm == 1 {
+				if err := rn.emit(e); err != nil {
+					return err
+				}
+				if w == 1 {
+					e.u8(isax64.ShiftOneB)
+				} else {
+					e.u8(isax64.ShiftOne)
+				}
+				return e.mem(sh.Ext, in.D)
+			}
+			if err := rn.emit(e); err != nil {
+				return err
+			}
+			if w == 1 {
+				e.u8(isax64.ShiftImm8B)
+			} else {
+				e.u8(isax64.ShiftImm8)
+			}
+			if err := e.mem(sh.Ext, in.D); err != nil {
 				return err
 			}
 			e.u8(byte(in.S.Imm))
-		} else { // by CL: Dx /ext
-			opc := byte(0xD3)
-			if sz == 1 {
-				opc = 0xD2
-			}
-			return e.op(sz, ext, in.D, opc)
+			break
 		}
-
-	case "setcc": // 0F 9x /0, low byte of d (AL..BL without REX, in this bring-up)
-		if in.D.Reg > x86_64.RBX {
-			return fmt.Errorf("encode: setcc needs AL..BL in this bring-up")
+		if _, err := reg(in.S, "count"); err != nil {
+			return err
 		}
-		e.u8(0x0F, x86_64.OpSetccBase+in.CC, x86_64.PackModRM(x86_64.ModReg, 0, x86_64.LoBits(in.D.Reg)))
+		if in.S.Reg != RRCX {
+			return fmt.Errorf("variable shift count must be in cl")
+		}
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		if w == 1 {
+			e.u8(isax64.ShiftCLB)
+		} else {
+			e.u8(isax64.ShiftCL)
+		}
+		return e.mem(sh.Ext, in.D)
 
-	case "cmovcc": // 0F 4x /r
-		return e.op(sz, byte(in.D.Reg), in.S, 0x0F, x86_64.OpCmovccBase+in.CC)
+	case "setcc":
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		// setcc writes a byte. Any GPR is byte-addressable with REX, but
+		// ah/ch/dh/bh are not reachable — force/allow REX accordingly.
+		var rn rexNeed
+		rn.b = dr.NeedsREXBit()
+		rn.byteRegREX(dr)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x0F, 0x90+in.CC, isax64.PackModRM(isax64.ModReg, 0, dr.Low3()))
+
+	case "cmovcc":
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = dr.NeedsREXBit()
+		rn.memREX(in.S)
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x0F, 0x40+in.CC)
+		return e.mem(dr.Low3(), in.S)
 
 	case "jmp":
-		e.u8(x86_64.OpJmpRel32)
+		if in.Lbl == "" {
+			return fmt.Errorf("no target label")
+		}
+		e.u8(0xE9)
 		e.patches = append(e.patches, patch{pos: len(e.b), lbl: in.Lbl})
 		e.u32(0)
 
 	case "jcc":
-		e.u8(0x0F, x86_64.OpJccBase+in.CC)
+		if in.Lbl == "" {
+			return fmt.Errorf("no target label")
+		}
+		e.u8(0x0F, 0x80+in.CC)
 		e.patches = append(e.patches, patch{pos: len(e.b), lbl: in.Lbl})
 		e.u32(0)
 
-	case "jmp_sym":
-		e.fixupJump(x86_64.OpJmpRel32, in.Sym)
-
 	case "call_sym":
-		e.fixupJump(x86_64.OpCallRel32, in.Sym)
+		return e.relFix(0xE8, in.Sym)
+
+	case "jmp_sym":
+		return e.relFix(0xE9, in.Sym)
 
 	case "call_r":
-		if x86_64.HiBit(in.S.Reg) != 0 {
-			e.u8(0x41)
+		// Near call/jmp default to 64-bit operand size in long mode, so no
+		// REX.W is needed — only REX.B for an extended target register.
+		sr, err := reg(in.S, "target")
+		if err != nil {
+			return err
 		}
-		e.u8(0xFF, x86_64.PackModRM(x86_64.ModReg, x86_64.OpCallRegExt, x86_64.LoBits(in.S.Reg)))
+		rn := rexNeed{b: sr.NeedsREXBit()}
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0xFF, isax64.PackModRM(isax64.ModReg, 2, sr.Low3()))
 
 	case "jmp_r":
-		if x86_64.HiBit(in.S.Reg) != 0 {
-			e.u8(0x41)
+		sr, err := reg(in.S, "target")
+		if err != nil {
+			return err
 		}
-		e.u8(0xFF, x86_64.PackModRM(x86_64.ModReg, x86_64.OpJmpRegExt, x86_64.LoBits(in.S.Reg)))
+		rn := rexNeed{b: sr.NeedsREXBit()}
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0xFF, isax64.PackModRM(isax64.ModReg, 4, sr.Low3()))
 
-	case "push": // 64-bit, no REX.W needed
-		if x86_64.HiBit(in.S.Reg) != 0 {
-			e.u8(0x41)
+	case "push":
+		switch in.S.Kind {
+		case OImm:
+			e.u8(0x68)
+			return e.imm(4, in.S)
+		case OReg:
+			sr, err := reg(in.S, "source")
+			if err != nil {
+				return err
+			}
+			// push defaults to 64-bit; only REX.B for r8-r15.
+			if sr.NeedsREXBit() {
+				e.u8(isax64.PackREX(false, false, false, true))
+			}
+			e.u8(0x50 + sr.Low3())
+		case OMem:
+			var rn rexNeed
+			rn.memREX(in.S)
+			if err := rn.emit(e); err != nil {
+				return err
+			}
+			e.u8(0xFF)
+			return e.mem(6, in.S)
+		default:
+			return fmt.Errorf("operand must be a register, immediate, or memory reference")
 		}
-		e.u8(x86_64.OpPushBase + x86_64.LoBits(in.S.Reg))
 
 	case "pop":
-		if x86_64.HiBit(in.D.Reg) != 0 {
-			e.u8(0x41)
+		switch in.D.Kind {
+		case OReg:
+			dr, err := reg(in.D, "destination")
+			if err != nil {
+				return err
+			}
+			if dr.NeedsREXBit() {
+				e.u8(isax64.PackREX(false, false, false, true))
+			}
+			e.u8(0x58 + dr.Low3())
+		case OMem:
+			var rn rexNeed
+			rn.memREX(in.D)
+			if err := rn.emit(e); err != nil {
+				return err
+			}
+			e.u8(0x8F)
+			return e.mem(0, in.D)
+		default:
+			return fmt.Errorf("operand must be a register or memory reference")
 		}
-		e.u8(x86_64.OpPopBase + x86_64.LoBits(in.D.Reg))
 
 	case "ret":
-		e.u8(x86_64.OpRet)
+		e.u8(0xC3)
 
 	case "ud2":
-		e.u8(0x0F, x86_64.OpUD2Lo)
+		e.u8(0x0F, 0x0B)
+
+	case "int":
+		if in.Imm == 3 {
+			e.u8(0xCC)
+			break
+		}
+		if in.Imm < 0 || in.Imm > 0xFF {
+			return fmt.Errorf("vector %d is out of range", in.Imm)
+		}
+		e.u8(0xCD, byte(in.Imm))
 
 	case "nop":
-		e.u8(x86_64.OpNop)
+		e.u8(0x90)
 
-	case "syscall":
-		e.u8(0x0F, x86_64.OpSyscallLo)
-
-	case "bsr":
-		return e.op(sz, byte(in.D.Reg), in.S, 0x0F, x86_64.OpBsr)
-
-	case "bsf":
-		return e.op(sz, byte(in.D.Reg), in.S, 0x0F, x86_64.OpBsf)
+	case "bsr", "bsf":
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = dr.NeedsREXBit()
+		rn.memREX(in.S)
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		op2 := byte(0xBD)
+		if in.Op == "bsf" {
+			op2 = 0xBC
+		}
+		e.u8(0x0F, op2)
+		return e.mem(dr.Low3(), in.S)
 
 	case "bswap":
-		if sz == 8 {
-			e.u8(0x48 | x86_64.HiBit(in.D.Reg))
-		} else if x86_64.HiBit(in.D.Reg) != 0 {
-			e.u8(0x41)
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
 		}
-		e.u8(0x0F, x86_64.OpBswapBase+x86_64.LoBits(in.D.Reg))
+		if w != 4 && w != 8 {
+			return fmt.Errorf("only the 32- and 64-bit forms are defined")
+		}
+		rn := rexNeed{w: w == 8, b: dr.NeedsREXBit()}
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x0F, 0xC8+dr.Low3())
 
-	case "xchg": // xchg r/m, r — implicitly locked with a memory operand
-		return e.op(sz, byte(in.S.Reg), in.D, x86_64.OpXchg)
+	case "xchg":
+		sr, err := reg(in.S, "source")
+		if err != nil {
+			return err
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = sr.NeedsREXBit()
+		rn.memREX(in.D)
+		if w == 1 && in.S.Kind == OReg {
+			rn.byteRegREX(sr)
+		}
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		if w == 1 {
+			e.u8(0x86)
+		} else {
+			e.u8(0x87)
+		}
+		return e.mem(sr.Low3(), in.D)
 
 	case "lock_xadd":
-		e.u8(x86_64.PrefixLock) // LOCK precedes REX
-		return e.op(sz, byte(in.S.Reg), in.D, 0x0F, x86_64.OpLockXadd)
+		sr, err := reg(in.S, "source")
+		if err != nil {
+			return err
+		}
+		e.u8(isax64.PrefixF0)
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = sr.NeedsREXBit()
+		rn.memREX(in.D)
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x0F, 0xC1)
+		return e.mem(sr.Low3(), in.D)
 
 	case "lock_cmpxchg":
-		e.u8(x86_64.PrefixLock)
-		return e.op(sz, byte(in.S.Reg), in.D, 0x0F, x86_64.OpLockCmpxchg)
+		sr, err := reg(in.S, "source")
+		if err != nil {
+			return err
+		}
+		e.u8(isax64.PrefixF0)
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = sr.NeedsREXBit()
+		rn.memREX(in.D)
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x0F, 0xB1)
+		return e.mem(sr.Low3(), in.D)
 
 	case "mfence":
-		e.u8(0x0F, x86_64.OpMfence, 0xF0)
+		e.u8(0x0F, 0xAE, 0xF0)
 
 	case "cld":
-		e.u8(x86_64.OpCld)
+		e.u8(0xFC)
 	case "std":
-		e.u8(x86_64.OpStd)
+		e.u8(0xFD)
 	case "rep_movsb":
-		e.u8(x86_64.PrefixRep, x86_64.OpRepMovsb)
+		e.u8(isax64.PrefixF3, 0xA4)
 	case "rep_stosb":
-		e.u8(x86_64.PrefixRep, x86_64.OpRepStosb)
+		e.u8(isax64.PrefixF3, 0xAA)
 
-	case "popcnt": // F3 [REX] 0F B8 /r
-		e.u8(x86_64.PrefixRep) // mandatory prefix precedes REX
-		return e.op(sz, byte(in.D.Reg), in.S, 0x0F, x86_64.OpPopcntLo)
+	case "popcnt": // F3 0F B8 /r
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		e.u8(isax64.PrefixF3)
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = dr.NeedsREXBit()
+		rn.memREX(in.S)
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x0F, 0xB8)
+		return e.mem(dr.Low3(), in.S)
 
 	default:
-		return fmt.Errorf("encode: unknown Inst op %q", in.Op)
+		return fmt.Errorf("unknown inst op")
 	}
 	return nil
+}
+
+// movabs encodes mov r64, imm64 (0xB8+r with REX.W). This is the only form
+// that takes a full 64-bit immediate; a symbol here becomes an abs64
+// relocation. Callers rarely reach for it directly — mov auto-promotes to
+// it — but it exists as its own op for the cases that want the full-width
+// load unconditionally.
+func (e *enc) movabs(in *Inst) error {
+	dr, err := reg(in.D, "destination")
+	if err != nil {
+		return err
+	}
+	if in.S.Kind != OImm {
+		return fmt.Errorf("movabs source must be an immediate")
+	}
+	e.u8(isax64.PackREX(true, false, false, dr.NeedsREXBit()))
+	e.u8(0xB8 + dr.Low3())
+	if in.S.Sym != "" {
+		e.fx = append(e.fx, Fixup{
+			Offset: uint32(len(e.b)), Symbol: in.S.Sym, Kind: FixupAbs64, Addend: in.S.Imm,
+		})
+	}
+	e.u64(uint64(in.S.Imm))
+	return nil
+}
+
+// mov encodes every mov form this backend needs, width-aware throughout.
+// A register-immediate that doesn't fit a sign-extended imm32 (or is a
+// full-width symbol address) is auto-promoted to movabs.
+func (e *enc) mov(in *Inst, w int) error {
+	d, s := in.D, in.S
+	switch {
+	case d.Kind == OReg && s.Kind == OImm:
+		dr, err := reg(d, "destination")
+		if err != nil {
+			return err
+		}
+		// Promote to the 64-bit-immediate form when the value can't be
+		// expressed as a sign-extended imm32, or when it's a symbol we'd
+		// otherwise have to truncate. Otherwise use the compact
+		// C7 /0 imm32 form, which sign-extends into a 64-bit register.
+		if w == 8 && (s.Sym != "" || !isax64.FitsImm32(s.Imm)) {
+			return e.movabs(&Inst{D: d, S: s})
+		}
+		if w == 8 {
+			// mov r/m64, imm32 (sign-extended): C7 /0.
+			rn := rexNeed{w: true, b: dr.NeedsREXBit()}
+			if err := rn.emit(e); err != nil {
+				return err
+			}
+			e.u8(0xC7, isax64.PackModRM(isax64.ModReg, 0, dr.Low3()))
+			return e.imm(4, s)
+		}
+		// Narrower widths: the B8+r imm form at the operand width.
+		var rn rexNeed
+		rn.r = false
+		rn.b = dr.NeedsREXBit()
+		if w == 1 {
+			rn.byteRegREX(dr)
+		}
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		if w == 1 {
+			e.u8(0xB0 + dr.Low3())
+			return e.imm(1, s)
+		}
+		e.u8(0xB8 + dr.Low3())
+		return e.imm(w, s)
+
+	case d.Kind == OReg && s.Kind == OReg:
+		dr, err := reg(d, "destination")
+		if err != nil {
+			return err
+		}
+		sr, err := reg(s, "source")
+		if err != nil {
+			return err
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = sr.NeedsREXBit()
+		rn.b = dr.NeedsREXBit()
+		if w == 1 {
+			rn.byteRegREX(sr)
+			rn.byteRegREX(dr)
+		}
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		if w == 1 {
+			e.u8(0x88, isax64.PackModRM(isax64.ModReg, sr.Low3(), dr.Low3()))
+			return nil
+		}
+		e.u8(0x89, isax64.PackModRM(isax64.ModReg, sr.Low3(), dr.Low3()))
+		return nil
+
+	case d.Kind == OReg && s.Kind == OMem:
+		dr, err := reg(d, "destination")
+		if err != nil {
+			return err
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = dr.NeedsREXBit()
+		rn.memREX(s)
+		if w == 1 {
+			rn.byteRegREX(dr)
+		}
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		if w == 1 {
+			e.u8(0x8A)
+		} else {
+			e.u8(0x8B)
+		}
+		return e.mem(dr.Low3(), s)
+
+	case d.Kind == OMem && s.Kind == OReg:
+		sr, err := reg(s, "source")
+		if err != nil {
+			return err
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = sr.NeedsREXBit()
+		rn.memREX(d)
+		if w == 1 {
+			rn.byteRegREX(sr)
+		}
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		if w == 1 {
+			e.u8(0x88)
+		} else {
+			e.u8(0x89)
+		}
+		return e.mem(sr.Low3(), d)
+
+	case d.Kind == OMem && s.Kind == OImm:
+		// mov r/m, imm — C6 (byte) / C7 (wider), imm is imm32 even at
+		// width 8 (sign-extended). A full 64-bit store-immediate isn't a
+		// single instruction; callers materialize it in a register first.
+		if w == 8 && (s.Sym != "" || !isax64.FitsImm32(s.Imm)) {
+			return fmt.Errorf("64-bit memory immediate must be materialized via a register")
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.memREX(d)
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		if w == 1 {
+			e.u8(0xC6)
+		} else {
+			e.u8(0xC7)
+		}
+		if err := e.mem(0, d); err != nil {
+			return err
+		}
+		iw := w
+		if w == 8 {
+			iw = 4 // the field is 32 bits, sign-extended
+		}
+		return e.imm(iw, s)
+	}
+	return fmt.Errorf("unsupported operand combination")
+}
+
+// alu encodes the six two-operand ALU instructions. Same shape as the
+// 32-bit encoder's alu, with REX folded in and the imm32 immediate field
+// sign-extended into 64-bit operands.
+func (e *enc) alu(in *Inst, w int) error {
+	op, ok := isax64.AluByName(in.Op)
+	if !ok {
+		return fmt.Errorf("unknown alu op")
+	}
+	d, s := in.D, in.S
+
+	switch {
+	case d.Kind == OReg && s.Kind == OReg:
+		dr, err := reg(d, "destination")
+		if err != nil {
+			return err
+		}
+		sr, err := reg(s, "source")
+		if err != nil {
+			return err
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = sr.NeedsREXBit()
+		rn.b = dr.NeedsREXBit()
+		if w == 1 {
+			rn.byteRegREX(sr)
+			rn.byteRegREX(dr)
+		}
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(opByWidth(op.MR, w), isax64.PackModRM(isax64.ModReg, sr.Low3(), dr.Low3()))
+		return nil
+
+	case d.Kind == OReg && s.Kind == OMem:
+		dr, err := reg(d, "destination")
+		if err != nil {
+			return err
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = dr.NeedsREXBit()
+		rn.memREX(s)
+		if w == 1 {
+			rn.byteRegREX(dr)
+		}
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(opByWidth(op.RM, w))
+		return e.mem(dr.Low3(), s)
+
+	case d.Kind == OMem && s.Kind == OReg:
+		sr, err := reg(s, "source")
+		if err != nil {
+			return err
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.r = sr.NeedsREXBit()
+		rn.memREX(d)
+		if w == 1 {
+			rn.byteRegREX(sr)
+		}
+		e.sizePrefix(w)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(opByWidth(op.MR, w))
+		return e.mem(sr.Low3(), d)
+
+	case s.Kind == OImm:
+		if d.Kind != OReg && d.Kind != OMem {
+			return fmt.Errorf("destination must be a register or memory reference")
+		}
+		if w == 8 && (s.Sym != "" || !isax64.FitsImm32(s.Imm)) {
+			return fmt.Errorf("64-bit ALU immediate must be materialized via a register")
+		}
+		var rn rexNeed
+		rn.w = w == 8
+		rn.memREX(d)
+		if w == 1 && d.Kind == OReg {
+			rn.byteRegREX(d.Reg)
+		}
+		e.sizePrefix(w)
+		switch {
+		case s.Sym == "" && w != 1 && isax64.FitsImm8(s.Imm):
+			if err := rn.emit(e); err != nil {
+				return err
+			}
+			e.u8(isax64.AluImm8)
+			if err := e.mem(op.Ext, d); err != nil {
+				return err
+			}
+			e.u8(byte(s.Imm))
+			return nil
+		case s.Sym == "" && d.Kind == OReg && d.Reg == RRAX && (w == 4 || w == 8):
+			if err := rn.emit(e); err != nil {
+				return err
+			}
+			e.u8(op.Acc)
+			return e.imm(4, s)
+		default:
+			if err := rn.emit(e); err != nil {
+				return err
+			}
+			if w == 1 {
+				e.u8(isax64.AluImm8B)
+			} else {
+				e.u8(isax64.AluImm32)
+			}
+			if err := e.mem(op.Ext, d); err != nil {
+				return err
+			}
+			iw := w
+			if w == 8 {
+				iw = 4
+			}
+			return e.imm(iw, s)
+		}
+	}
+	return fmt.Errorf("unsupported operand combination")
+}
+
+// opByWidth turns a word/dword ALU opcode into its byte counterpart. The
+// byte form is the even member of the pair. Unchanged from IA-32 — the
+// opcode-pair regularity is the same, and 64-bit width uses the same
+// dword opcode byte with REX.W supplying the width.
+func opByWidth(op byte, w int) byte {
+	if w == 1 {
+		return op - 1
+	}
+	return op
 }

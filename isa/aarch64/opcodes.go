@@ -1,156 +1,214 @@
 package aarch64
 
-// Data-processing (immediate) ADD/SUB family — [W-form, X-form] base
-// words; the 12-bit unsigned immediate (optionally LSL #12, bit 22) and
-// Rn/Rd are filled in by the caller.
-var DPImmOpcodes = map[string][2]uint32{
-	"add":  {0x11000000, 0x91000000},
-	"adds": {0x31000000, 0xB1000000},
-	"sub":  {0x51000000, 0xD1000000},
-	"subs": {0x71000000, 0xF1000000},
+// ---------------------------------------------------------------------------
+// Barrel-shift types (shifted-register operand).
+// ---------------------------------------------------------------------------
+//
+// A shifted-register operand carries a 2-bit shift type. The four values are
+// facts; which are legal depends on the format, and that restriction is
+// itself a fact worth recording:
+//
+//   - Logical (shifted register) allows all four (LSL/LSR/ASR/ROR).
+//   - Add/sub (shifted register) allows only LSL/LSR/ASR; ROR (0b11) is
+//     UNDEFINED there.
+const (
+	ShiftLSL byte = 0 // logical left
+	ShiftLSR byte = 1 // logical right
+	ShiftASR byte = 2 // arithmetic right
+	ShiftROR byte = 3 // rotate right
+)
+
+var shiftName = [4]string{"lsl", "lsr", "asr", "ror"}
+
+// ShiftName returns the canonical mnemonic for a 2-bit shift type; "?" for
+// out of range.
+func ShiftName(t byte) string {
+	if int(t) >= len(shiftName) {
+		return "?"
+	}
+	return shiftName[t]
 }
 
-// Data-processing (register, shifted) ADD/SUB/AND/ORR/EOR/BIC family —
-// [W-form, X-form] base words; Rm/Rn/Rd filled in by the caller.
-var DPRegOpcodes = map[string][2]uint32{
-	"add":  {0x0B000000, 0x8B000000},
-	"adds": {0x2B000000, 0xAB000000},
-	"sub":  {0x4B000000, 0xCB000000},
-	"subs": {0x6B000000, 0xEB000000},
-	"and":  {0x0A000000, 0x8A000000},
-	"orr":  {0x2A000000, 0xAA000000},
-	"eor":  {0x4A000000, 0xCA000000},
-	"bic":  {0x0A200000, 0x8A200000},
+var shiftByName = map[string]byte{
+	"lsl": ShiftLSL,
+	"lsr": ShiftLSR,
+	"asr": ShiftASR,
+	"ror": ShiftROR,
 }
 
-// ADD/SUB (extended register) — the form used to compute SP-relative
-// addresses that overflow the immediate ADD/SUB's 24-bit range. X-form
-// only; this compiler never needs a W-form SP computation.
-const (
-	OpAddExtX uint32 = 0x8B206000
-	OpSubExtX uint32 = 0xCB206000
-)
-
-// mov_r/mvn/neg's shifted-register forms with Rn fixed to ZR — a
-// mechanical specialization of DPRegOpcodes/DP1Opcodes-shaped
-// instructions, named directly rather than composed at every call site.
-const (
-	OpMovReg uint32 = 0x2A0003E0 // ORR Wd, WZR, Wm  (mov_r, W-form)
-	OpMovRegX uint32 = 0xAA0003E0 // ORR Xd, XZR, Xm  (mov_r, X-form)
-	OpMvnReg uint32 = 0x2A2003E0 // ORN Wd, WZR, Wm
-	OpMvnRegX uint32 = 0xAA2003E0 // ORN Xd, XZR, Xm
-	OpNegReg uint32 = 0x4B0003E0 // SUB Wd, WZR, Wm
-	OpNegRegX uint32 = 0xCB0003E0 // SUB Xd, XZR, Xm
-)
-
-// Data-processing (2-source) family — the 3-bit "opcode" subfield shared
-// by UDIV/SDIV/LSLV/LSRV/ASRV/RORV (base word supplied separately, see
-// OpDP2Base in encoding.go, since it also carries the sf bit).
-var DP2Opcodes = map[string]uint32{
-	"udiv": 0x2, "sdiv": 0x3,
-	"lslv": 0x8, "lsrv": 0x9, "asrv": 0xA, "rorv": 0xB,
+// ParseShift resolves a shift mnemonic to its 2-bit type.
+func ParseShift(s string) (byte, bool) {
+	t, ok := shiftByName[s]
+	return t, ok
 }
 
-const OpDP2Base uint32 = 0x1AC00000
+// ShiftAllowsROR reports whether ROR is a legal shift type for a shifted-
+// register operand in the given family. It is legal for logical operations
+// and UNDEFINED for add/sub.
+func ShiftAllowsROR(logical bool) bool { return logical }
 
-// Data-processing (1-source) family — [W-form, X-form] base words for
-// RBIT/REV16/REV/CLZ.
-var DP1Opcodes = map[string][2]uint32{
-	"rbit":  {0x5AC00000, 0xDAC00000},
-	"rev16": {0x5AC00400, 0xDAC00400},
-	"rev":   {0x5AC00800, 0xDAC00C00},
-	"clz":   {0x5AC01000, 0xDAC01000},
+// ---------------------------------------------------------------------------
+// Add / subtract op and S bits.
+// ---------------------------------------------------------------------------
+//
+// The immediate, shifted-register, and extended-register add/sub forms share
+// two selector bits: op (bit 30) picks add vs sub, and S (bit 29) picks
+// flag-setting. The four (op,S) combinations name add/adds/sub/subs; the
+// flag-setting forms are what CMN/CMP and NEG/NEGS alias with a zero
+// register in Rd or Rn. The operand *form* differs by opcode base (below);
+// these bits are shared across all of them.
+type AddSubOp struct {
+	Name string
+	Op   byte // bit 30: 0 add, 1 sub
+	S    byte // bit 29: 0 plain, 1 set flags
 }
 
-// 3-source multiply family — fixed base words; Rd/Rn/Rm/Ra filled in by
-// the caller. MUL is MADD with Ra=ZR baked into the base word rather than
-// a separate opcode.
-const (
-	OpMul   uint32 = 0x1B007C00
-	OpMSub  uint32 = 0x1B008000
-	OpSMulH uint32 = 0x9B407C00
-	OpUMulH uint32 = 0x9BC07C00
-	OpSMull uint32 = 0x9B207C00
-	OpUMull uint32 = 0x9BA07C00
-)
-
-// CSET/CSEL — CSET is CSINC Rd, ZR, ZR, invert(cond) with a fixed base
-// word; CSEL carries the sf bit itself (see encoding.go).
-const (
-	OpCSet  uint32 = 0x1A9F07E0
-	OpCSel  uint32 = 0x1A800000
-)
-
-// LdStClass is one integer load/store's {scaled unsigned-immediate form,
-// unscaled ("LDUR"-style) form, and the scale (== access size) the scaled
-// form's immediate field is a multiple of}.
-type LdStClass struct {
-	Scaled, Unscaled uint32
-	Scale            uint32
+var AddSubOps = []AddSubOp{
+	{"add", 0, 0},
+	{"adds", 0, 1},
+	{"sub", 1, 0},
+	{"subs", 1, 1},
 }
 
-var LdClasses = map[int]LdStClass{
-	1: {0x39400000, 0x38400000, 1},
-	2: {0x79400000, 0x78400000, 2},
-	4: {0xB9400000, 0xB8400000, 4},
-	8: {0xF9400000, 0xF8400000, 8},
+// Fixed opcode bases for the three add/sub operand forms, given as the whole
+// 32-bit word with sf, op, S, and the operands still zero. OR in the sf bit,
+// op<<30, S<<29, the registers, and the form-specific immediate/shift.
+const (
+	AddSubImmBase      uint32 = 0x11000000 // sf 0 0 100010 sh imm12 Rn Rd
+	AddSubShiftedBase  uint32 = 0x0B000000 // sf 0 0 01011 shift 0 Rm imm6 Rn Rd
+	AddSubExtendedBase uint32 = 0x0B200000 // sf 0 0 01011 001 Rm option imm3 Rn Rd
+)
+
+var (
+	addSubByName = map[string]AddSubOp{}
+)
+
+func init() {
+	for _, a := range AddSubOps {
+		addSubByName[a.Name] = a
+	}
 }
 
-var StClasses = map[int]LdStClass{
-	1: {0x39000000, 0x38000000, 1},
-	2: {0x79000000, 0x78000000, 2},
-	4: {0xB9000000, 0xB8000000, 4},
-	8: {0xF9000000, 0xF8000000, 8},
+// AddSubByName resolves add/adds/sub/subs to its (op,S) bits.
+func AddSubByName(name string) (AddSubOp, bool) { a, ok := addSubByName[name]; return a, ok }
+
+// ---------------------------------------------------------------------------
+// Logical group.
+// ---------------------------------------------------------------------------
+//
+// The logical operations select on a 2-bit opc (bits 30:29) and, in the
+// shifted-register form, an N bit (bit 21) that inverts the second operand.
+// The immediate form has no N-as-invert (its bit 22 N is part of the bitmask
+// element-size encoding), so the negated variants (bic/orn/eon/bics) exist
+// only as shifted-register instructions — which is exactly the kind of
+// per-form irregularity worth tabulating rather than just listing names.
+type LogicalOp struct {
+	Name string
+	Opc  byte // bits 30:29
+	// Negate is the N bit (bit 21) in the shifted-register form: true for
+	// the bic/orn/eon/bics variants that invert the second operand.
+	Negate bool
+	// SetsFlags is true for ands/bics (opc 11), which update NZCV.
+	SetsFlags bool
+	// HasImmForm is false for the negated variants, which the immediate
+	// encoding cannot express.
+	HasImmForm bool
 }
 
-// Byte load/store, register offset — LDRB/STRB Wt, [Xn, Xm].
+// LogicalOps lists the eight shifted-register logical operations. The four
+// non-negated ones (and/orr/eor/ands) also have immediate forms.
+var LogicalOps = []LogicalOp{
+	{"and", 0, false, false, true},
+	{"bic", 0, true, false, false},
+	{"orr", 1, false, false, true},
+	{"orn", 1, true, false, false},
+	{"eor", 2, false, false, true},
+	{"eon", 2, true, false, false},
+	{"ands", 3, false, true, true},
+	{"bics", 3, true, true, false},
+}
+
 const (
-	OpLdrbReg uint32 = 0x38606800
-	OpStrbReg uint32 = 0x38206800
+	LogicalImmBase     uint32 = 0x12000000 // sf opc 100100 N immr imms Rn Rd
+	LogicalShiftedBase uint32 = 0x0A000000 // sf opc 01010 shift N Rm imm6 Rn Rd
 )
 
-// Load-acquire/store-release/exclusive family. The 2-bit size field is
-// packed separately (SizeBits, encoding.go) since it's shared across all
-// four.
-const (
-	OpLdar  uint32 = 0x08DFFC00
-	OpStlr  uint32 = 0x089FFC00
-	OpLdaxr uint32 = 0x085FFC00
-	OpStlxr uint32 = 0x0800FC00
-	OpClrex uint32 = 0xD5033F5F
-	OpDmb   uint32 = 0xD5033BBF
-)
+var logicalByName = map[string]LogicalOp{}
 
-// Branch/system fixed words. Bxx/BL/B.cond/CBZ/CBNZ leave their
-// label/symbol-relative field for a fixup or patch to fill in; RET's
-// implicit-X30 form and SVC/BRK's fixed encodings need nothing further.
-const (
-	OpB     uint32 = 0x14000000 // B          — imm26
-	OpBL    uint32 = 0x94000000 // BL         — imm26
-	OpBCond uint32 = 0x54000000 // B.cond     — cond[3:0], imm19
-	OpCBase uint32 = 0x34000000 // CBZ (|1<<24 for CBNZ, sf in bit 31) — imm19
-	OpBLR   uint32 = 0xD63F0000 // BLR Xn
-	OpBR    uint32 = 0xD61F0000 // BR Xn
-	OpRet   uint32 = 0xD65F03C0 // RET        (implicit X30)
-	OpSVC   uint32 = 0xD4000001 // SVC #imm16
-	OpBrk   uint32 = 0xD4200000 // BRK #0
-)
+func init() {
+	for _, l := range LogicalOps {
+		logicalByName[l.Name] = l
+	}
+}
 
-// MOVZ/MOVN/MOVK — X-form only (this compiler never needs a W-form
-// 64-bit-immediate sequence). The 2-bit "hw" shift-amount field (shift/16)
-// and 16-bit immediate are filled in by the caller.
-const (
-	OpMovnX uint32 = 0x92800000
-	OpMovzX uint32 = 0xD2800000
-	OpMovkX uint32 = 0xF2800000
-)
+// LogicalByName resolves a logical mnemonic to its opc/N/flags facts.
+func LogicalByName(name string) (LogicalOp, bool) { l, ok := logicalByName[name]; return l, ok }
 
-// STP (pre-index)/LDP (post-index), 64-bit pair — the two instructions
-// lower/aarch64 will use to save/restore FP/LR as ordinary instructions
-// rather than have the encoder splice them in automatically (see
-// isa/aarch64/encoder's README note on this). imm7 = disp/8, packed by
-// PackPair in encoding.go.
-const (
-	OpSTPPre64  uint32 = 0xA9800000
-	OpLDPPost64 uint32 = 0xA8C00000
-)
+// ---------------------------------------------------------------------------
+// Move-wide group.
+// ---------------------------------------------------------------------------
+//
+// Move-wide selects on a 2-bit opc (bits 30:29): MOVN 00, MOVZ 10, MOVK 11.
+// opc 01 is unallocated. MOVN writes the inverse of the shifted immediate,
+// MOVZ writes it against a zeroed register, MOVK keeps the other halfwords.
+type MoveWideOp struct {
+	Name string
+	Opc  byte // bits 30:29
+}
+
+var MoveWideOps = []MoveWideOp{
+	{"movn", 0},
+	{"movz", 2},
+	{"movk", 3},
+}
+
+// MoveWideBase is the fixed word for the group: sf opc 100101 hw imm16 Rd.
+const MoveWideBase uint32 = 0x12800000
+
+var moveWideByName = map[string]MoveWideOp{}
+
+func init() {
+	for _, m := range MoveWideOps {
+		moveWideByName[m.Name] = m
+	}
+}
+
+// MoveWideByName resolves movn/movz/movk to its opc.
+func MoveWideByName(name string) (MoveWideOp, bool) { m, ok := moveWideByName[name]; return m, ok }
+
+// ---------------------------------------------------------------------------
+// Data-processing (2 source): variable shifts and divides.
+// ---------------------------------------------------------------------------
+//
+// These select on a 6-bit opcode field (bits 15:10) in a shared format
+// (sf 0 0 11010110 Rm opcode Rn Rd). The variable-shift operations
+// (lslv/lsrv/asrv/rorv) are the register-amount analog of the shift-type
+// field above; udiv/sdiv are the only integer divides.
+type DataProc2Op struct {
+	Name   string
+	Opcode byte // bits 15:10
+}
+
+var DataProc2Ops = []DataProc2Op{
+	{"udiv", 0x02},
+	{"sdiv", 0x03},
+	{"lslv", 0x08},
+	{"lsrv", 0x09},
+	{"asrv", 0x0A},
+	{"rorv", 0x0B},
+}
+
+// DataProc2Base is the shared word: sf 0 0 11010110 Rm opcode Rn Rd.
+const DataProc2Base uint32 = 0x1AC00000
+
+var dataProc2ByName = map[string]DataProc2Op{}
+
+func init() {
+	for _, d := range DataProc2Ops {
+		dataProc2ByName[d.Name] = d
+	}
+}
+
+// DataProc2ByName resolves a 2-source data-processing mnemonic to its
+// opcode.
+func DataProc2ByName(name string) (DataProc2Op, bool) { d, ok := dataProc2ByName[name]; return d, ok }

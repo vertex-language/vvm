@@ -1,3 +1,4 @@
+// encoder/encode.go
 package encoder
 
 import (
@@ -6,18 +7,17 @@ import (
 	isaarm "github.com/vertex-language/vvm/isa/arm"
 )
 
-// Encode turns a fully-resolved Inst stream into A32 machine words,
-// serialized in the byte order requested by big (true = big-endian words
-// and data, false = little-endian). Nothing about this function is
-// specific to any particular lowering pipeline or ABI — it doesn't know
-// about stack frames or calling conventions; a caller that wants those
-// builds them as ordinary push/mov/sub/pop/b Insts and prepends/appends
-// them itself.
-func Encode(insts []Inst, big bool) ([]byte, []Fixup, error) {
-	e := &enc{labels: map[string]int{}, be: big}
+// Encode turns a fully-resolved Inst stream into A32 machine words. Like
+// the x86 encoders it knows nothing about stack frames or calling
+// conventions — a caller that wants those builds them as ordinary
+// push/mov/sub/ldr/pop Insts and prepends/appends them itself. Words are
+// emitted little-endian (the instruction-stream order for the `arm` and
+// modern BE-8 `armeb` targets).
+func Encode(insts []Inst) ([]byte, []Fixup, error) {
+	e := &enc{labels: map[string]int{}}
 	for i := range insts {
 		if err := e.one(&insts[i]); err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("encode: %s: %w", insts[i].Op, err)
 		}
 	}
 	for _, p := range e.patches {
@@ -25,9 +25,13 @@ func Encode(insts []Inst, big bool) ([]byte, []Fixup, error) {
 		if !ok {
 			return nil, nil, fmt.Errorf("encode: undefined label %q", p.lbl)
 		}
-		rel := int32(t-(p.pos+isaarm.PCBias)) >> 2
-		w := e.word(p.pos) | uint32(rel)&0xFFFFFF
-		e.put32(p.pos, w)
+		// Branch offset is relative to PC = instruction address + 8, in
+		// words. Merge the 24-bit field into the existing word, preserving
+		// the condition and the 101L opcode bits.
+		off := int32(t-(p.pos+8)) >> 2
+		w := getLE32(e.b[p.pos:])
+		w = w&0xFF000000 | isaarm.EncodeBranchImm24(off)
+		putLE32(e.b[p.pos:], w)
 	}
 	return e.b, e.fx, nil
 }
@@ -42,252 +46,453 @@ type enc struct {
 	fx      []Fixup
 	labels  map[string]int
 	patches []patch
-	be      bool
 }
 
-func (e *enc) u32(v uint32) {
-	if e.be {
-		e.b = append(e.b, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
-		return
+func (e *enc) word(w uint32) {
+	e.b = append(e.b, byte(w), byte(w>>8), byte(w>>16), byte(w>>24))
+}
+
+func getLE32(b []byte) uint32 {
+	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+}
+func putLE32(b []byte, v uint32) {
+	b[0], b[1], b[2], b[3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
+}
+
+func bit(x bool) uint32 {
+	if x {
+		return 1
 	}
-	e.b = append(e.b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+	return 0
 }
 
-func (e *enc) word(pos int) uint32 {
-	if e.be {
-		return uint32(e.b[pos])<<24 | uint32(e.b[pos+1])<<16 |
-			uint32(e.b[pos+2])<<8 | uint32(e.b[pos+3])
+func abs32(v int32) int32 {
+	if v < 0 {
+		return -v
 	}
-	return uint32(e.b[pos]) | uint32(e.b[pos+1])<<8 |
-		uint32(e.b[pos+2])<<16 | uint32(e.b[pos+3])<<24
+	return v
 }
 
-func (e *enc) put32(pos int, v uint32) {
-	if e.be {
-		e.b[pos], e.b[pos+1], e.b[pos+2], e.b[pos+3] =
-			byte(v>>24), byte(v>>16), byte(v>>8), byte(v)
-		return
+// reg validates that an operand is an encodable register and returns it.
+func reg(o Opr, role string) (Reg, error) {
+	if o.Kind != OReg {
+		return 0, fmt.Errorf("%s operand must be a register", role)
 	}
-	e.b[pos], e.b[pos+1], e.b[pos+2], e.b[pos+3] =
-		byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
-}
-
-// movImm materializes v into rd flag-free: movw, plus movt when needed.
-func (e *enc) movImm(rd Reg, v uint32) {
-	lo, hi := v&0xFFFF, v>>16
-	imm4, imm12 := isaarm.SplitImm16(lo)
-	e.u32(isaarm.BaseMOVW | imm4<<16 | uint32(rd)<<12 | imm12)
-	if hi != 0 {
-		imm4, imm12 = isaarm.SplitImm16(hi)
-		e.u32(isaarm.BaseMOVT | imm4<<16 | uint32(rd)<<12 | imm12)
+	if !o.Reg.IsGPR() {
+		return 0, fmt.Errorf("%s operand names no encodable register", role)
 	}
+	return o.Reg, nil
 }
 
-// movSym materializes sym+addend into rd via a fixed movw/movt pair, both
-// carrying fixups; the addend halves are pre-encoded into the imm fields
-// for REL-style consumers.
-func (e *enc) movSym(rd Reg, sym string, addend int64) {
-	lo, hi := uint32(addend)&0xFFFF, (uint32(addend)>>16)&0xFFFF
-	imm4, imm12 := isaarm.SplitImm16(lo)
-	e.fx = append(e.fx, Fixup{Offset: uint32(len(e.b)), Symbol: sym, Kind: FixupMovwAbs, Addend: addend})
-	e.u32(isaarm.BaseMOVW | imm4<<16 | uint32(rd)<<12 | imm12)
-	imm4, imm12 = isaarm.SplitImm16(hi)
-	e.fx = append(e.fx, Fixup{Offset: uint32(len(e.b)), Symbol: sym, Kind: FixupMovtAbs, Addend: addend})
-	e.u32(isaarm.BaseMOVT | imm4<<16 | uint32(rd)<<12 | imm12)
-}
+// ---------------------------------------------------------------------------
+// Shifter operand (Operand2).
+// ---------------------------------------------------------------------------
 
-// dp emits a data-processing op d := d OP s (or just flags, for the
-// cmp/cmn/tst forms), falling back to RIP for immediates outside the
-// rotated-immediate range.
-func (e *enc) dp(op string, sBit uint32, rn, rd Reg, s Opr) error {
-	d, ok := isaarm.DPByName(op)
-	if !ok {
-		return fmt.Errorf("encode: unknown data-processing op %q", op)
-	}
-	base := 0xE0000000 | d.Code<<21 | sBit<<20 | uint32(rn)<<16 | uint32(rd)<<12
-	switch s.Kind {
-	case OReg:
-		e.u32(base | uint32(s.Reg))
-		return nil
+// encodeOp2 encodes an OReg or OImm operand into the 12-bit Operand2 field,
+// reporting the I bit alongside it. An OImm that isn't a valid modified
+// immediate is an error here — turning it into a MOVW/MOVT pair or a
+// literal load is a lowering decision, not the encoder's.
+func (e *enc) encodeOp2(m Opr) (i bool, op2 uint32, err error) {
+	switch m.Kind {
 	case OImm:
-		if imm, fits := isaarm.PackImm12(uint32(int32(s.Imm))); fits {
-			e.u32(base | 1<<25 | imm)
-			return nil
+		if m.Sym != "" {
+			return false, 0, fmt.Errorf("symbolic immediate must be built with movw/movt")
 		}
-		e.movImm(RIP, uint32(int32(s.Imm)))
-		e.u32(base | uint32(RIP))
-		return nil
+		rot, imm8, ok := isaarm.EncodeModImm(uint32(m.Imm))
+		if !ok {
+			return false, 0, fmt.Errorf("%#x is not a valid modified immediate", uint32(m.Imm))
+		}
+		return true, uint32(rot)<<8 | uint32(imm8), nil
+	case OReg:
+		if !m.Reg.IsGPR() {
+			return false, 0, fmt.Errorf("operand2 names no encodable register")
+		}
+		rm := uint32(m.Reg.Field())
+		if m.ShiftReg != RNone {
+			if !m.ShiftReg.IsGPR() {
+				return false, 0, fmt.Errorf("shift register is not encodable")
+			}
+			if m.ShiftReg == R15 {
+				return false, 0, fmt.Errorf("a register-specified shift cannot use the pc")
+			}
+			return false, uint32(m.ShiftReg.Field())<<8 | uint32(m.Shift&3)<<5 | 1<<4 | rm, nil
+		}
+		return false, uint32(m.ShiftAmt&0x1F)<<7 | uint32(m.Shift&3)<<5 | rm, nil
 	}
-	return fmt.Errorf("encode: bad %s operand", op)
+	return false, 0, fmt.Errorf("operand2 must be a register or immediate")
 }
 
-func (e *enc) branchFix(base uint32, sym string, kind FixupKind) {
-	e.fx = append(e.fx, Fixup{Offset: uint32(len(e.b)), Symbol: sym, Kind: kind, Addend: -int64(isaarm.PCBias)})
-	e.u32(base | 0x00FFFFFE) // (-PCBias >> 2) & 0xFFFFFF pre-encoded for REL
+func dpWord(cc, opcode byte, s bool, rn, rd byte, i bool, op2 uint32) uint32 {
+	return uint32(cc)<<28 | bit(i)<<25 | uint32(opcode)<<21 | bit(s)<<20 |
+		uint32(rn)<<16 | uint32(rd)<<12 | op2&0xFFF
 }
 
-// memOff emits an LDR/STR-class access: base+disp with the U (add/sub)
-// bit chosen by the displacement's sign; word/byte forms take a 12-bit
-// displacement, halfword forms an 8-bit one split across two fields.
-func (e *enc) memOff(base uint32, rn, rt Reg, disp int32, halfword bool) error {
-	u := uint32(1 << 23)
-	d := disp
-	if d < 0 {
-		u, d = 0, -d
-	}
-	if halfword {
-		if d > 0xFF {
-			return fmt.Errorf("encode: halfword displacement %d out of range", disp)
+// ---------------------------------------------------------------------------
+// The instruction switch.
+// ---------------------------------------------------------------------------
+
+func (e *enc) one(in *Inst) error {
+	cc := in.CC.code()
+
+	// Data-processing is driven entirely off the ISA table: opcode plus the
+	// three operand-shape facts (writes Rd? uses Rn? forces S?).
+	if d, ok := isaarm.DataProcByName(in.Op); ok {
+		i, op2, err := e.encodeOp2(in.M)
+		if err != nil {
+			return err
 		}
-		e.u32(base | u | uint32(rn)<<16 | uint32(rt)<<12 | uint32(d>>4)<<8 | uint32(d&0xF))
+		var rd, rn byte
+		if d.WritesRd {
+			r, err := reg(in.D, "destination")
+			if err != nil {
+				return err
+			}
+			rd = r.Field()
+		}
+		if d.UsesRn {
+			r, err := reg(in.N, "first")
+			if err != nil {
+				return err
+			}
+			rn = r.Field()
+		}
+		e.word(dpWord(cc, d.Opcode, in.S || d.ForcesS, rn, rd, i, op2))
 		return nil
 	}
-	if d > 0xFFF {
-		return fmt.Errorf("encode: displacement %d out of range", disp)
+
+	switch in.Op {
+	case "label":
+		if in.Lbl == "" {
+			return fmt.Errorf("label has no name")
+		}
+		if _, dup := e.labels[in.Lbl]; dup {
+			return fmt.Errorf("label %q defined twice", in.Lbl)
+		}
+		e.labels[in.Lbl] = len(e.b)
+
+	case "movw", "movt":
+		return e.movwt(in, cc)
+
+	case "mul", "mla":
+		return e.mul(in, cc)
+
+	case "umull", "umlal", "smull", "smlal":
+		return e.mulLong(in, cc)
+
+	case "ldr", "str", "ldrb", "strb":
+		return e.ldrStr(in, cc)
+
+	case "ldrh", "strh", "ldrsb", "ldrsh":
+		return e.ldrhStrh(in, cc)
+
+	case "push", "pop":
+		return e.pushPop(in, cc)
+
+	case "ldmia", "ldmib", "ldmda", "ldmdb",
+		"stmia", "stmib", "stmda", "stmdb":
+		return e.blockTransfer(in, cc)
+
+	case "b", "bl":
+		return e.branch(in, cc)
+
+	case "bx", "blx":
+		rm, err := reg(in.M, "target")
+		if err != nil {
+			return err
+		}
+		mid := uint32(0x12FFF1) // BX
+		if in.Op == "blx" {
+			mid = 0x12FFF3
+		}
+		e.word(uint32(cc)<<28 | mid<<4 | uint32(rm.Field()))
+
+	case "clz":
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		mr, err := reg(in.M, "source")
+		if err != nil {
+			return err
+		}
+		e.word(uint32(cc)<<28 | 0x016<<20 | 0xF<<16 |
+			uint32(dr.Field())<<12 | 0xF<<8 | 0x1<<4 | uint32(mr.Field()))
+
+	case "svc", "swi":
+		if in.Imm < 0 || in.Imm > 0xFFFFFF {
+			return fmt.Errorf("svc comment %d out of range", in.Imm)
+		}
+		e.word(uint32(cc)<<28 | 0xF<<24 | uint32(in.Imm)&0xFFFFFF)
+
+	case "nop":
+		// The pre-ARMv6K portable NOP: MOV r0, r0.
+		e.word(dpWord(cc, isaMovOpcode(), false, 0, 0, false, uint32(R0.Field())))
+
+	case "ud":
+		// A permanently-undefined encoding (the UDF space).
+		e.word(uint32(cc)<<28 | 0x7F000F0)
+
+	default:
+		return fmt.Errorf("unknown inst op")
 	}
-	e.u32(base | u | uint32(rn)<<16 | uint32(rt)<<12 | uint32(d))
 	return nil
 }
 
-func (e *enc) one(in *Inst) error {
+func isaMovOpcode() byte {
+	d, _ := isaarm.DataProcByName("mov")
+	return d.Opcode
+}
+
+// movwt encodes MOVW / MOVT with a 16-bit immediate or a relocation half.
+func (e *enc) movwt(in *Inst, cc byte) error {
+	dr, err := reg(in.D, "destination")
+	if err != nil {
+		return err
+	}
+	base := uint32(0x30) // MOVW: cc 0011 0000 ...
+	kind := FixupMovwAbs
+	if in.Op == "movt" {
+		base = 0x34 // MOVT: cc 0011 0100 ...
+		kind = FixupMovtAbs
+	}
+
+	var imm16 uint32
+	if in.M.Kind == OImm && in.M.Sym != "" {
+		e.fx = append(e.fx, Fixup{
+			Offset: uint32(len(e.b)), Symbol: in.M.Sym, Kind: kind, Addend: in.M.Imm,
+		})
+	} else {
+		v := in.Imm
+		if in.M.Kind == OImm && in.M.Sym == "" {
+			v = in.M.Imm
+		}
+		if v < 0 || v > 0xFFFF {
+			return fmt.Errorf("%s immediate %d does not fit 16 bits", in.Op, v)
+		}
+		imm16 = uint32(v)
+	}
+	imm4 := imm16 >> 12 & 0xF
+	imm12 := imm16 & 0xFFF
+	e.word(uint32(cc)<<28 | base<<20 | imm4<<16 | uint32(dr.Field())<<12 | imm12)
+	return nil
+}
+
+// mul encodes MUL (Rd := Rm*Rs) and MLA (Rd := Rm*Rs + Rn). Field layout:
+// Rd is the upper register nibble here, not the usual Rn position.
+func (e *enc) mul(in *Inst, cc byte) error {
+	rd, err := reg(in.D, "destination")
+	if err != nil {
+		return err
+	}
+	rm, err := reg(in.M, "Rm")
+	if err != nil {
+		return err
+	}
+	rs, err := reg(in.A, "Rs")
+	if err != nil {
+		return err
+	}
+	var a uint32
+	var rn byte
+	if in.Op == "mla" {
+		a = 1
+		r, err := reg(in.N, "accumulate")
+		if err != nil {
+			return err
+		}
+		rn = r.Field()
+	}
+	e.word(uint32(cc)<<28 | a<<21 | bit(in.S)<<20 |
+		uint32(rd.Field())<<16 | uint32(rn)<<12 | uint32(rs.Field())<<8 |
+		0x9<<4 | uint32(rm.Field()))
+	return nil
+}
+
+// mulLong encodes the 64-bit multiplies: RdHi:RdLo := Rm*Rs (+ RdHi:RdLo).
+func (e *enc) mulLong(in *Inst, cc byte) error {
+	rdlo, err := reg(in.D, "RdLo")
+	if err != nil {
+		return err
+	}
+	rdhi, err := reg(in.N, "RdHi")
+	if err != nil {
+		return err
+	}
+	rm, err := reg(in.M, "Rm")
+	if err != nil {
+		return err
+	}
+	rs, err := reg(in.A, "Rs")
+	if err != nil {
+		return err
+	}
+	u := bit(in.Op == "smull" || in.Op == "smlal") // signed
+	a := bit(in.Op == "umlal" || in.Op == "smlal") // accumulate
+	e.word(uint32(cc)<<28 | 1<<23 | u<<22 | a<<21 | bit(in.S)<<20 |
+		uint32(rdhi.Field())<<16 | uint32(rdlo.Field())<<12 |
+		uint32(rs.Field())<<8 | 0x9<<4 | uint32(rm.Field()))
+	return nil
+}
+
+// ldrStr encodes single word/byte loads and stores (the 12-bit-offset form).
+func (e *enc) ldrStr(in *Inst, cc byte) error {
+	rd, err := reg(in.D, "data")
+	if err != nil {
+		return err
+	}
+	m := in.M
+	if m.Kind != OMem {
+		return fmt.Errorf("operand must be a memory reference")
+	}
+	if !m.Base.IsGPR() {
+		return fmt.Errorf("memory base names no encodable register")
+	}
+
+	load := in.Op == "ldr" || in.Op == "ldrb"
+	byteOp := in.Op == "ldrb" || in.Op == "strb"
+
+	var i, u bool
+	var off uint32
+	if m.Index == RNone {
+		// Immediate offset: magnitude in the field, sign in U.
+		u = m.Disp >= 0
+		mag := abs32(m.Disp)
+		if mag > 0xFFF {
+			return fmt.Errorf("immediate offset %d does not fit 12 bits", m.Disp)
+		}
+		off = uint32(mag)
+	} else {
+		if !m.Index.IsGPR() {
+			return fmt.Errorf("memory index names no encodable register")
+		}
+		i = true
+		u = m.Add
+		off = uint32(m.ShiftAmt&0x1F)<<7 | uint32(m.Shift&3)<<5 | uint32(m.Index.Field())
+	}
+
+	w := m.Wback && m.Pre // post-indexed encodes W=0 (write-back is implicit)
+	e.word(uint32(cc)<<28 | 0b01<<26 | bit(i)<<25 | bit(m.Pre)<<24 | bit(u)<<23 |
+		bit(byteOp)<<22 | bit(w)<<21 | bit(load)<<20 |
+		uint32(m.Base.Field())<<16 | uint32(rd.Field())<<12 | off)
+	return nil
+}
+
+// ldrhStrh encodes the halfword / signed-byte / signed-halfword transfers,
+// whose offset is an 8-bit value split across two nibbles and whose type is
+// carried in bits 6:5 (the S and H bits).
+func (e *enc) ldrhStrh(in *Inst, cc byte) error {
+	rd, err := reg(in.D, "data")
+	if err != nil {
+		return err
+	}
+	m := in.M
+	if m.Kind != OMem || !m.Base.IsGPR() {
+		return fmt.Errorf("operand must be a memory reference with an encodable base")
+	}
+	load := in.Op == "ldrh" || in.Op == "ldrsb" || in.Op == "ldrsh"
+	if !load && (in.Op == "ldrsb" || in.Op == "ldrsh") {
+		return fmt.Errorf("%s is load-only", in.Op)
+	}
+
+	var sbit, hbit uint32 // bits 6:5 => 01 H, 10 SB, 11 SH
 	switch in.Op {
-	case "label":
-		e.labels[in.Lbl] = len(e.b)
-
-	case "movimm":
-		e.movImm(in.D.Reg, uint32(int32(in.Imm)))
-	case "movsym":
-		e.movSym(in.D.Reg, in.Sym, in.Imm)
-	case "mov_r":
-		e.u32(isaarm.BaseMOVR | uint32(in.D.Reg)<<12 | uint32(in.S.Reg))
-	case "mvn":
-		e.u32(isaarm.BaseMVN | uint32(in.D.Reg)<<12 | uint32(in.S.Reg))
-
-	case "add", "sub", "and", "orr", "eor", "bic":
-		return e.dp(in.Op, 0, in.D.Reg, in.D.Reg, in.S)
-	case "adds":
-		return e.dp("add", 1, in.D.Reg, in.D.Reg, in.S)
-	case "subs":
-		return e.dp("sub", 1, in.D.Reg, in.D.Reg, in.S)
-	case "rsb":
-		return e.dp("rsb", 0, in.D.Reg, in.D.Reg, in.S)
-	case "cmp":
-		return e.dp("cmp", 1, in.D.Reg, 0, in.S)
-	case "cmn":
-		return e.dp("cmn", 1, in.D.Reg, 0, in.S)
-	case "tst":
-		return e.dp("tst", 1, in.D.Reg, 0, in.S)
-	case "cmp_asr31": // cmp D, S ASR #31 (smulo check)
-		e.u32(isaarm.BaseCMPASR31 | uint32(in.D.Reg)<<16 | 31<<7 | 2<<5 | uint32(in.S.Reg))
-
-	case "lsl", "lsr", "asr", "ror":
-		sh, ok := isaarm.ShiftByName(in.Op)
-		if !ok {
-			return fmt.Errorf("encode: unknown shift op %q", in.Op)
-		}
-		base := isaarm.BaseMOVR | uint32(in.D.Reg)<<12 | sh.Code<<5
-		if in.T.Kind == OImm {
-			e.u32(base | uint32(in.T.Imm&31)<<7 | uint32(in.S.Reg))
-		} else {
-			e.u32(base | 1<<4 | uint32(in.T.Reg)<<8 | uint32(in.S.Reg))
-		}
-
-	case "mul": // D := S * T
-		e.u32(isaarm.BaseMUL | uint32(in.D.Reg)<<16 | uint32(in.T.Reg)<<8 | uint32(in.S.Reg))
-	case "mls": // D := X - S*T
-		e.u32(isaarm.BaseMLS | uint32(in.D.Reg)<<16 | uint32(in.X.Reg)<<12 | uint32(in.T.Reg)<<8 | uint32(in.S.Reg))
-	case "umull", "smull": // Dlo=D, Dhi=X
-		base := isaarm.BaseUMULL
-		if in.Op == "smull" {
-			base = isaarm.BaseSMULL
-		}
-		e.u32(base | uint32(in.X.Reg)<<16 | uint32(in.D.Reg)<<12 | uint32(in.T.Reg)<<8 | uint32(in.S.Reg))
-	case "udiv": // D := S / T
-		e.u32(isaarm.BaseUDIV | uint32(in.D.Reg)<<16 | uint32(in.T.Reg)<<8 | uint32(in.S.Reg))
-	case "sdiv":
-		e.u32(isaarm.BaseSDIV | uint32(in.D.Reg)<<16 | uint32(in.T.Reg)<<8 | uint32(in.S.Reg))
-
-	case "clz":
-		e.u32(isaarm.BaseCLZ | uint32(in.D.Reg)<<12 | uint32(in.S.Reg))
-	case "rbit":
-		e.u32(isaarm.BaseRBIT | uint32(in.D.Reg)<<12 | uint32(in.S.Reg))
-	case "rev":
-		e.u32(isaarm.BaseREV | uint32(in.D.Reg)<<12 | uint32(in.S.Reg))
-	case "uxtb":
-		e.u32(isaarm.BaseUXTB | uint32(in.D.Reg)<<12 | uint32(in.S.Reg))
-	case "uxth":
-		e.u32(isaarm.BaseUXTH | uint32(in.D.Reg)<<12 | uint32(in.S.Reg))
-	case "sxtb":
-		e.u32(isaarm.BaseSXTB | uint32(in.D.Reg)<<12 | uint32(in.S.Reg))
-	case "sxth":
-		e.u32(isaarm.BaseSXTH | uint32(in.D.Reg)<<12 | uint32(in.S.Reg))
-
-	case "movcc":
-		if in.S.Kind == OImm {
-			if in.S.Imm < 0 || in.S.Imm > 0xFF {
-				return fmt.Errorf("encode: movcc immediate %d out of range", in.S.Imm)
-			}
-			e.u32(uint32(in.CC)<<28 | isaarm.BaseMOVCCI | uint32(in.D.Reg)<<12 | uint32(in.S.Imm))
-		} else {
-			e.u32(uint32(in.CC)<<28 | isaarm.BaseMOVCCR | uint32(in.D.Reg)<<12 | uint32(in.S.Reg))
-		}
-
-	case "ldr":
-		return e.memOff(isaarm.BaseLDR, in.S.Base, in.D.Reg, in.S.Disp, false)
-	case "str":
-		return e.memOff(isaarm.BaseSTR, in.D.Base, in.S.Reg, in.D.Disp, false)
-	case "ldrb":
-		return e.memOff(isaarm.BaseLDRB, in.S.Base, in.D.Reg, in.S.Disp, false)
-	case "strb":
-		return e.memOff(isaarm.BaseSTRB, in.D.Base, in.S.Reg, in.D.Disp, false)
-	case "ldrh":
-		return e.memOff(isaarm.BaseLDRH, in.S.Base, in.D.Reg, in.S.Disp, true)
-	case "strh":
-		return e.memOff(isaarm.BaseSTRH, in.D.Base, in.S.Reg, in.D.Disp, true)
+	case "ldrh", "strh":
+		hbit = 1
 	case "ldrsb":
-		return e.memOff(isaarm.BaseLDRSB, in.S.Base, in.D.Reg, in.S.Disp, true)
+		sbit = 1
 	case "ldrsh":
-		return e.memOff(isaarm.BaseLDRSH, in.S.Base, in.D.Reg, in.S.Disp, true)
+		sbit, hbit = 1, 1
+	}
 
-	case "ldrb_r": // D := byte [S.Base + S.Index]
-		e.u32(isaarm.BaseLDRBR | uint32(in.S.Base)<<16 | uint32(in.D.Reg)<<12 | uint32(in.S.Index))
-	case "strb_r": // byte [D.Base + D.Index] := S
-		e.u32(isaarm.BaseSTRBR | uint32(in.D.Base)<<16 | uint32(in.S.Reg)<<12 | uint32(in.D.Index))
+	var imm, u bool // imm: bit 22 (1 = immediate offset)
+	var lo, hi, u1 uint32
+	if m.Index == RNone {
+		imm = true
+		u = m.Disp >= 0
+		mag := abs32(m.Disp)
+		if mag > 0xFF {
+			return fmt.Errorf("halfword offset %d does not fit 8 bits", m.Disp)
+		}
+		lo = uint32(mag) & 0xF
+		hi = uint32(mag) >> 4 & 0xF
+	} else {
+		if !m.Index.IsGPR() {
+			return fmt.Errorf("memory index names no encodable register")
+		}
+		u = m.Add
+		lo = uint32(m.Index.Field())
+	}
+	_ = u1
 
-	case "ldrex": // D := [S.Base]
-		e.u32(isaarm.BaseLDREX | uint32(in.S.Base)<<16 | uint32(in.D.Reg)<<12)
-	case "strex": // X := status, [D.Base] := S
-		e.u32(isaarm.BaseSTREX | uint32(in.D.Base)<<16 | uint32(in.X.Reg)<<12 | uint32(in.S.Reg))
-	case "clrex":
-		e.u32(isaarm.BaseCLREX)
-	case "dmb":
-		e.u32(isaarm.BaseDMB)
+	w := m.Wback && m.Pre
+	e.word(uint32(cc)<<28 | bit(m.Pre)<<24 | bit(u)<<23 | bit(imm)<<22 |
+		bit(w)<<21 | bit(load)<<20 |
+		uint32(m.Base.Field())<<16 | uint32(rd.Field())<<12 | hi<<8 |
+		1<<7 | sbit<<6 | hbit<<5 | 1<<4 | lo)
+	return nil
+}
 
-	case "b":
+// pushPop encodes the two common stack forms: push == STMDB sp!, and
+// pop == LDMIA sp!. Both imply the stack pointer and write-back.
+func (e *enc) pushPop(in *Inst, cc byte) error {
+	if in.M.Kind != ORegList {
+		return fmt.Errorf("operand must be a register list")
+	}
+	list := uint32(uint16(in.M.Imm))
+	if list == 0 {
+		return fmt.Errorf("register list is empty")
+	}
+	var p, u, l uint32
+	if in.Op == "push" { // STMDB sp!, {list}
+		p, u, l = 1, 0, 0
+	} else { // pop: LDMIA sp!, {list}
+		p, u, l = 0, 1, 1
+	}
+	e.word(uint32(cc)<<28 | 0b100<<25 | p<<24 | u<<23 | 1<<21 | l<<20 |
+		uint32(SP.Field())<<16 | list)
+	return nil
+}
+
+// blockTransfer encodes the explicit LDM/STM forms, taking the addressing
+// mode from the mnemonic suffix and the base/list from N/M.
+func (e *enc) blockTransfer(in *Inst, cc byte) error {
+	base, err := reg(in.N, "base")
+	if err != nil {
+		return err
+	}
+	if in.M.Kind != ORegList {
+		return fmt.Errorf("operand must be a register list")
+	}
+	list := uint32(uint16(in.M.Imm))
+	if list == 0 {
+		return fmt.Errorf("register list is empty")
+	}
+	mode, ok := isaarm.BlockModeByGeneric(in.Op[3:]) // "ia","ib","da","db"
+	if !ok {
+		return fmt.Errorf("unknown block-transfer mode")
+	}
+	l := in.Op[:3] == "ldm"
+	e.word(uint32(cc)<<28 | 0b100<<25 | bit(mode.P)<<24 | bit(mode.U)<<23 |
+		bit(in.Wb)<<21 | bit(l)<<20 | uint32(base.Field())<<16 | list)
+	return nil
+}
+
+// branch encodes B/BL to a local label (patched at the end) or an external
+// symbol (a PC-relative relocation).
+func (e *enc) branch(in *Inst, cc byte) error {
+	l := in.Op == "bl"
+	word := uint32(cc)<<28 | 0b101<<25 | bit(l)<<24
+	switch {
+	case in.Lbl != "":
 		e.patches = append(e.patches, patch{pos: len(e.b), lbl: in.Lbl})
-		e.u32(isaarm.BaseB)
-	case "bcc":
-		e.patches = append(e.patches, patch{pos: len(e.b), lbl: in.Lbl})
-		e.u32(uint32(in.CC)<<28 | isaarm.BaseBcc)
-	case "b_sym": // plain (non-linking) branch to an external symbol
-		e.branchFix(isaarm.BaseB, in.Sym, FixupJump24)
-	case "bl_sym":
-		e.branchFix(isaarm.BaseBL, in.Sym, FixupCall24)
-	case "blx_r":
-		e.u32(isaarm.BaseBLXR | uint32(in.S.Reg))
-	case "bx_r":
-		e.u32(isaarm.BaseBXR | uint32(in.S.Reg))
-
-	case "push": // STMDB sp!, {reglist}
-		e.u32(isaarm.BasePUSH | uint32(in.RegList))
-	case "pop": // LDMIA sp!, {reglist}
-		e.u32(isaarm.BasePOP | uint32(in.RegList))
-
-	case "udf":
-		e.u32(isaarm.BaseUDF)
-
+		e.word(word) // low 24 bits filled in during resolution
+	case in.Sym != "":
+		e.fx = append(e.fx, Fixup{
+			Offset: uint32(len(e.b)), Symbol: in.Sym, Kind: FixupPCRel24, Addend: -8,
+		})
+		e.word(word)
 	default:
-		return fmt.Errorf("encode: unknown inst op %q", in.Op)
+		return fmt.Errorf("branch has neither label nor symbol")
 	}
 	return nil
 }

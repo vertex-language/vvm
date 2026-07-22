@@ -1,73 +1,95 @@
-// ModRM/SIB byte layout, REX prefix construction, and the legacy prefix
-// bytes this encoder uses. These are bit-layout facts straight out of the
-// Intel/AMD manuals — which field a ModRM byte's bits are, which REX bit
-// extends which field, which rm/mod combinations mean "add a SIB byte" or
-// "this is [RIP+disp32] instead of [reg]" — not anything specific to how
-// this compiler represents an instruction stream.
 package x86_64
 
-// ModRM mod-field values.
+// ModRM.mod field values — unchanged from IA-32.
 const (
-	ModDisp0  = 0 // [reg]; also the mod for [RIP+disp32] and for SIB-escape forms
-	ModDisp8  = 1 // [reg+disp8]
-	ModDisp32 = 2 // [reg+disp32]
-	ModReg    = 3 // reg, reg (register-direct)
+	ModIndir  byte = 0 // [rm], no displacement — but see RMRIP/SIBNoBase
+	ModDisp8  byte = 1 // [rm+disp8]
+	ModDisp32 byte = 2 // [rm+disp32]
+	ModReg    byte = 3 // rm is a register operand, not a memory reference
 )
 
-// rm/SIB field values that change meaning instead of naming a register.
+// The irregular field values every ModRM emitter and decoder special-cases.
+// The bit values are the same as IA-32's; two of the *meanings* change in
+// long mode and are renamed here to say so.
 const (
-	RMNeedsSIB    = 4 // rm==4 (RSP/R12): this rm value always means "read a SIB byte next"
-	RMRipOrDisp32 = 5 // rm==5: mod==0 means [RIP+disp32]; mod!=0 means [RBP/R13+disp]
-	SIBNoIndex    = 4 // SIB.index==4 means "no index register"
-	SIBBaseEscape = 5 // SIB.base==5 with SIB mod==0 means absolute [disp32], no base reg
+	// RMSIB in ModRM.rm (mod != ModReg) means "a SIB byte follows". As in
+	// 32-bit mode it occupies RSP's low-3 encoding, so [rsp+disp] always
+	// needs SIB. (r12 shares the low 3 bits and inherits the same rule.)
+	RMSIB byte = 4
+
+	// RMRIP in ModRM.rm with mod == ModIndir is the form that was pure
+	// disp32 absolute in 32-bit mode. In long mode it is instead
+	// RIP-relative: [rip + disp32], a signed 32-bit displacement from the
+	// *next* instruction's address. This is the single biggest semantic
+	// break from isa/x86, where the identical bit pattern (its RMDisp32)
+	// meant an absolute address. An absolute [disp32] in long mode is no
+	// longer reachable this way and must go through the SIB no-base form
+	// below. It occupies RBP's low-3 encoding, which is why an RBP (or
+	// r13) base can never use mod == ModIndir and always carries at least
+	// a disp8.
+	RMRIP byte = 5
+
+	// SIBNoIndex in SIB.index means "no index register". Occupies RSP's
+	// encoding, which is why RSP can never be a SIB index. Unlike a base,
+	// this is *not* extended by REX.X: index 0b0100 with REX.X set names
+	// r12, a real index, not "no index".
+	SIBNoIndex byte = 4
+
+	// SIBNoBase in SIB.base with mod == ModIndir means "no base register,
+	// a disp32 follows". Combined with SIBNoIndex it gives the absolute
+	// [disp32] form (SIB byte 0x25) that RMRIP no longer provides.
+	SIBNoBase byte = 5
 )
 
-// PackModRM assembles a ModRM byte from its three fields. reg and rm are
-// taken as their low 3 bits only — callers fold the REX.R/B extension bit
-// in separately (see PackREX / HiBit).
-func PackModRM(mod, reg, rm byte) byte { return mod<<6 | (reg&7)<<3 | (rm & 7) }
+// PackModRM builds a ModRM byte from its three (low-3-bit) fields.
+func PackModRM(mod, reg, rm byte) byte { return mod<<6 | reg<<3 | rm }
 
-// UnpackModRM splits a ModRM byte back into its three raw fields.
+// UnpackModRM splits a ModRM byte into (mod, reg, rm).
 func UnpackModRM(b byte) (mod, reg, rm byte) { return b >> 6, b >> 3 & 7, b & 7 }
 
-// PackSIB assembles a SIB byte from scale (0-3, meaning a stride of 2^scale),
-// index, and base, using the same low-3-bits convention as PackModRM.
-func PackSIB(scale, index, base byte) byte { return scale<<6 | (index&7)<<3 | (base & 7) }
+// PackSIB builds a SIB byte from its three (low-3-bit) fields.
+func PackSIB(scale, index, base byte) byte { return scale<<6 | index<<3 | base }
 
-// HiBit is register r's REX extension bit — bit 3 of its 4-bit encoding,
-// which selects r8-r15 when set. Callers fold this into whichever of
-// REX.R/X/B corresponds to the field r occupies (ModRM.reg, SIB.index, or
-// ModRM.rm/SIB.base).
-func HiBit(r Reg) byte { return byte(r) >> 3 & 1 }
+// UnpackSIB splits a SIB byte into (scale, index, base).
+func UnpackSIB(b byte) (scale, index, base byte) { return b >> 6, b >> 3 & 7, b & 7 }
 
-// LoBits is register r's 3-bit ModRM/SIB field value, with the REX
-// extension bit already stripped off.
-func LoBits(r Reg) byte { return byte(r) & 7 }
-
-// PackREX assembles a REX prefix byte (0100WRXB) from its four bits. w
-// selects 64-bit operand size; r/x/b extend ModRM.reg, SIB.index, and
-// ModRM.rm/SIB.base respectively to reach r8-r15.
-func PackREX(w, r, x, b bool) byte {
-	var bits byte
-	if w {
-		bits |= 1 << 3
+// ScaleBits maps a SIB scale factor to its 2-bit field encoding; 0 is a
+// synonym for 1. Unchanged from IA-32.
+func ScaleBits(v byte) (bits byte, ok bool) {
+	switch v {
+	case 0, 1:
+		return 0, true
+	case 2:
+		return 1, true
+	case 4:
+		return 2, true
+	case 8:
+		return 3, true
 	}
-	if r {
-		bits |= 1 << 2
-	}
-	if x {
-		bits |= 1 << 1
-	}
-	if b {
-		bits |= 1
-	}
-	return 0x40 | bits
+	return 0, false
 }
 
-// Legacy prefix bytes this encoder emits.
+// ScaleFactor inverts ScaleBits. Total: the field is two bits wide.
+func ScaleFactor(bits byte) byte { return 1 << (bits & 3) }
+
+// Legacy/mandatory prefix bytes, unchanged from IA-32. Note Prefix67 now
+// switches addressing 64->32 bit rather than 32->16, and Prefix66 selects
+// 16-bit operand size against a 32-bit default (REX.W selects 64-bit).
 const (
-	PrefixOperandSize = 0x66 // 16-bit operand-size override
-	PrefixLock        = 0xF0
-	PrefixRepne       = 0xF2 // REPNE / mandatory prefix (scalar-double SSE forms)
-	PrefixRep         = 0xF3 // REP / mandatory prefix (scalar-single SSE forms, POPCNT)
+	Prefix66 = 0x66 // operand-size override (-> 16 bit)
+	Prefix67 = 0x67 // address-size override (64 -> 32 bit addressing)
+	PrefixF0 = 0xF0 // LOCK
+	PrefixF2 = 0xF2 // REPNE/REPNZ; also a mandatory prefix
+	PrefixF3 = 0xF3 // REP/REPE; also a mandatory prefix (e.g. popcnt)
 )
+
+// FitsDisp8 / FitsImm8 — unchanged; displacement and sign-extended-imm8
+// widths are the same in long mode.
+func FitsDisp8(d int32) bool { return d >= -128 && d <= 127 }
+func FitsImm8(v int64) bool  { return v >= -128 && v <= 127 }
+
+// FitsImm32 reports whether a 64-bit immediate fits a sign-extended imm32
+// field — the widest immediate every instruction *except* the special
+// movabs form accepts. A value that fails this and is needed as a full
+// 64-bit constant must use mov r64, imm64 (0xB8+r with REX.W).
+func FitsImm32(v int64) bool { return v >= -1<<31 && v <= 1<<31-1 }
