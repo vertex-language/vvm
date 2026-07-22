@@ -1,15 +1,15 @@
 // Package encoder is the generic IA-32 assembler: a pseudo-instruction
 // stream (Inst/Opr) built entirely from physical registers, immediates,
-// symbols, and plain memory operands — never a not-yet-placed value — plus
-// the Encode function that turns that stream into machine bytes.
+// symbols, and plain memory operands — never a not-yet-placed value —
+// plus the Encode function that turns that stream into machine bytes.
 //
 // This package has no knowledge of vir, of register allocation policy, or
 // of any particular calling convention. It is reusable by anything that
-// wants "turn this Inst stream into IA-32 bytes": lower/x86's instruction
-// selector and inline-asm lowerer both build into this Inst type (via
-// lower/x86/mcode, which adds the one concept this package deliberately
-// omits — an unresolved value slot — and converts down to this package's
-// Opr once regalloc has resolved every slot to a real memory operand).
+// wants "turn this Inst stream into IA-32 bytes". lower/x86 is this
+// repository's only caller: it builds into its own near-identical Inst
+// type that adds the one concept this package deliberately omits — an
+// unresolved value slot — and converts down to this package's Opr once
+// every slot has been resolved to a real [ebp+disp] memory operand.
 package encoder
 
 import isax86 "github.com/vertex-language/vvm/isa/x86"
@@ -76,7 +76,9 @@ func MemAbs(sym string, disp int32) Opr {
 }
 
 // Condition codes, re-exported from isa/x86 for callers building Inst
-// values that carry a CC field.
+// values that carry a CC field. NegateCond is re-exported too, since
+// inverting a branch is something an instruction selector does constantly
+// and shouldn't need a second import for.
 const (
 	CondO  = isax86.CondO
 	CondNO = isax86.CondNO
@@ -88,15 +90,65 @@ const (
 	CondA  = isax86.CondA
 	CondS  = isax86.CondS
 	CondNS = isax86.CondNS
+	CondP  = isax86.CondP
+	CondNP = isax86.CondNP
 	CondL  = isax86.CondL
 	CondGE = isax86.CondGE
 	CondLE = isax86.CondLE
 	CondG  = isax86.CondG
 )
 
-// Inst is one pre-encoding pseudo instruction. See encode.go's Encode
-// switch for the authoritative list of Op spellings and which of D/S/CC/
-// Sz/Lbl/Sym/Imm each one reads.
+// NegateCond returns the condition code testing the complementary
+// condition.
+func NegateCond(cc byte) byte { return isax86.NegateCond(cc) }
+
+// Inst is one pre-encoding pseudo instruction. encode.go's Encode switch
+// is the authoritative list of Op spellings and of which of D/S/CC/Sz/
+// Lbl/Sym/Imm each one reads; the summary below is a map, not the
+// territory.
+//
+//	Op            reads          notes
+//	----------------------------------------------------------------
+//	label         Lbl            defines a local branch target
+//	mov           D, S, Sz
+//	movzx/movsx   D, S, Sz       Sz is the *source* width: 1 or 2
+//	lea           D, S           S must be OMem
+//	add/or/and/
+//	 sub/xor/cmp  D, S, Sz
+//	test          D, S           two registers
+//	imul1         S              0xF7 /5, widening into EDX:EAX
+//	imul2         D, S           0x0F 0xAF, two-operand
+//	imul3         D, S, Imm      0x69 or 0x6B, three-operand
+//	mul/div/idiv  S              0xF7 /4,/6,/7 — implicit EDX:EAX
+//	not/neg       S              0xF7 /2,/3 — read-modify-write on S
+//	inc/dec       D
+//	cdq           —              sign-extend EAX into EDX:EAX
+//	shl/shr/sar/
+//	 rol/ror      D, S, Sz       S is OImm (count) or a register (CL)
+//	setcc         D, CC          D must be byte-addressable
+//	cmovcc        D, S, CC
+//	jmp/jcc       Lbl, CC        always rel32; resolved by Encode
+//	call_sym/
+//	 jmp_sym      Sym            rel32 + FixupPCRel32
+//	call_r/jmp_r  S
+//	push          S              register, immediate, or memory
+//	pop           D              register or memory
+//	ret/ud2/nop/
+//	 cld/std/
+//	 mfence       —
+//	int           Imm            Imm == 3 emits the one-byte int3
+//	bsr/bsf/
+//	 popcnt       D, S
+//	bswap         D
+//	xchg          D, S
+//	lock_xadd/
+//	 lock_cmpxchg D, S
+//	rep_movsb/
+//	 rep_stosb    —
+//
+// Sz is an operand width in bytes: 1, 2, or 4. Zero means unset and is
+// treated as 4, which is what almost every instruction in a 32-bit
+// backend wants.
 type Inst struct {
 	Op  string
 	D   Opr

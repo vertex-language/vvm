@@ -1,3 +1,4 @@
+// opr.go
 package x86
 
 import isax86 "github.com/vertex-language/vvm/isa/x86"
@@ -25,10 +26,10 @@ type Opr struct {
 	Slot  string
 }
 
-func R(r isax86.Reg) Opr    { return Opr{Kind: OReg, Reg: r} }
-func Imm(v int64) Opr       { return Opr{Kind: OImm, Imm: v} }
-func SymAddr(s string) Opr  { return Opr{Kind: OImm, Sym: s} }
-func Slot(name string) Opr  { return Opr{Kind: OSlot, Slot: name} }
+func R(r isax86.Reg) Opr   { return Opr{Kind: OReg, Reg: r} }
+func Imm(v int64) Opr      { return Opr{Kind: OImm, Imm: v} }
+func SymAddr(s string) Opr { return Opr{Kind: OImm, Sym: s} }
+func Slot(name string) Opr { return Opr{Kind: OSlot, Slot: name} }
 
 func Mem(b isax86.Reg, d int32) Opr {
 	return Opr{Kind: OMem, Base: b, Index: isax86.RNone, Disp: d}

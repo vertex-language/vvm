@@ -8,9 +8,16 @@ github.com/vertex-language/vvm/importer
 
 ### The one job
 
-Take a pile of decoded `*vir.Module`s, all present in memory at once. Resolve every `import "X"` to the real module it names. Check every cross-module reference directly against that real module's real declarations. Rewrite the module so every cross-module reference is gone, replaced by either an inline literal or an ordinary extern-style symbol reference. That's the whole package — one artifact type (`*vir.Module`), one pass, no serialized intermediate, no provisional/structural two-tier trust.
+Take a set of decoded `*vir.Module`s, all present in memory at once. Resolve every
+`import "X"` to the real module it names. Check every cross-module reference directly
+against that real module's real declarations. Rewrite the module so every cross-module
+reference is gone, replaced by either an inline literal or an ordinary extern-style
+symbol reference.
 
-`ir/vir` stays single-module and import-agnostic — pure data model and construction, no checking logic at all. `ir/verify` stays single-module too — it checks one module's own invariants and has no idea `importer` exists. `importer` is the only package that knows about cross-module resolution, and it sits *after* both.
+`ir/vir` stays single-module and import-agnostic — pure data model and construction.
+`ir/verify` stays single-module too — it checks one module's own invariants and has no
+dependency on `importer`. `importer` is the only package that knows about cross-module
+resolution, and it sits after both.
 
 ---
 
@@ -31,7 +38,10 @@ folder of .vbyte / .vir files
   → lower/<arch>, unchanged from here on
 ```
 
-`verify.Verify` (`ir/verify`) must succeed on a module before `CheckReferences` looks at it — cross-module reference checking on a struct's field types etc. is only meaningful once the referencing module itself is known to be internally well-formed. `ResolveImports` (pure name lookup, no semantic checking) can run before or after `verify.Verify`; it doesn't depend on it.
+`verify.Verify` must succeed on a module before `CheckReferences` looks at it — checking
+a cross-module reference (e.g. a struct's field types) is only meaningful once the
+referencing module is known to be internally well-formed. `ResolveImports` is a pure
+name lookup and doesn't depend on `verify.Verify` — it can run before or after it.
 
 ---
 
@@ -56,7 +66,8 @@ export fn main() i32:
 end
 ```
 
-`CheckReferences` confirms `mathlib.MaxRetries` really is an `i32` with value `3` in the real `mathlib` module — same check whether `mathlib` sits in the same folder or was compiled an hour ago, since it's the real module either way.
+`CheckReferences` confirms `mathlib.MaxRetries` really is an `i32` with value `3` in the
+real `mathlib` module.
 
 **`main.vir`**, after `Rewrite` — this is what `lower/<arch>` actually receives:
 
@@ -70,7 +81,10 @@ export fn main() i32:
 end
 ```
 
-`mathlib.MaxRetries` the *qualified-ident operand* no longer exists anywhere in the instruction stream. `lower/<arch>` sees `mov.i32 3` — an ordinary integer literal, indistinguishable from one the frontend wrote by hand. No symbol was ever created for `MaxRetries`, so there's nothing to relocate, and nothing for the linker to check either — the check already happened, once, in `CheckReferences`.
+`mathlib.MaxRetries` the *qualified-ident operand* no longer exists anywhere in the
+instruction stream. `lower/<arch>` sees `mov.i32 3` — an ordinary integer literal. No
+symbol was ever created for `MaxRetries`, so there's nothing to relocate and nothing for
+the linker to check — the check already happened, once, in `CheckReferences`.
 
 ---
 
@@ -98,7 +112,8 @@ export fn main() i32:
 end
 ```
 
-`CheckReferences` checks arity/types/variadic-ness/`noreturn`/`readonly` against the real `get` declaration in `http`.
+`CheckReferences` checks arity/types/variadic-ness/`noreturn`/`readonly` against the real
+`get` declaration in `http`.
 
 After `Rewrite`:
 
@@ -112,7 +127,9 @@ export fn main() i32:
 end
 ```
 
-`_M4acme3net4http3get` is exactly `vir.MangledSymbol` for `http.get` — the same mangled name the `http` module's own object file exports. `lower/<arch>` treats this precisely like a `link`-declared `extern fn` call; the real linker resolves/relocates it as always. `importer` didn't touch that path at all — it just made the call target's *spelling* match what the linker will actually see.
+`_M4acme3net4http3get` is exactly `vir.MangledSymbol` for `http.get` — the same mangled
+name `http`'s own object file exports. `lower/<arch>` treats this precisely like a
+`link`-declared `extern fn` call; the real linker resolves/relocates it as always.
 
 ---
 
@@ -135,7 +152,11 @@ import "acme/net/http"
 export fn get(url ptr, out byval[http.Response] resp) i32
 ```
 
-`byval`/`sret` name a struct directly as a type annotation, not as an operand, so there's no "operand to rewrite" here the way there is for `const`/`fn`. What `Rewrite` does instead: the `StructType{Name: "Response", Import: "acme/net/http"}` reference is checked field-for-field against the real `http.Response`, and the type node itself is left exactly as-is (it already carries everything `lower/<arch>` needs — origin-tagged struct references are a solved problem at the object-file layer, unrelated to `importer`). There's nothing left to erase; `CheckReferences` passing *is* the whole job for this kind. `lower/<arch>` computes layout off the real field list either way, local or imported.
+`byval`/`sret` name a struct directly as a type annotation, so there's no operand to
+rewrite here. What `Rewrite` does instead: `StructType{Name: "Response", Import:
+"acme/net/http"}` is checked field-for-field against the real `http.Response`, and the
+type node is left as-is — it already carries everything `lower/<arch>` needs.
+`CheckReferences` passing *is* the whole job for this kind.
 
 ---
 
@@ -146,12 +167,20 @@ export fn get(url ptr, out byval[http.Response] resp) i32
 | `const` | qualified-ident operand | inline literal operand | never had one |
 | `fn` | qualified-ident call target | real mangled symbol, extern-style | yes — real linker symbol |
 | `global` | qualified-ident load/store target | real mangled symbol, extern-style | yes — real linker symbol |
-| `struct`/`fnsig` | type annotation naming an import | unchanged (already fully specified) — `CheckReferences` is the only work | never had one |
+| `struct`/`fnsig` | type annotation naming an import | unchanged — `CheckReferences` is the only work | never had one |
 
 ---
 
-### Open decisions (defaults chosen, flag if you want different behavior)
+### Resolved design points
 
-**1. Bare-name vs. namespaced identity.** Default: a bare `import "http"` only resolves against a module that itself declared no `namespace`. A namespaced module is only reachable via its full `namespace/name` string. Two modules can't collide on bare `"http"` unless both literally have no namespace and the same module name — which `NewSet` rejects outright as a duplicate identity.
+**Bare-name vs. namespaced identity.** A bare `import "http"` only resolves against a
+module that itself declared no `namespace`. A namespaced module is only reachable via
+its full `namespace/name` string. Two modules can't collide on bare `"http"` unless both
+have no namespace and the same module name — `NewSet` rejects that outright as a
+duplicate identity.
 
-**2. Import cycles.** Default: legal, unhandled specially. `ResolveImports`/`CheckReferences` only ever read already-in-memory declarations, never bodies, and there's no scheduling/ordering step to choke on a cycle. The only way a cycle actually bites is an infinitely-recursive struct-by-value (A embeds B by value, B embeds A by value) — same "unresolvable layout" error a single-module self-referential struct would already trigger, nothing import-specific about it.
+**Import cycles.** Legal, unhandled specially. `ResolveImports`/`CheckReferences` only
+ever read already-in-memory declarations, never bodies, so there's no scheduling step to
+choke on a cycle. The only way a cycle actually bites is an infinitely-recursive
+struct-by-value (A embeds B by value, B embeds A by value) — the same "unresolvable
+layout" error a single-module self-referential struct already triggers.

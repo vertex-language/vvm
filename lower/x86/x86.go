@@ -1,5 +1,11 @@
+// x86.go
 // Package x86 lowers verified vir modules to 32-bit x86 (IA-32) machine
-// code.
+// code. It expects the module has already passed vir.Verify and, if it
+// came from multiple source files, importer.Rewrite — cross-module
+// references should already be erased into plain calls/symbols/inline
+// literals by the time Lower sees it. Inline assembly is not part of this
+// package: it was removed from ir/vir's data model (see ir/vir's asm.md)
+// and has no representation here to lower.
 package x86
 
 import (
@@ -50,8 +56,9 @@ func Lower(m *vir.Module) (*Program, error) {
 	}
 	lw := &lowerer{
 		m: m, lay: newLayout(m),
-		kinds:  map[string]string{},
-		consts: map[string]*vir.Constant{},
+		kinds:     map[string]string{},
+		consts:    map[string]*vir.Constant{},
+		callables: map[string]callable{},
 	}
 	for _, s := range m.Structs {
 		lw.kinds[s.Name] = "struct"
@@ -69,10 +76,16 @@ func Lower(m *vir.Module) (*Program, error) {
 	for _, g := range m.Externs {
 		for _, f := range g.Functions {
 			lw.kinds[f.Name] = "extern"
+			lw.callables[f.Name] = callable{Ret: f.Ret, Params: f.Params, Variadic: f.Variadic}
 		}
 	}
+	// Module-local definitions are indexed after externs so a locally
+	// defined function wins over an extern declaration of the same name,
+	// preserving the old lookup order (which scanned externs first but
+	// returned the first match in each list).
 	for _, f := range m.Functions {
 		lw.kinds[f.Name] = "fn"
+		lw.callables[f.Name] = callable{Ret: f.Ret, Params: f.Params, Variadic: f.Variadic}
 	}
 
 	p := &Program{}
@@ -93,25 +106,39 @@ func Lower(m *vir.Module) (*Program, error) {
 	return p, nil
 }
 
-type lowerer struct {
-	m      *vir.Module
-	lay    *Layout
-	kinds  map[string]string
-	consts map[string]*vir.Constant
+// callable is everything instruction selection needs to know about a call
+// target, whether it's defined here or imported.
+//
+// Variadic is part of it because a call site cannot otherwise tell an
+// argument that ran off the end of a fixed parameter list — a verifier
+// error — from one that legitimately landed in a variadic tail.
+type callable struct {
+	Ret      vir.Type
+	Params   []vir.Param
+	Variadic bool
 }
 
+type lowerer struct {
+	m         *vir.Module
+	lay       *Layout
+	kinds     map[string]string
+	consts    map[string]*vir.Constant
+	callables map[string]callable
+}
+
+// lookupCallable resolves a call target. Previously this walked every
+// extern group and every function on each call; it's a map lookup now,
+// built once in Lower.
 func (lw *lowerer) lookupCallable(name string) (ret vir.Type, params []vir.Param, ok bool) {
-	for _, g := range lw.m.Externs {
-		for _, e := range g.Functions {
-			if e.Name == name {
-				return e.Ret, e.Params, true
-			}
-		}
+	c, ok := lw.callables[name]
+	if !ok {
+		return nil, nil, false
 	}
-	for _, f := range lw.m.Functions {
-		if f.Name == name {
-			return f.Ret, f.Params, true
-		}
-	}
-	return nil, nil, false
+	return c.Ret, c.Params, true
+}
+
+// lookupCallee is lookupCallable plus the variadic flag.
+func (lw *lowerer) lookupCallee(name string) (callable, bool) {
+	c, ok := lw.callables[name]
+	return c, ok
 }

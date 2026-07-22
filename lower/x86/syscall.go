@@ -1,3 +1,4 @@
+// syscall.go
 package x86
 
 import isax86 "github.com/vertex-language/vvm/isa/x86"
