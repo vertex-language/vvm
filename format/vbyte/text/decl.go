@@ -8,17 +8,28 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Module preamble: header, target, asmdialect, structs, fnsigs, consts,
-// globals, links, externs (§1.2). Function bodies live in func.go; asm
-// blocks live in asm.go/asm_*.go.
+// Module preamble: header, namespace, target, asmdialect, structs, fnsigs,
+// consts, globals, links, externs, imports (§2.1). Function bodies live in
+// func.go; asm blocks live in asm.go/asm_*.go.
 // ---------------------------------------------------------------------------
 
-func isGlobalLine(l *line) bool {
+// isGlobalLine/isStructLine/isFnSigLine/isConstLine recognize a section's
+// keyword with an optional leading "export" (struct-decl/fnsig-decl/
+// const-decl/global-decl all allow it, §2.3 grammar). `first(l)` only ever
+// returns the *leading* token, so a bare `first(l)=="struct"` check misses
+// "export struct ..." entirely — every export-eligible section needs this
+// two-token lookahead, not just global.
+func isGlobalLine(l *line) bool { return sectionLine(l, "global") }
+func isStructLine(l *line) bool { return sectionLine(l, "struct") }
+func isFnSigLine(l *line) bool  { return sectionLine(l, "fnsig") }
+func isConstLine(l *line) bool  { return sectionLine(l, "const") }
+
+func sectionLine(l *line, kw string) bool {
 	f := first(l)
-	if f == "global" {
+	if f == kw {
 		return true
 	}
-	return f == "export" && len(l.toks) > 1 && l.toks[1].kind == tIdent && l.toks[1].text == "global"
+	return f == "export" && len(l.toks) > 1 && l.toks[1].kind == tIdent && l.toks[1].text == kw
 }
 
 func (p *parser) parseModule() (*vir.Module, error) {
@@ -28,7 +39,7 @@ func (p *parser) parseModule() (*vir.Module, error) {
 	}
 	c := &lc{l: l}
 	if !c.accept(tIdent, "module") {
-		return nil, l.errf("first line must be a module header (§1.2 rule 1)")
+		return nil, l.errf("first line must be a module header (§2.1 step 1)")
 	}
 	name, err := c.expectIdent()
 	if err != nil {
@@ -39,6 +50,12 @@ func (p *parser) parseModule() (*vir.Module, error) {
 	}
 	m := vir.NewModule(name)
 
+	if l := p.peek(); l != nil && first(l) == "namespace" {
+		p.next()
+		if err := parseNamespace(&lc{l: l}, m); err != nil {
+			return nil, err
+		}
+	}
 	if l := p.peek(); l != nil && first(l) == "target" {
 		p.next()
 		if err := parseTarget(&lc{l: l}, m); err != nil {
@@ -51,19 +68,19 @@ func (p *parser) parseModule() (*vir.Module, error) {
 			return nil, err
 		}
 	}
-	for l := p.peek(); l != nil && first(l) == "struct"; l = p.peek() {
+	for l := p.peek(); l != nil && isStructLine(l); l = p.peek() {
 		p.next()
 		if err := parseStruct(&lc{l: l}, m); err != nil {
 			return nil, err
 		}
 	}
-	for l := p.peek(); l != nil && first(l) == "fnsig"; l = p.peek() {
+	for l := p.peek(); l != nil && isFnSigLine(l); l = p.peek() {
 		p.next()
 		if err := parseFnSig(&lc{l: l}, m); err != nil {
 			return nil, err
 		}
 	}
-	for l := p.peek(); l != nil && first(l) == "const"; l = p.peek() {
+	for l := p.peek(); l != nil && isConstLine(l); l = p.peek() {
 		p.next()
 		if err := parseConst(&lc{l: l}, m); err != nil {
 			return nil, err
@@ -86,15 +103,34 @@ func (p *parser) parseModule() (*vir.Module, error) {
 			return nil, err
 		}
 	}
+	for l := p.peek(); l != nil && first(l) == "import"; l = p.peek() {
+		p.next()
+		if err := parseImport(&lc{l: l}, m); err != nil {
+			return nil, err
+		}
+	}
 	for l := p.peek(); l != nil; l = p.peek() {
 		if first(l) != "fn" && first(l) != "export" {
-			return nil, l.errf("unexpected %q: sections never interleave (§1.2)", first(l))
+			return nil, l.errf("unexpected %q: sections never interleave (§2.1)", first(l))
 		}
 		if err := p.parseFn(m); err != nil {
 			return nil, err
 		}
 	}
 	return m, nil
+}
+
+func parseNamespace(c *lc, m *vir.Module) error {
+	c.accept(tIdent, "namespace")
+	tk, ok := c.next()
+	if !ok || tk.kind != tString {
+		return c.l.errf("namespace expects a string literal")
+	}
+	if !c.done() {
+		return c.l.errf("trailing tokens after namespace declaration")
+	}
+	m.SetNamespace(tk.text)
+	return nil
 }
 
 func parseTarget(c *lc, m *vir.Module) error {
@@ -135,9 +171,9 @@ func parseTarget(c *lc, m *vir.Module) error {
 }
 
 // parseAsmDialect parses the module-wide `asmdialect dialect` line (§1.1,
-// §1.2 rule 11). It only checks that the token names a known dialect;
+// §2.1 step 4). It only checks that the token names a known dialect;
 // whether that dialect is valid for the module's architecture is Verify's
-// job (§9.34).
+// job (§4.4).
 func parseAsmDialect(c *lc, m *vir.Module) error {
 	c.accept(tIdent, "asmdialect")
 	tok, err := c.expectIdent()
@@ -158,6 +194,7 @@ func parseAsmDialect(c *lc, m *vir.Module) error {
 }
 
 func parseStruct(c *lc, m *vir.Module) error {
+	export := c.accept(tIdent, "export")
 	c.accept(tIdent, "struct")
 	name, err := c.expectIdent()
 	if err != nil {
@@ -187,12 +224,19 @@ func parseStruct(c *lc, m *vir.Module) error {
 	if !c.done() {
 		return c.l.errf("trailing tokens after struct declaration")
 	}
-	m.DeclareStruct(name, fields...)
+	s := m.DeclareStruct(name, fields...)
+	if export {
+		s.Exported()
+	}
 	return nil
 }
 
 // fnsig params are bare types — fnsigs never name their parameters (§1.1).
+// The variadic tail must follow at least one named type, per
+// `type-list := type ("," type)* ("," "...")?` — a bare `(...)` fnsig is
+// rejected at parse time.
 func parseFnSig(c *lc, m *vir.Module) error {
+	export := c.accept(tIdent, "export")
 	c.accept(tIdent, "fnsig")
 	name, err := c.expectIdent()
 	if err != nil {
@@ -205,13 +249,6 @@ func parseFnSig(c *lc, m *vir.Module) error {
 	variadic := false
 	if !c.accept(tPunct, ")") {
 		for {
-			if c.accept(tEllipsis, "") {
-				variadic = true
-				if err := c.expectPunct(")"); err != nil {
-					return err
-				}
-				break
-			}
 			t, err := parseType(c)
 			if err != nil {
 				return err
@@ -223,6 +260,13 @@ func parseFnSig(c *lc, m *vir.Module) error {
 			if err := c.expectPunct(","); err != nil {
 				return err
 			}
+			if c.accept(tEllipsis, "") {
+				variadic = true
+				if err := c.expectPunct(")"); err != nil {
+					return err
+				}
+				break
+			}
 		}
 	}
 	ret, err := parseType(c)
@@ -232,11 +276,15 @@ func parseFnSig(c *lc, m *vir.Module) error {
 	if !c.done() {
 		return c.l.errf("trailing tokens after fnsig")
 	}
-	m.DeclareFunctionSignature(name, params, variadic, ret)
+	sig := m.DeclareFunctionSignature(name, params, variadic, ret)
+	if export {
+		sig.Exported()
+	}
 	return nil
 }
 
 func parseConst(c *lc, m *vir.Module) error {
+	export := c.accept(tIdent, "export")
 	c.accept(tIdent, "const")
 	name, err := c.expectIdent()
 	if err != nil {
@@ -256,7 +304,10 @@ func parseConst(c *lc, m *vir.Module) error {
 	if !c.done() {
 		return c.l.errf("trailing tokens after const")
 	}
-	m.DeclareConstant(name, t, val)
+	cst := m.DeclareConstant(name, t, val)
+	if export {
+		cst.Exported()
+	}
 	return nil
 }
 
@@ -378,7 +429,7 @@ func (p *parser) parseExternGroup(m *vir.Module) error {
 		}
 		c := &lc{l: l}
 		if !c.accept(tIdent, "fn") {
-			return l.errf("extern groups contain only fn lines (§1.2 rule 9)")
+			return l.errf("extern groups contain only fn lines (§7.2)")
 		}
 		name, params, variadic, ret, attrs, err := parseFnHead(c)
 		if err != nil {
@@ -394,15 +445,35 @@ func (p *parser) parseExternGroup(m *vir.Module) error {
 	}
 }
 
+// parseImport parses one cross-module `import` declaration (§7.3). Path is
+// "namespace/module" or bare "module", matching ModuleShape.QualifiedID.
+func parseImport(c *lc, m *vir.Module) error {
+	c.accept(tIdent, "import")
+	tk, ok := c.next()
+	if !ok || tk.kind != tString {
+		return c.l.errf("import expects a string literal")
+	}
+	if !c.done() {
+		return c.l.errf("trailing tokens after import")
+	}
+	m.DeclareImport(tk.text)
+	return nil
+}
+
 // parseFnHead parses `name(params) ret attrs*` after the fn keyword. Shared
-// by extern-fn lines (above) and fn definitions (func.go).
+// by extern-fn lines (above) and fn definitions (func.go). The variadic
+// tail must follow at least one named parameter, per
+// `param-list := param ("," param)* ("," "...")?` — a bare `(...)` param
+// list is rejected at parse time, matching the requirement (§4.5) that a
+// variadic function have a final named parameter to anchor va_start's
+// last_named.
 //
-// Note: `entry` is accepted here structurally for both extern-fn and fn
-// definitions, since this parser function is shared and the grammar's
-// fn-attr production (§1.1) lists `entry` unconditionally. Whether `entry`
-// is actually *meaningful* only on fn definitions (vs. extern fn, where it
-// wouldn't make sense) is left to Verify (§9.4a) rather than rejected here
-// at parse time.
+// Note: `entry` and `extern_c` are accepted here structurally for both
+// extern-fn and fn definitions, since this parser function is shared and
+// the grammar's fn-attr production (§2.3) lists all seven attributes
+// unconditionally. Whether each attribute is actually *meaningful* on a
+// given kind of fn (e.g. entry on an extern fn) is left to Verify (§9.4a)
+// rather than rejected here at parse time.
 func parseFnHead(c *lc) (string, []vir.Param, bool, vir.Type, []vir.FunctionAttribute, error) {
 	name, err := c.expectIdent()
 	if err != nil {
@@ -415,13 +486,6 @@ func parseFnHead(c *lc) (string, []vir.Param, bool, vir.Type, []vir.FunctionAttr
 	variadic := false
 	if !c.accept(tPunct, ")") {
 		for {
-			if c.accept(tEllipsis, "") {
-				variadic = true
-				if err := c.expectPunct(")"); err != nil {
-					return "", nil, false, nil, nil, err
-				}
-				break
-			}
 			pn, err := c.expectIdent()
 			if err != nil {
 				return "", nil, false, nil, nil, err
@@ -460,6 +524,13 @@ func parseFnHead(c *lc) (string, []vir.Param, bool, vir.Type, []vir.FunctionAttr
 			if err := c.expectPunct(","); err != nil {
 				return "", nil, false, nil, nil, err
 			}
+			if c.accept(tEllipsis, "") {
+				variadic = true
+				if err := c.expectPunct(")"); err != nil {
+					return "", nil, false, nil, nil, err
+				}
+				break
+			}
 		}
 	}
 	ret, err := parseType(c)
@@ -473,7 +544,7 @@ func parseFnHead(c *lc) (string, []vir.Param, bool, vir.Type, []vir.FunctionAttr
 			break
 		}
 		switch tk.text {
-		case "noreturn", "readonly", "inline", "noinline", "cold", "entry":
+		case "noreturn", "readonly", "inline", "noinline", "cold", "entry", "extern_c":
 			attrs = append(attrs, vir.FunctionAttribute(tk.text))
 			c.next()
 		default:
@@ -484,11 +555,15 @@ func parseFnHead(c *lc) (string, []vir.Param, bool, vir.Type, []vir.FunctionAttr
 }
 
 // ---------------------------------------------------------------------------
-// Encoding: header, structs, fnsigs, consts, globals, links, externs.
+// Encoding: header, namespace, structs, fnsigs, consts, globals, links,
+// externs, imports.
 // ---------------------------------------------------------------------------
 
 func encodeHeader(w func(string, ...any), m *vir.Module) {
 	w("module %s\n", m.Name)
+	if m.Namespace != "" {
+		w("namespace %q\n", m.Namespace)
+	}
 	if t := m.Target; t != nil {
 		w("target %s %s", t.Arch, t.OS)
 		if t.ABI != "" {
@@ -506,6 +581,9 @@ func encodeHeader(w func(string, ...any), m *vir.Module) {
 
 func encodeStructsSection(w func(string, ...any), m *vir.Module) {
 	for _, s := range m.Structs {
+		if s.Export {
+			w("export ")
+		}
 		parts := make([]string, len(s.Fields))
 		for i, f := range s.Fields {
 			parts[i] = f.Name + " " + f.Type.String()
@@ -517,6 +595,9 @@ func encodeStructsSection(w func(string, ...any), m *vir.Module) {
 func encodeFnSigsSection(w func(string, ...any), m *vir.Module) {
 	// fnsig params are bare Types — fnsigs never name their parameters.
 	for _, s := range m.FunctionSignatures {
+		if s.Export {
+			w("export ")
+		}
 		parts := make([]string, 0, len(s.Params)+1)
 		for _, p := range s.Params {
 			parts = append(parts, p.String())
@@ -530,6 +611,9 @@ func encodeFnSigsSection(w func(string, ...any), m *vir.Module) {
 
 func encodeConstsSection(w func(string, ...any), m *vir.Module) {
 	for _, c := range m.Constants {
+		if c.Export {
+			w("export ")
+		}
 		w("const %s %s = %s\n", c.Name, c.Type.String(), c.Value.String())
 	}
 }
@@ -570,6 +654,12 @@ func encodeExternsSection(w func(string, ...any), m *vir.Module) {
 			w("    fn %s(%s) %s%s\n", f.Name, params, f.Ret.String(), attrs)
 		}
 		w("end\n")
+	}
+}
+
+func encodeImportsSection(w func(string, ...any), m *vir.Module) {
+	for _, imp := range m.Imports {
+		w("import %q\n", imp.Path)
 	}
 }
 

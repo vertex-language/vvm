@@ -8,9 +8,9 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Inline assembly (§4). Structural only, per README/verify.go: mnemonic and
+// Inline assembly (§4.4). Structural only, per README/verify.go: mnemonic and
 // operand-shape legality (§9.38) is explicitly not required at this layer.
-// Dialect is module-wide (§1.2 rule 11) — passed in from the caller, not
+// Dialect is module-wide (§2.1 step 4) — passed in from the caller, not
 // read off the asm block itself.
 // ---------------------------------------------------------------------------
 

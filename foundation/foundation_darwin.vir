@@ -1,0 +1,74 @@
+module foundation
+target aarch64 macos aapcs64
+
+const STDOUT   i32 = 1
+const STDERR   i32 = 2
+const EXIT_OK  i32 = 0
+const EXIT_ERR i32 = 1
+
+global nl array[i8, 1] = "\n"
+
+link shared "libSystem.B.dylib"
+
+extern "libSystem.B.dylib" :
+    fn malloc(size i64) ptr
+    fn free(p ptr) void
+    fn write(fd i32, buf ptr, len i64) i64
+    fn exit(code i32) void noreturn
+end
+
+// -- heap alloc/free: thin libSystem wrappers --
+
+export fn mem_alloc(size i64) ptr :
+    p = call malloc, size
+    return p
+end
+
+export fn mem_free(p ptr) void :
+    call free, p
+    return
+end
+
+// -- stdout / stderr --
+
+export fn print(buf ptr, len i64) i64 :
+    n = call write, STDOUT, buf, len
+    return n
+end
+
+export fn eprint(buf ptr, len i64) i64 :
+    n = call write, STDERR, buf, len
+    return n
+end
+
+// -- NUL-terminated length, pure IR, identical on every target --
+
+export fn str_len(s ptr) i64 :
+    len = add.i64 0, 0
+    br loop
+loop:
+    p = index.ptr s, i8, len
+    c = load.i8 p
+    is_end = eq.i8 c, 0
+    br_if is_end, done, next
+next:
+    len = add.i64 len, 1
+    br loop
+done:
+    return len
+end
+
+export fn print_line(s ptr) i64 :
+    len = call str_len, s
+    n1  = call print, s, len
+    n2  = call print, nl, 1
+    total = add.i64 n1, n2
+    return total
+end
+
+// -- process exit --
+
+export fn halt(code i32) void noreturn :
+    call exit, code
+    unreachable
+end

@@ -1,23 +1,28 @@
 // builder.go
 package vir
 
-// Builder API. Mirrors the IR one-to-one — it constructs, it doesn't check;
-// Verify checks (README). Nothing here validates ordering, names, or types.
-// Op arguments are Opcode constants (opcode.go), not strings — the builder
-// itself won't stop you from misusing one (that's still Verify's job), but
-// a typo like "cltz" is now a compile error instead of a value the type
-// checker happily carries all the way to Verify.
+// Builder API. Mirrors the IR one-to-one — it constructs, it doesn't
+// check; Verify checks (README). Nothing here validates ordering, names,
+// or types. Op arguments are Opcode constants (opcode.go), not strings —
+// a typo like "cltz" is a compile error, not a value Verify has to catch.
 
 func NewModule(name string) *Module { return &Module{Name: name} }
+
+// SetNamespace declares the module's namespace (§2.1 step 2, §6.3). Gates
+// symbol mangling for export fn/global (see mangle.go).
+func (m *Module) SetNamespace(ns string) *Module {
+	m.Namespace = ns
+	return m
+}
 
 func (m *Module) SetTarget(arch, os, abi string, tiers ...string) *Module {
 	m.Target = &Target{Arch: arch, OS: os, ABI: abi, Tiers: tiers}
 	return m
 }
 
-// SetAsmDialect declares the module-wide asmdialect (§1.2 rule 11). Required
-// if the module contains any asm blocks; Verify checks that the dialect is
-// valid for the module's target architecture.
+// SetAsmDialect declares the module-wide asmdialect (§2.1 step 4). Required
+// if the module contains any asm blocks; Verify checks it's valid for the
+// module's target architecture.
 func (m *Module) SetAsmDialect(d AsmDialect) *Module {
 	m.AsmDialect = &d
 	return m
@@ -28,18 +33,21 @@ func (m *Module) DeclareStruct(name string, fields ...Field) *Struct {
 	m.Structs = append(m.Structs, s)
 	return s
 }
+func (s *Struct) Exported() *Struct { s.Export = true; return s }
 
 func (m *Module) DeclareFunctionSignature(name string, params []Type, variadic bool, ret Type) *FunctionSignature {
 	sig := &FunctionSignature{Name: name, Params: params, Variadic: variadic, Ret: ret}
 	m.FunctionSignatures = append(m.FunctionSignatures, sig)
 	return sig
 }
+func (s *FunctionSignature) Exported() *FunctionSignature { s.Export = true; return s }
 
 func (m *Module) DeclareConstant(name string, t Type, value Operand) *Constant {
 	c := &Constant{Name: name, Type: t, Value: value}
 	m.Constants = append(m.Constants, c)
 	return c
 }
+func (c *Constant) Exported() *Constant { c.Export = true; return c }
 
 func (m *Module) DeclareGlobal(name string, t Type, init ConstInit) *Global {
 	g := &Global{Name: name, Type: t, Init: init}
@@ -71,6 +79,14 @@ func (g *ExternGroup) DeclareFunction(name string, params []Param, ret Type, att
 
 func (f *ExternFunction) SetVariadic() *ExternFunction { f.Variadic = true; return f }
 
+// DeclareImport declares a cross-module `import` (§7.3). path is
+// "namespace/module" or bare "module".
+func (m *Module) DeclareImport(path string) *Import {
+	i := &Import{Path: path}
+	m.Imports = append(m.Imports, i)
+	return i
+}
+
 // FunctionBuilder appends to the current block; Label opens a new one.
 type FunctionBuilder struct {
 	Function *Function
@@ -85,6 +101,13 @@ func (m *Module) DeclareFunction(name string, params []Param, ret Type, export b
 	f.Entry = &Block{}
 	m.Functions = append(m.Functions, f)
 	return &FunctionBuilder{Function: f, current: f.Entry}
+}
+
+// SetVariadic marks the function's param-list as ending in "..." (§4.5),
+// enabling va_start/va_arg/va_end use inside the body.
+func (fb *FunctionBuilder) SetVariadic() *FunctionBuilder {
+	fb.Function.Variadic = true
+	return fb
 }
 
 // Label closes nothing (Verify enforces termination) and opens a new block.
@@ -105,7 +128,7 @@ func (fb *FunctionBuilder) Emit(result string, op Opcode, suffix Type, args ...O
 }
 
 // EmitInstruction appends a fully specified instruction (align clauses,
-// fnsig calls).
+// fnsig calls, va_start's self-referential Sig token).
 func (fb *FunctionBuilder) EmitInstruction(i Instruction) Operand {
 	return fb.appendInstruction(i)
 }
@@ -127,6 +150,14 @@ func (fb *FunctionBuilder) Store(t Type, p, v Operand)                 { fb.Emit
 func (fb *FunctionBuilder) Alloca(n string, size Operand, align int) Operand {
 	return fb.EmitInstruction(Instruction{Result: n, Op: OpAlloca, Suffix: Ptr, Args: []Operand{size}, Align: align})
 }
+
+// AllocaValist declares a fresh valist slot (§4.5, §5.1) — the sole legal
+// way to create one. No size/align operand: unlike alloca.ptr, its layout
+// is target-defined and not something a frontend sizes.
+func (fb *FunctionBuilder) AllocaValist(n string) Operand {
+	return fb.EmitInstruction(Instruction{Result: n, Op: OpAlloca, Suffix: Valist})
+}
+
 func (fb *FunctionBuilder) FieldPointer(n string, p Operand, structName, field string) Operand {
 	return fb.Emit(n, OpField, Ptr, p, Ident(structName), Ident(field))
 }
@@ -136,14 +167,35 @@ func (fb *FunctionBuilder) IndexPointer(n string, p Operand, elem Type, idx Oper
 func (fb *FunctionBuilder) Call(n, callee string, args ...Operand) Operand {
 	return fb.Emit(n, OpCall, nil, append([]Operand{Ident(callee)}, args...)...)
 }
+func (fb *FunctionBuilder) CallImported(n, importPath, callee string, args ...Operand) Operand {
+	return fb.Emit(n, OpCall, nil, append([]Operand{QualifiedIdent(importPath, callee)}, args...)...)
+}
 func (fb *FunctionBuilder) CallIndirect(n, sig string, fp Operand, args ...Operand) Operand {
 	return fb.EmitInstruction(Instruction{Result: n, Op: OpCall, Sig: sig, Args: append([]Operand{fp}, args...)})
 }
 
-// Syscall executes a hardware-level system call trap (§4 Calls & Control).
-// sysNo is the syscall number; up to six scalar args follow.
+// Syscall executes a hardware-level system call trap (§4.2).
 func (fb *FunctionBuilder) Syscall(n string, ret Type, sysNo Operand, args ...Operand) Operand {
 	return fb.Emit(n, OpSyscall, ret, append([]Operand{sysNo}, args...)...)
+}
+
+// VaStart initializes dst (a prior alloca.valist result) for reading
+// arguments after lastNamed, the function's final declared parameter
+// (§4.5). selfSig is decorative/self-referential — checked structurally
+// against the enclosing function, not looked up in FunctionSignatures.
+func (fb *FunctionBuilder) VaStart(selfSig, dst, lastNamed string) {
+	fb.EmitInstruction(Instruction{Op: OpVaStart, Sig: selfSig, Args: []Operand{Ident(dst), Ident(lastNamed)}})
+}
+
+// VaArg reads the next variadic argument from src as type t (§4.5).
+func (fb *FunctionBuilder) VaArg(n string, t Type, src Operand) Operand {
+	return fb.Emit(n, OpVaArg, t, src)
+}
+
+// VaEnd closes src (§4.5); required before it's legally re-va_start-able
+// or before a returning terminator.
+func (fb *FunctionBuilder) VaEnd(src Operand) {
+	fb.Emit("", OpVaEnd, nil, src)
 }
 
 // Terminators.
@@ -172,27 +224,18 @@ func (fb *FunctionBuilder) Trap()        { fb.current.Term = Trap{} }
 func (fb *FunctionBuilder) Unreachable() { fb.current.Term = Unreachable{} }
 
 // ---------------------------------------------------------------------------
-// Inline assembly builder (§4).
+// Inline assembly builder (§4.4).
 // ---------------------------------------------------------------------------
 
 // AsmBuilder accumulates one asm block's bindings and code before it is
-// appended to the enclosing function's current basic block via End. The
-// dialect governing the block's `code:` syntax comes from the module-level
-// AsmDialect declaration (§1.2 rule 11), not from the block itself.
-//
-// Mnemonics/registers here stay string-typed (BeginAsm/Code take plain
-// strings): they index a per-architecture/dialect data table (targets.go),
-// which is deliberately open — a new arch or dialect adds table rows, not
-// new Go identifiers. That's a different shape of problem from core-IR
-// opcodes, which are a closed, spec-fixed set (opcode.go) and belong in a
-// Go enum for exactly the reason opcode.go exists.
+// appended to the enclosing function's current block via End. The dialect
+// governing `code:` syntax comes from the module-level AsmDialect (§2.1
+// step 4), not from the block itself.
 type AsmBuilder struct {
 	owner *FunctionBuilder
 	block AsmBlock
 }
 
-// BeginAsm starts a new inline-assembly block. Its syntax is governed by
-// the enclosing module's AsmDialect (set via Module.SetAsmDialect).
 func (fb *FunctionBuilder) BeginAsm() *AsmBuilder {
 	return &AsmBuilder{owner: fb, block: AsmBlock{}}
 }
@@ -217,8 +260,6 @@ func (ab *AsmBuilder) Code(lines ...AsmCodeLine) *AsmBuilder {
 	return ab
 }
 
-// End closes the asm block and appends it to the enclosing function's
-// current basic block, in place, as an ordinary body-line.
 func (ab *AsmBuilder) End() {
 	finished := ab.block
 	ab.owner.current.Lines = append(ab.owner.current.Lines, BodyLine{Asm: &finished})

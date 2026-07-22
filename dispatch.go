@@ -20,8 +20,8 @@ import (
 	objwx86 "github.com/vertex-language/vvm/objectwriter/x86"
 	objwx86_64 "github.com/vertex-language/vvm/objectwriter/x86_64"
 
-	ofelf "github.com/vertex-language/vvm/objectfile/elf"
 	ofcoff "github.com/vertex-language/vvm/objectfile/coff"
+	ofelf "github.com/vertex-language/vvm/objectfile/elf"
 	ofmacho "github.com/vertex-language/vvm/objectfile/macho"
 
 	linkelf "github.com/vertex-language/vvm/linker/elf"
@@ -141,7 +141,11 @@ func machoObjTarget(t Target) ofmacho.Target {
 
 // --- linker/<format> construction ---------------------------------------
 
-func newLinker(m *vir.Module, t Target, entryPoint string) (linker interface {
+// newLinker now takes every module participating in the build (not just
+// one) — a multi-module graph build (buildgraph.go) needs every module's
+// own §7.4 link section resolved, not only the root's. The single-module
+// path (build.go) simply passes a one-element slice.
+func newLinker(modules []*vir.Module, t Target, entryPoint string) (linker interface {
 	SetEntryPoint(string)
 	AddObject(name string, data []byte) error
 	Link() ([]byte, error)
@@ -173,13 +177,13 @@ func newLinker(m *vir.Module, t Target, entryPoint string) (linker interface {
 			l.SetEntryPoint(entryPoint)
 		}
 
-		// Resolve the module's own §7.4 link section into real bytes.
-		// vir.Verify already confirmed every dependency here is
-		// well-formed (kind/extension agreement, no post-derivation
-		// duplicates) and that an ELF target never carries a `framework`
-		// dependency — this only has to load what Verify already
-		// approved, not re-validate it.
-		if err := addELFLinkDependencies(l, m, t); err != nil {
+		// Resolve every module's own §7.4 link section into real bytes.
+		// vir.Verify already confirmed each dependency is well-formed
+		// (kind/extension agreement, no post-derivation duplicates) and
+		// that an ELF target never carries a `framework` dependency —
+		// this only has to load what Verify already approved, not
+		// re-validate it.
+		if err := addELFLinkDependencies(l, modules, t); err != nil {
 			return nil, err
 		}
 
@@ -248,59 +252,77 @@ func newLinker(m *vir.Module, t Target, entryPoint string) (linker interface {
 	return nil, fmt.Errorf("vvm: unreachable format for %s", t)
 }
 
-// addELFLinkDependencies walks m.Links — the module's self-contained
+// addELFLinkDependencies walks every module's m.Links — the self-contained
 // dependency list (ir.md §7.4) — and resolves each into l via its
-// search-path-aware Add* methods. Without this, a module's
-// `link shared "..."` / `link static "..."` lines only ever passed
-// vir.Verify's name-matching check (§1.2 rule 9); nothing previously
-// turned them into actual bytes handed to the linker, so any symbol from
-// such a dependency came back "undefined reference" regardless of how
-// correctly the module declared it.
-func addELFLinkDependencies(l *linkelf.Linker, m *vir.Module, t Target) error {
+// search-path-aware Add* methods. seen dedupes across modules: two
+// modules linking the same system library (most commonly "c") must only
+// resolve it once.
+//
+// Links carrying crossModuleLinkPrefix (importrewrite.go) are skipped
+// outright — they're bookkeeping synthesized by Stage B to satisfy
+// vir.Verify's link/extern-group pairing rule, not real system
+// dependencies; the actual symbol lives in another module's own object,
+// already attached via a sibling AddObject call (buildgraph.go).
+func addELFLinkDependencies(l *linkelf.Linker, modules []*vir.Module, t Target) error {
 	format := vir.FormatOf(t.OS)
-	for _, link := range m.Links {
-		switch link.Kind {
-		case vir.LinkShared:
-			// "c" is libc's own conventional short name (ir.md §7.4's
-			// worked example). The plain short-name derivation yields
-			// "libc.so", which on most distros is only a dev-package
-			// linker script/symlink, not a loadable runtime object
-			// (§7.4 "Informative" note) — AddSystemLibrary would find
-			// and try to parse that, and fail or misbehave depending on
-			// the distro. Route it through the registered default
-			// namespace instead, which already resolves the real
-			// per-(arch,os,abi) runtime soname (e.g. libc.so.6 on gnu,
-			// a different musl soname) — see linker/elf/x86_64/register.go.
-			if link.Name == "c" {
-				if err := l.AddDefaultNamespace(); err != nil {
-					return fmt.Errorf("vvm: link shared %q: %w", link.Name, err)
-				}
+	seenNamespace := false
+	seenFile := map[string]bool{}
+
+	for _, m := range modules {
+		for _, link := range m.Links {
+			if len(link.Name) >= len(crossModuleLinkPrefix) && link.Name[:len(crossModuleLinkPrefix)] == crossModuleLinkPrefix {
 				continue
 			}
-			file, err := vir.DeriveLinkFile(link, format)
-			if err != nil {
-				return fmt.Errorf("vvm: link shared %q: %w", link.Name, err)
-			}
-			if err := l.AddSystemLibrary(file); err != nil {
-				return fmt.Errorf("vvm: link shared %q: %w", link.Name, err)
-			}
 
-		case vir.LinkStatic:
-			file, err := vir.DeriveLinkFile(link, format)
-			if err != nil {
-				return fmt.Errorf("vvm: link static %q: %w", link.Name, err)
-			}
-			if err := l.AddSystemArchive(file); err != nil {
-				return fmt.Errorf("vvm: link static %q: %w", link.Name, err)
-			}
+			switch link.Kind {
+			case vir.LinkShared:
+				// "c" is libc's own conventional short name (ir.md §7.4's
+				// worked example). Route it through the registered default
+				// namespace, which resolves the real per-(arch,os,abi)
+				// runtime soname — see linker/elf/x86_64/register.go.
+				if link.Name == "c" {
+					if seenNamespace {
+						continue
+					}
+					if err := l.AddDefaultNamespace(); err != nil {
+						return fmt.Errorf("vvm: link shared %q: %w", link.Name, err)
+					}
+					seenNamespace = true
+					continue
+				}
+				file, err := vir.DeriveLinkFile(link, format)
+				if err != nil {
+					return fmt.Errorf("vvm: link shared %q: %w", link.Name, err)
+				}
+				if seenFile[file] {
+					continue
+				}
+				if err := l.AddSystemLibrary(file); err != nil {
+					return fmt.Errorf("vvm: link shared %q: %w", link.Name, err)
+				}
+				seenFile[file] = true
 
-		case vir.LinkFramework:
-			// Unreachable in practice: vir.Verify rejects `framework` on
-			// any non-Mach-O target (§7.4/§9.8) before BuildModule's own
-			// Verify call ever lets execution reach here. Fail loudly
-			// rather than silently ignoring it, in case a caller ever
-			// hands BuildModule an unverified *vir.Module directly.
-			return fmt.Errorf("vvm: link framework %q: framework dependencies are not valid for an ELF target (§7.4)", link.Name)
+			case vir.LinkStatic:
+				file, err := vir.DeriveLinkFile(link, format)
+				if err != nil {
+					return fmt.Errorf("vvm: link static %q: %w", link.Name, err)
+				}
+				if seenFile[file] {
+					continue
+				}
+				if err := l.AddSystemArchive(file); err != nil {
+					return fmt.Errorf("vvm: link static %q: %w", link.Name, err)
+				}
+				seenFile[file] = true
+
+			case vir.LinkFramework:
+				// Unreachable in practice: vir.Verify rejects `framework` on
+				// any non-Mach-O target (§7.4/§9.8) before this ever runs.
+				// Fail loudly rather than silently ignoring it, in case a
+				// caller ever hands BuildModule/BuildModuleGraph an
+				// unverified *vir.Module directly.
+				return fmt.Errorf("vvm: link framework %q: framework dependencies are not valid for an ELF target (§7.4)", link.Name)
+			}
 		}
 	}
 	return nil

@@ -3,9 +3,9 @@ package vir
 
 import "fmt"
 
-// Canonical target vocabularies (§10.1–§10.3) and the alias tables that are
-// resolved only at the build-system boundary (§10.5). The verifier consults
-// the canonical sets and *rejects* anything found in the alias maps.
+// Canonical target vocabularies (§7.1) and the alias tables resolved only
+// at the build-system boundary (§7.1 "Aliases"). The verifier consults the
+// canonical sets and rejects anything found in the alias maps.
 
 var CanonicalArch = map[string]bool{
 	"x86": true, "x86_64": true,
@@ -45,7 +45,7 @@ var CanonicalABI = map[string]bool{
 	"eabi": true, "eabihf": true, "aapcs64": true, "macho": true,
 }
 
-// PointerBits returns the address width an arch fixes (§10.1).
+// PointerBits returns the address width an arch fixes (§7.1).
 func PointerBits(arch string) int {
 	switch arch {
 	case "x86", "arm", "armeb", "riscv32", "powerpc", "mips32", "mips32el":
@@ -54,7 +54,7 @@ func PointerBits(arch string) int {
 	return 64
 }
 
-// BinFormat classifies the object/link format an OS implies (§7.4 tables).
+// BinFormat classifies the object/link format an OS implies (§7.2/§7.4).
 type BinFormat int
 
 const (
@@ -74,12 +74,12 @@ func FormatOf(os string) BinFormat {
 }
 
 // ---------------------------------------------------------------------------
-// Inline assembly: dialect legality and register tables (§4, §10.6).
+// Inline assembly: dialect legality and register tables (§4.4, §7.1).
 // ---------------------------------------------------------------------------
 
 // DialectsForArchitecture lists which asm dialects are valid for an
-// architecture (§4 Extensibility, §9.34). An arch absent from this map has
-// no known assembly story yet and rejects all asm blocks.
+// architecture (§4.4). An arch absent from this map has no known assembly
+// story yet and rejects all asm blocks.
 var DialectsForArchitecture = map[string][]AsmDialect{
 	"x86_64": {DialectIntel, DialectATT},
 	"x86":    {DialectIntel, DialectATT},
@@ -110,7 +110,7 @@ func IsDialectValidForArchitecture(arch string, d AsmDialect) bool {
 	return false
 }
 
-// RegisterClass groups a register by hardware role (§4 Register table shape).
+// RegisterClass groups a register by hardware role.
 type RegisterClass string
 
 const (
@@ -119,7 +119,7 @@ const (
 	RegisterClassFlags          RegisterClass = "flags"
 )
 
-// RegisterInfo is one row of a dialect's register table (§4).
+// RegisterInfo is one row of a dialect's register table (§4.4).
 type RegisterInfo struct {
 	WidthBits    int
 	Class        RegisterClass
@@ -127,8 +127,6 @@ type RegisterInfo struct {
 	Reserved     bool
 }
 
-// X86RegisterTable covers the common x86_64 GPRs at both their 64-bit and
-// 32-bit (sub-register) spellings, per the spec's own rax/eax example.
 var X86RegisterTable = map[string]RegisterInfo{
 	"rax": {64, RegisterClassGeneralPurpose, "RAX", false}, "eax": {32, RegisterClassGeneralPurpose, "RAX", false},
 	"rbx": {64, RegisterClassGeneralPurpose, "RBX", false}, "ebx": {32, RegisterClassGeneralPurpose, "RBX", false},
@@ -152,9 +150,8 @@ var AArch64RegisterTable = map[string]RegisterInfo{
 	"sp": {64, RegisterClassGeneralPurpose, "SP", true},
 }
 
-// Native Register Tables for remaining architectures
 var RISCVRegisterTable = map[string]RegisterInfo{
-	"x0": {64, RegisterClassGeneralPurpose, "X0", true}, // zero register
+	"x0": {64, RegisterClassGeneralPurpose, "X0", true},
 }
 var PowerPCRegisterTable = map[string]RegisterInfo{}
 var MIPSRegisterTable = map[string]RegisterInfo{}
@@ -162,7 +159,6 @@ var LoongArchRegisterTable = map[string]RegisterInfo{}
 var S390XRegisterTable = map[string]RegisterInfo{}
 
 func init() {
-	// AArch64
 	for i := 0; i <= 28; i++ {
 		name64 := registerName("x", i)
 		name32 := registerName("w", i)
@@ -170,32 +166,23 @@ func init() {
 		AArch64RegisterTable[name64] = RegisterInfo{64, RegisterClassGeneralPurpose, phys, false}
 		AArch64RegisterTable[name32] = RegisterInfo{32, RegisterClassGeneralPurpose, phys, false}
 	}
-	AArch64RegisterTable["x29"] = RegisterInfo{64, RegisterClassGeneralPurpose, "X29", true} // frame pointer
+	AArch64RegisterTable["x29"] = RegisterInfo{64, RegisterClassGeneralPurpose, "X29", true}
 	AArch64RegisterTable["w29"] = RegisterInfo{32, RegisterClassGeneralPurpose, "X29", true}
-	AArch64RegisterTable["x30"] = RegisterInfo{64, RegisterClassGeneralPurpose, "X30", true} // link register
+	AArch64RegisterTable["x30"] = RegisterInfo{64, RegisterClassGeneralPurpose, "X30", true}
 	AArch64RegisterTable["w30"] = RegisterInfo{32, RegisterClassGeneralPurpose, "X30", true}
 
-	// RISC-V (x1-x31)
 	for i := 1; i <= 31; i++ {
 		RISCVRegisterTable[fmt.Sprintf("x%d", i)] = RegisterInfo{64, RegisterClassGeneralPurpose, fmt.Sprintf("X%d", i), false}
 	}
-
-	// PowerPC (r0-r31)
 	for i := 0; i <= 31; i++ {
 		PowerPCRegisterTable[fmt.Sprintf("r%d", i)] = RegisterInfo{64, RegisterClassGeneralPurpose, fmt.Sprintf("R%d", i), false}
 	}
-
-	// MIPS (r0-r31)
 	for i := 0; i <= 31; i++ {
 		MIPSRegisterTable[fmt.Sprintf("r%d", i)] = RegisterInfo{64, RegisterClassGeneralPurpose, fmt.Sprintf("R%d", i), i == 0}
 	}
-
-	// LoongArch (r0-r31)
 	for i := 0; i <= 31; i++ {
 		LoongArchRegisterTable[fmt.Sprintf("r%d", i)] = RegisterInfo{64, RegisterClassGeneralPurpose, fmt.Sprintf("R%d", i), i == 0}
 	}
-
-	// s390x (r0-r15)
 	for i := 0; i <= 15; i++ {
 		S390XRegisterTable[fmt.Sprintf("r%d", i)] = RegisterInfo{64, RegisterClassGeneralPurpose, fmt.Sprintf("R%d", i), false}
 	}
@@ -208,7 +195,6 @@ func registerName(prefix string, n int) string {
 	return prefix + digits[n]
 }
 
-// ARMRegisterTable covers the 32-bit ARM (a32/t32) integer register file.
 var ARMRegisterTable = map[string]RegisterInfo{
 	"r0": {32, RegisterClassGeneralPurpose, "R0", false}, "r1": {32, RegisterClassGeneralPurpose, "R1", false},
 	"r2": {32, RegisterClassGeneralPurpose, "R2", false}, "r3": {32, RegisterClassGeneralPurpose, "R3", false},
@@ -223,8 +209,7 @@ var ARMRegisterTable = map[string]RegisterInfo{
 }
 
 // RegisterTableForArchitecture returns the register table for arch, or nil
-// if none is wired yet (in which case asm blocks on that arch are
-// rejected, §9.34/35).
+// if none is wired yet (asm blocks on that arch are rejected).
 func RegisterTableForArchitecture(arch string) map[string]RegisterInfo {
 	switch arch {
 	case "x86_64", "x86":

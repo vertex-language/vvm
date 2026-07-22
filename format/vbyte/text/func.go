@@ -28,9 +28,6 @@ func (p *parser) parseFn(m *vir.Module) error {
 	if err != nil {
 		return err
 	}
-	if variadic {
-		return l.errf("variadics are rejected in fn definitions (§1.2 rule 5)")
-	}
 	if err := c.expectPunct(":"); err != nil {
 		return err
 	}
@@ -44,6 +41,14 @@ func (p *parser) parseFn(m *vir.Module) error {
 	}
 
 	fb := m.DeclareFunction(name, params, ret, export, attrs...)
+	// A fn-def's param-list may end in "..." (§2.3 grammar, §4.5) — this is
+	// what makes va_start/va_arg/va_end usable in the body. Earlier
+	// revisions of this parser rejected variadic fn definitions outright;
+	// that contradicted §4.5 and FunctionBuilder.SetVariadic, which exists
+	// precisely to mark a fn-def variadic.
+	if variadic {
+		fb.SetVariadic()
+	}
 	terminated := false
 	for {
 		l := p.next()
@@ -54,28 +59,28 @@ func (p *parser) parseFn(m *vir.Module) error {
 		switch {
 		case f == "end":
 			if !terminated {
-				return l.errf("fn %s: block ended without a terminator (§1.3 rule 2)", name)
+				return l.errf("fn %s: block ended without a terminator (§4.3)", name)
 			}
 			return nil
 		case len(l.toks) == 2 && l.toks[0].kind == tIdent && l.toks[1].kind == tPunct && l.toks[1].text == ":":
 			if !terminated {
-				return l.errf("fn %s: block must end with a terminator before next label (§1.3 rule 2)", name)
+				return l.errf("fn %s: block must end with a terminator before next label (§4.3)", name)
 			}
 			fb.Label(l.toks[0].text)
 			terminated = false
 		case f == "asm":
 			if terminated {
-				return l.errf("fn %s: asm block after terminator (§1.3 rule 2)", name)
+				return l.errf("fn %s: asm block after terminator (§4.3)", name)
 			}
 			if m.AsmDialect == nil {
-				return l.errf("fn %s: asm block requires a module-level asmdialect declaration (§1.2 rule 11)", name)
+				return l.errf("fn %s: asm block requires a module-level asmdialect declaration (§2.1 step 4)", name)
 			}
 			if err := p.parseAsm(l, fb, arch, *m.AsmDialect); err != nil {
 				return err
 			}
 		case terminatorWords[f]:
 			if terminated {
-				return l.errf("fn %s: multiple terminators in one block (§1.3 rule 2)", name)
+				return l.errf("fn %s: multiple terminators in one block (§4.3)", name)
 			}
 			if err := applyTerminator(&lc{l: l}, fb); err != nil {
 				return err
@@ -83,7 +88,7 @@ func (p *parser) parseFn(m *vir.Module) error {
 			terminated = true
 		default:
 			if terminated {
-				return l.errf("fn %s: instruction after terminator (§1.3 rule 2)", name)
+				return l.errf("fn %s: instruction after terminator (§4.3)", name)
 			}
 			inst, err := parseInst(&lc{l: l})
 			if err != nil {
@@ -310,7 +315,7 @@ func encodeFunctionsSection(w func(string, ...any), m *vir.Module) {
 		if f.Export {
 			w("export ")
 		}
-		w("fn %s(%s) %s%s:\n", f.Name, encodeParams(f.Params, false), f.Ret.String(), encodeAttrs(f.Attrs))
+		w("fn %s(%s) %s%s:\n", f.Name, encodeParams(f.Params, f.Variadic), f.Ret.String(), encodeAttrs(f.Attrs))
 		for _, blk := range f.AllBlocks() {
 			if blk.Label != "" {
 				w("%s:\n", blk.Label)

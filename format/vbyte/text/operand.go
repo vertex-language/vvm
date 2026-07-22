@@ -1,3 +1,4 @@
+// operand.go
 package text
 
 import (
@@ -88,8 +89,19 @@ func parseOperand(c *lc) (vir.Operand, error) {
 			return vir.TypeOperand(t), nil
 		}
 		c.i = save
-		c.next()
-		return vir.Ident(tk.text), nil
+		name, _ := c.next()
+		// qualified-ident := ident "." ident (§7.3) — cross-module operand
+		// reference, e.g. `call module.foo` or `field.ptr p, module.S, f`.
+		// vir.Operand.Qualifier / QualifiedIdent exist specifically for
+		// this; an ordinary local ident leaves Qualifier "".
+		if dot, ok := c.peek(); ok && dot.kind == tPunct && dot.text == "." {
+			if nn, ok2 := c.peekN(1); ok2 && nn.kind == tIdent {
+				c.next() // consume "."
+				c.next() // consume second ident
+				return vir.QualifiedIdent(name.text, nn.text), nil
+			}
+		}
+		return vir.Ident(name.text), nil
 	}
 	return vir.Operand{}, c.l.errf("unexpected token %q in operand position", tk.text)
 }

@@ -1,3 +1,4 @@
+// types.go
 package text
 
 import (
@@ -22,11 +23,27 @@ func parseType(c *lc) (vir.Type, error) {
 	case "void":
 		c.next()
 		return vir.Void, nil
+	case "valist":
+		// Opaque cursor type (§3, §4.5) — legal only as an alloca result or
+		// a va_start/va_arg/va_end operand; that restriction is Verify's
+		// job (vir/verify.go, vir/types.go IsValueType), not the parser's.
+		c.next()
+		return vir.Valist, nil
 	case "struct":
 		c.next()
 		n, err := c.expectIdent()
 		if err != nil {
 			return nil, err
+		}
+		// Cross-module form "struct module.Name" (§7.3/§7.4) — StructType's
+		// canonical spelling (types.go String()) qualifies with the import
+		// path when Import != "", so the parser must accept it symmetrically.
+		if c.accept(tPunct, ".") {
+			n2, err := c.expectIdent()
+			if err != nil {
+				return nil, err
+			}
+			return vir.StructType{Name: n2, Import: n}, nil
 		}
 		return vir.StructType{Name: n}, nil
 	case "vec", "array":

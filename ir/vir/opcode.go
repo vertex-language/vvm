@@ -4,20 +4,15 @@ package vir
 import "fmt"
 
 // Opcode identifies a core Vertex IR instruction mnemonic (§4). It replaces
-// bare strings so that (a) a typo is a compile error instead of a silent
-// pass-through, and (b) every opcode's arity/operand-constraint/result-rule
-// is registered exactly once in opTable below — init() panics at package
-// load if any constant in the block below is missing an entry, so a new
-// opcode can never quietly skip verification the way ctlz/cttz/popcnt did
-// when they were absent from a hand-maintained string set.
+// bare strings so a typo is a compile error, and every opcode's
+// arity/operand-constraint/result-rule is registered exactly once in
+// opTable below — init() panics at package load if any constant is
+// missing an entry.
 //
 // Strings are still used elsewhere in this package, deliberately: struct/
 // field/label/link/fn names are open-ended user identifiers, and asm
-// mnemonics/registers are per-dialect *data* (§4 "ships as predefined
-// data, requiring no underlying grammar changes") — an open, extensible
-// vocabulary, not a fixed instruction set the verifier reasons about.
-// Opcode is for the closed, spec-fixed vocabulary of §4; that distinction
-// is the point.
+// mnemonics/registers are per-dialect *data* (§4) — an open vocabulary,
+// not the closed §4 instruction set Opcode exists to close off.
 type Opcode uint16
 
 const (
@@ -67,8 +62,8 @@ const (
 	OpCttz
 	OpPopcnt
 
-	// Bare float min/max (§4 Float Semantics) — rejected on integers (§9.17);
-	// use OpSMin/OpSMax/OpUMin/OpUMax there instead.
+	// Bare float min/max (§4) — rejected on integers (§9.17); use
+	// OpSMin/OpSMax/OpUMin/OpUMax there instead.
 	OpMin
 	OpMax
 
@@ -168,15 +163,22 @@ const (
 	OpCall
 	OpSyscall
 
-	// Debug (§1.3 rule 8).
+	// Variadic argument access (§4.5). Suffix/Sig usage: va_start's Sig
+	// holds the <fnsig> token (self-referential — verified structurally
+	// against the enclosing fn, not a FunctionSignature table lookup);
+	// va_arg's Suffix is the destination type T.
+	OpVaStart
+	OpVaArg
+	OpVaEnd
+
+	// Debug (§1.3 rule 8 / README §4).
 	OpLoc
 
 	opcodeCount // sentinel: total defined opcodes; must stay last
 )
 
 // operandConstraint restricts which element type (§9.18) an opcode's type
-// suffix may name. Checked against ElemOrSelf(suffix), so it applies
-// uniformly to scalar and vector forms.
+// suffix may name. Checked against ElemOrSelf(suffix).
 type operandConstraint uint8
 
 const (
@@ -191,38 +193,30 @@ const (
 type resultRule uint8
 
 const (
-	ruleSuffix  resultRule = iota // result type == Suffix, once Suffix is validated present
+	ruleSuffix  resultRule = iota // result type == Suffix, once validated present
 	ruleVoid                      // op never produces a value
 	ruleBool                      // i1, or vec[i1,N] when Suffix is a vector
-	ruleSpecial                   // computed by dedicated code in resultType (call, syscall, extract,
-	// reduce_*, alloca, bare min/max) — never reached generically; every
-	// ruleSpecial opcode has an explicit case in resultType's switch.
+	ruleSpecial                   // computed by dedicated code in resultType — every
+	// ruleSpecial opcode has an explicit case there; never reached generically.
 )
-
-type opMeta struct {
-	numeric operandConstraint
-	arity   int // -1 == not pinned by the grammar text; checked elsewhere or left permissive
-	result  resultRule
-}
 
 type opDef struct {
 	op      Opcode
 	name    string
 	numeric operandConstraint
+	arity   int // -1 == not pinned by the grammar text; checked elsewhere or left permissive
+	result  resultRule
+}
+
+type opMeta struct {
+	numeric operandConstraint
 	arity   int
 	result  resultRule
 }
 
-// opTable is the single source of truth for every core opcode (§4): its
-// textual spelling, the §9.18 operand-type constraint, its operand count
-// where the spec text pins one exactly (-1 where it doesn't — see the
-// inline notes), and how its result type is computed. Every Opcode
-// constant above must appear here exactly once; init() enforces that.
+// opTable is the single source of truth for every core opcode (§4). Every
+// Opcode constant above must appear here exactly once; init() enforces it.
 var opTable = []opDef{
-	// Arithmetic. add/sub/mul/neg/abs are legal on both iN and fN — the
-	// spec's Math list mixes signed/unsigned-tagged int ops with the
-	// generic arithmetic mnemonics that apply to floats too; ptr is
-	// excluded (address arithmetic goes through index.ptr, §4).
 	{OpAdd, "add", ConstraintIntOrFloat, 2, ruleSuffix},
 	{OpSub, "sub", ConstraintIntOrFloat, 2, ruleSuffix},
 	{OpMul, "mul", ConstraintIntOrFloat, 2, ruleSuffix},
@@ -234,8 +228,6 @@ var opTable = []opDef{
 	{OpAbs, "abs", ConstraintIntOrFloat, 1, ruleSuffix},
 	{OpSqrt, "sqrt", ConstraintFloat, 1, ruleSuffix},
 
-	// Overflow predicates — "take the same two operands ... Legal on iN
-	// and vec[iN, W]" (§4): explicit arity 2, int-only.
 	{OpUAddO, "uaddo", ConstraintInt, 2, ruleBool},
 	{OpSAddO, "saddo", ConstraintInt, 2, ruleBool},
 	{OpUSubO, "usubo", ConstraintInt, 2, ruleBool},
@@ -251,9 +243,6 @@ var opTable = []opDef{
 	{OpUSubSat, "usub_sat", ConstraintInt, 2, ruleSuffix},
 	{OpSSubSat, "ssub_sat", ConstraintInt, 2, ruleSuffix},
 
-	// Bits — int only, including ctlz/cttz/popcnt (the opcodes that
-	// motivated this rewrite: previously absent from any classification
-	// set, so silently unchecked).
 	{OpAnd, "and", ConstraintInt, 2, ruleSuffix},
 	{OpOr, "or", ConstraintInt, 2, ruleSuffix},
 	{OpXor, "xor", ConstraintInt, 2, ruleSuffix},
@@ -268,15 +257,11 @@ var opTable = []opDef{
 	{OpPopcnt, "popcnt", ConstraintInt, 1, ruleSuffix},
 
 	// Bare min/max: numeric constraint left at None here because the
-	// int-rejection (§9.17) needs a specific error message ("use
-	// smin/smax/..."); resultType special-cases these explicitly instead.
+	// int-rejection (§9.17) needs a specific "use smin/..." error message;
+	// resultType special-cases these explicitly instead.
 	{OpMin, "min", ConstraintNone, 2, ruleSpecial},
 	{OpMax, "max", ConstraintNone, 2, ruleSpecial},
 
-	// Comparisons. eq/ne and the unsigned orderings apply to int OR ptr
-	// (§4 "Pointers: eq.ptr, ne.ptr, and the unsigned orderings ...");
-	// signed orderings are int-only (ptr has no signedness); lt/gt/le/ge
-	// are the float row.
 	{OpEq, "eq", ConstraintIntOrPtr, 2, ruleBool},
 	{OpNe, "ne", ConstraintIntOrPtr, 2, ruleBool},
 	{OpSlt, "slt", ConstraintInt, 2, ruleBool},
@@ -292,10 +277,9 @@ var opTable = []opDef{
 	{OpLe, "le", ConstraintFloat, 2, ruleBool},
 	{OpGe, "ge", ConstraintFloat, 2, ruleBool},
 
-	{OpSelect, "select", ConstraintNone, 3, ruleSuffix}, // cond, a, b
+	{OpSelect, "select", ConstraintNone, 3, ruleSuffix},
 
-	// Memory & addresses.
-	{OpAlloca, "alloca", ConstraintNone, 1, ruleSpecial}, // "bare alloca.ptr size" (§4): 1 operand; suffix must be .ptr, checked in resultType
+	{OpAlloca, "alloca", ConstraintNone, 1, ruleSpecial}, // suffix must be .ptr or .valist, checked in resultType
 	{OpLoad, "load", ConstraintNone, 1, ruleSuffix},
 	{OpStore, "store", ConstraintNone, 2, ruleVoid},
 	{OpLoadVol, "load_vol", ConstraintNone, 1, ruleSuffix},
@@ -303,26 +287,20 @@ var opTable = []opDef{
 	{OpMemcopy, "memcopy", ConstraintNone, 3, ruleVoid},
 	{OpMemmove, "memmove", ConstraintNone, 3, ruleVoid},
 	{OpMemset, "memset", ConstraintNone, 3, ruleVoid},
-	{OpField, "field", ConstraintNone, 3, ruleSuffix}, // p, S, f
-	{OpIndex, "index", ConstraintNone, 3, ruleSuffix},  // p, T, i
+	{OpField, "field", ConstraintNone, 3, ruleSuffix},
+	{OpIndex, "index", ConstraintNone, 3, ruleSuffix},
 
-	// Atomics. atomic_load/store/cmpxchg use "<T>" (int or ptr, §4);
-	// the RMW ops (add/sub/and/or/xor/xchg) are pinned to "<iN>" in the
-	// spec text explicitly, so ptr is excluded there.
-	{OpAtomicLoad, "atomic_load", ConstraintIntOrPtr, 2, ruleSuffix},   // p, ord
-	{OpAtomicStore, "atomic_store", ConstraintIntOrPtr, 3, ruleVoid},   // p, v, ord
+	{OpAtomicLoad, "atomic_load", ConstraintIntOrPtr, 2, ruleSuffix},
+	{OpAtomicStore, "atomic_store", ConstraintIntOrPtr, 3, ruleVoid},
 	{OpAtomicAdd, "atomic_add", ConstraintInt, 3, ruleSuffix},
 	{OpAtomicSub, "atomic_sub", ConstraintInt, 3, ruleSuffix},
 	{OpAtomicAnd, "atomic_and", ConstraintInt, 3, ruleSuffix},
 	{OpAtomicOr, "atomic_or", ConstraintInt, 3, ruleSuffix},
 	{OpAtomicXor, "atomic_xor", ConstraintInt, 3, ruleSuffix},
 	{OpAtomicXchg, "atomic_xchg", ConstraintInt, 3, ruleSuffix},
-	{OpCmpxchg, "cmpxchg", ConstraintIntOrPtr, 5, ruleSuffix}, // p, expected, desired, ord_ok, ord_fail
-	{OpFence, "fence", ConstraintNone, 1, ruleVoid},           // ord only, no type suffix at all
+	{OpCmpxchg, "cmpxchg", ConstraintIntOrPtr, 5, ruleSuffix},
+	{OpFence, "fence", ConstraintNone, 1, ruleVoid},
 
-	// Conversions — deeper source/dest unification is a known TODO
-	// (§9.16); the destination-side int/float constraint below is what's
-	// cheaply and correctly checkable from the suffix alone.
 	{OpTrunc, "trunc", ConstraintNone, 1, ruleSuffix},
 	{OpSext, "sext", ConstraintNone, 1, ruleSuffix},
 	{OpZext, "zext", ConstraintNone, 1, ruleSuffix},
@@ -336,24 +314,15 @@ var opTable = []opDef{
 	{OpStointSat, "stoint_sat", ConstraintInt, 1, ruleSuffix},
 	{OpUtointSat, "utoint_sat", ConstraintInt, 1, ruleSuffix},
 
-	// Vectors. Arity left at -1 for splat/extract/insert: §4 lists the
-	// mnemonics but gives no inline operand-list example the way
-	// shuffle/masked_load/gather/scatter get (those are pinned exactly).
 	{OpSplat, "splat", ConstraintNone, -1, ruleSuffix},
 	{OpExtract, "extract", ConstraintNone, -1, ruleSpecial},
 	{OpInsert, "insert", ConstraintNone, -1, ruleSuffix},
-	{OpShuffle, "shuffle", ConstraintNone, 3, ruleSuffix}, // a, b, mask
+	{OpShuffle, "shuffle", ConstraintNone, 3, ruleSuffix},
 	{OpMaskedLoad, "masked_load", ConstraintNone, 3, ruleSuffix},
 	{OpMaskedStore, "masked_store", ConstraintNone, 3, ruleVoid},
 	{OpGather, "gather", ConstraintNone, 3, ruleSuffix},
 	{OpScatter, "scatter", ConstraintNone, 3, ruleVoid},
 
-	// Intrinsics. fma/copysign have unambiguous standard arities (fused
-	// multiply-add; sign-copy) even though §4 doesn't spell out an
-	// operand list — floor/ceil/trunc_f/nearest/bswap/bitrev are unary by
-	// the same reasoning. These, along with sqrt above, were previously
-	// covered only by the dead `floatOnlyUnary` set — declared, never
-	// referenced, so never enforced.
 	{OpFma, "fma", ConstraintFloat, 3, ruleSuffix},
 	{OpCopysign, "copysign", ConstraintFloat, 2, ruleSuffix},
 	{OpFloor, "floor", ConstraintFloat, 1, ruleSuffix},
@@ -364,13 +333,9 @@ var opTable = []opDef{
 	{OpSMax, "smax", ConstraintInt, 2, ruleSuffix},
 	{OpUMin, "umin", ConstraintInt, 2, ruleSuffix},
 	{OpUMax, "umax", ConstraintInt, 2, ruleSuffix},
-	{OpBSwap, "bswap", ConstraintInt, 1, ruleSuffix}, // also rejected on i8 specifically, checked separately (§9.20)
+	{OpBSwap, "bswap", ConstraintInt, 1, ruleSuffix}, // also rejected on i8, checked separately (§9.20)
 	{OpBitrev, "bitrev", ConstraintInt, 1, ruleSuffix},
 
-	// Reductions — §4 gives no operand-count or element-constraint text;
-	// left permissive (arity -1, no numeric constraint) rather than
-	// invented, consistent with the "mark it, don't guess" TODO style
-	// used elsewhere in this verifier.
 	{OpReduceAdd, "reduce_add", ConstraintNone, -1, ruleSpecial},
 	{OpReduceMin, "reduce_min", ConstraintNone, -1, ruleSpecial},
 	{OpReduceMax, "reduce_max", ConstraintNone, -1, ruleSpecial},
@@ -382,6 +347,15 @@ var opTable = []opDef{
 
 	{OpCall, "call", ConstraintNone, -1, ruleSpecial},
 	{OpSyscall, "syscall", ConstraintNone, -1, ruleSpecial},
+
+	// va_start: dst (valist alloca result), last_named (final declared
+	// param). No result value — the cursor is mutated in place via dst.
+	{OpVaStart, "va_start", ConstraintNone, 2, ruleVoid},
+	// va_arg: src only; result type comes from Suffix, restricted to
+	// scalar/ptr/vec by IsVaArgType (checked in checkInstruction, not
+	// expressible as a plain operandConstraint).
+	{OpVaArg, "va_arg", ConstraintNone, 1, ruleSuffix},
+	{OpVaEnd, "va_end", ConstraintNone, 1, ruleVoid},
 
 	{OpLoc, "loc", ConstraintNone, -1, ruleVoid},
 }
@@ -431,18 +405,16 @@ func (o Opcode) String() string {
 	return fmt.Sprintf("<opcode %d>", int(o))
 }
 
-// ParseOpcode resolves a §4 mnemonic (e.g. from a decoder) to its Opcode.
-// Returns false for anything not in the closed §4 vocabulary — including
-// terminator/asm keywords, which are not Opcodes (they're separate Go
-// types / dialect-table data respectively).
+// ParseOpcode resolves a §4 mnemonic to its Opcode. Returns false for
+// anything not in the closed §4 vocabulary — including terminator/asm
+// keywords, which are separate Go types / dialect-table data respectively.
 func ParseOpcode(s string) (Opcode, bool) {
 	op, ok := opByName[s]
 	return op, ok
 }
 
 // meta looks up an opcode's registered metadata. ok is false only for
-// OpInvalid or an out-of-range value — every in-range constant is
-// guaranteed present by init()'s completeness check above.
+// OpInvalid or an out-of-range value.
 func (o Opcode) meta() (opMeta, bool) {
 	if int(o) <= 0 || int(o) >= len(opMetaTable) || opNameTable[o] == "" {
 		return opMeta{}, false

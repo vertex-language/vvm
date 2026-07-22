@@ -16,7 +16,7 @@ func formatFloat(v float64) string {
 		return "-Inf"
 	}
 	s := strconv.FormatFloat(v, 'g', -1, 64)
-	// Grammar requires a '.' in finite float literals (§1.1).
+	// Grammar requires a '.' in finite float literals (§1.1/§3).
 	if !containsDotOrExp(s) {
 		s += ".0"
 	}

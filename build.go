@@ -10,6 +10,11 @@ import (
 // Build runs the full pipeline — decode, verify, lower, object,
 // objectwriter, link — and returns the finished, linked binary. src may
 // be .vbyte or .vir; either is fine, decodeModule sniffs it.
+//
+// This is the single-module, no-imports path. A module that declares any
+// `import` needs BuildGraph/BuildModuleGraph (buildgraph.go) instead —
+// Build always runs bare vir.Verify (no shapes), so any qualified
+// reference in m will fail Verify here rather than resolve.
 func Build(src []byte, t Target) ([]byte, error) {
 	m, err := decodeModule(src)
 	if err != nil {
@@ -50,16 +55,10 @@ func BuildModule(m *vir.Module, t Target) ([]byte, error) {
 		return nil, err
 	}
 
-	// newLinker needs m, not just t: whether the module used an anonymous
-	// extern group (§7.4) — and therefore needs the target's default
-	// symbol namespace, e.g. libc on hosted OSes — is a property of the
-	// module, never something inferable from the target triple alone.
-	// A target "looking hosted" (x86_64-linux-gnu) is not the trigger;
-	// os=none modules can and do use named extern groups without ever
-	// touching this path, and the verifier already forbids anonymous
-	// groups on os=none/uefi (§1.2 rule 9), so this can never misfire
-	// there.
-	l, err := newLinker(m, t, entryPoint)
+	// newLinker takes a slice of modules now (buildgraph.go's multi-module
+	// path needs every module's own §7.4 link section resolved, not just
+	// one) — the single-module case here is just a one-element slice.
+	l, err := newLinker([]*vir.Module{m}, t, entryPoint)
 	if err != nil {
 		return nil, err
 	}

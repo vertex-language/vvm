@@ -115,7 +115,7 @@ func lexLine(s string) ([]tok, error) {
 			toks = append(toks, tok{tEllipsis, "..."})
 			i += 3
 		case strings.HasPrefix(s[i:], "-Inf"):
-			// float-literal alt "-Inf" (§1.1); must be checked before the
+			// float-literal alt "-Inf" (§1.1/§3); must be checked before the
 			// generic '-'-prefixed-number case below, which requires a digit.
 			toks = append(toks, tok{tIdent, "-Inf"})
 			i += 4

@@ -8,7 +8,7 @@ import (
 )
 
 // Decode parses .vir source into an unverified *vir.Module. Section order is
-// enforced here structurally (§1.2), as is basic body shape (one terminator
+// enforced here structurally (§2.1), as is basic body shape (one terminator
 // per block, nothing after it); everything else is Verify's job.
 func Decode(src []byte) (*vir.Module, error) {
 	p := &parser{}
@@ -31,6 +31,7 @@ func Encode(m *vir.Module) ([]byte, error) {
 	encodeGlobalsSection(w, m)
 	encodeLinksSection(w, m)
 	encodeExternsSection(w, m)
+	encodeImportsSection(w, m)
 	encodeFunctionsSection(w, m)
 
 	return []byte(b.String()), nil

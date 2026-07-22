@@ -1,27 +1,29 @@
-// vir/module.go
+// module.go
 package vir
 
 // Module is the single IR-level program representation (README §"One Idea").
-// Field order mirrors the mandatory section order (§1.2).
+// Field order mirrors the mandatory section order (§2.1).
 type Module struct {
 	Name               string
-	Target             *Target     // nil for pure-compute modules (§1.2 rule 10)
-	AsmDialect         *AsmDialect // nil unless declared; module-wide asm syntax dialect (§1.2 rule 11)
+	Namespace          string // "" unless declared (§2.1 step 2, §6.3)
+	Target             *Target
+	AsmDialect         *AsmDialect
 	Structs            []*Struct
 	FunctionSignatures []*FunctionSignature
 	Constants          []*Constant
 	Globals            []*Global
 	Links              []*Link
 	Externs            []*ExternGroup
+	Imports            []*Import
 	Functions          []*Function
 }
 
-// Target is the in-file target declaration (§10.6).
+// Target is the in-file target declaration (§7.1).
 type Target struct {
-	Arch  string   // canonical spelling only (§10.1)
-	OS    string   // canonical spelling only (§10.2)
-	ABI   string   // canonical spelling or "" (§10.3)
-	Tiers []string // feature-tier flags (§10.4)
+	Arch  string
+	OS    string
+	ABI   string
+	Tiers []string
 }
 
 type Field struct {
@@ -31,6 +33,7 @@ type Field struct {
 
 type Struct struct {
 	Name   string
+	Export bool
 	Fields []Field
 }
 
@@ -44,29 +47,31 @@ func (s *Struct) FieldByName(name string) (Field, bool) {
 }
 
 // FunctionSignature is a named signature used to type-check indirect
-// calls/tailcalls (§1.3).
+// calls/tailcalls (§4.2).
 type FunctionSignature struct {
 	Name     string
+	Export   bool
 	Params   []Type
 	Variadic bool
 	Ret      Type
 }
 
-// Constant is an immutable compile-time scalar (§8). Value is a literal operand.
+// Constant is an immutable compile-time scalar (§6.2). Value is a literal operand.
 type Constant struct {
-	Name  string
-	Type  Type
-	Value Operand
+	Name   string
+	Export bool
+	Type   Type
+	Value  Operand
 }
 
-// ConstInit is the global-initializer grammar (§8).
+// ConstInit is the global-initializer grammar (§6.2).
 type ConstInit interface{ isInit() }
 
-type InitLiteral struct{ Value Operand }         // scalar literal / null
-type InitZero struct{}                           // zero
-type InitAddressOf struct{ Name string }         // addr ident
+type InitLiteral struct{ Value Operand }
+type InitZero struct{}
+type InitAddressOf struct{ Name string }
 type InitAggregate struct{ Elems []ConstInit }
-type InitByteString struct{ Data []byte }        // "..." for array[i8, N]
+type InitByteString struct{ Data []byte }
 
 func (InitLiteral) isInit()    {}
 func (InitZero) isInit()       {}
@@ -83,7 +88,7 @@ type Global struct {
 	Init   ConstInit
 }
 
-// LinkKind names the portable dependency semantic (§7.4).
+// LinkKind names the portable dependency semantic (§7.2).
 type LinkKind string
 
 const (
@@ -94,17 +99,22 @@ const (
 
 type Link struct {
 	Kind LinkKind
-	Name string // short or exact name, as written
+	Name string
 }
 
 // ExternGroup declares imported functions and the dependency that provides
-// them (§7.4). There is no anonymous/default-namespace group: Dependency
-// must always be a non-empty string matching a previously declared Link's
-// Name byte-for-byte (§1.2 rule 9). Even libc must be declared via an
-// ordinary `link` line and named here explicitly.
+// them (§7.2). Dependency must always be a non-empty string matching a
+// previously declared Link's Name byte-for-byte.
 type ExternGroup struct {
-	Dependency string // byte-for-byte link string; never "" (§1.2 rule 9)
+	Dependency string
 	Functions  []*ExternFunction
+}
+
+// Import is one cross-module `import` declaration (§7.3). Path is either
+// "namespace/module" or bare "module", matching a ModuleShape's qualified
+// identity (see vmeta.go).
+type Import struct {
+	Path string
 }
 
 type FunctionAttribute string
@@ -115,19 +125,21 @@ const (
 	AttributeInline   FunctionAttribute = "inline"
 	AttributeNoInline FunctionAttribute = "noinline"
 	AttributeCold     FunctionAttribute = "cold"
-	// AttributeEntry marks the function as the platform handoff point
-	// (§1.1 fn-attr, §9.4a). At most one fn per module may carry it; the
-	// linker resolves what it's actually wired to (process entry, DLL
-	// load hook, driver entry, ...) at link time, based on the requested
-	// output kind.
+	// AttributeEntry marks the platform handoff point (§2.2, §9.4a). At
+	// most one fn per module may carry it; forces a bare symbol.
 	AttributeEntry FunctionAttribute = "entry"
+	// AttributeExternC forces a bare C symbol even in a namespaced module
+	// (§2.2, §6.3). Mutually exclusive with AttributeEntry on the same fn
+	// — both are distinct overrides of symbol naming, never resolved by
+	// silent precedence.
+	AttributeExternC FunctionAttribute = "extern_c"
 )
 
 type Param struct {
 	Name  string
 	Type  Type
-	ByVal string // struct name, "" if absent
-	SRet  string // struct name, "" if absent
+	ByVal string
+	SRet  string
 }
 
 type ExternFunction struct {
@@ -139,13 +151,14 @@ type ExternFunction struct {
 }
 
 type Function struct {
-	Name   string
-	Params []Param
-	Ret    Type
-	Attrs  []FunctionAttribute
-	Export bool
-	Entry  *Block   // unlabeled, untargetable (§1.3 rule 1)
-	Blocks []*Block // labeled blocks in textual order
+	Name     string
+	Params   []Param
+	Variadic bool // param-list ends in "..." (§4.5)
+	Ret      Type
+	Attrs    []FunctionAttribute
+	Export   bool
+	Entry    *Block
+	Blocks   []*Block
 }
 
 func (f *Function) HasAttribute(a FunctionAttribute) bool {
@@ -167,39 +180,35 @@ func (f *Function) AllBlocks() []*Block {
 }
 
 type Block struct {
-	Label string     // "" for entry
-	Lines []BodyLine // ordinary instructions (incl. loc) and asm blocks, in order
+	Label string
+	Lines []BodyLine
 	Term  Terminator
 }
 
-// BodyLine is one body-line (§1.1 body-line grammar): either an ordinary
-// instruction (including a `loc` line) or an inline-asm block. Exactly one
-// of Instruction / Asm is set.
+// BodyLine is one body-line: an ordinary instruction (incl. `loc`) or an
+// inline-asm block. Exactly one of Instruction / Asm is set.
 type BodyLine struct {
 	Instruction *Instruction
 	Asm         *AsmBlock
 }
 
-// Instruction is one instruction body-line. The textual `<op>.<suffix>` is
-// stored split: Op holds the opcode (§4's closed, spec-fixed vocabulary —
-// see opcode.go); exactly one of Suffix (a type) or Sig (a fnsig name, for
-// indirect call/tailcall) may be set. Op's zero value, OpInvalid, is never
-// a legal instruction opcode.
+// Instruction is one instruction body-line. Op holds the opcode
+// (opcode.go); exactly one of Suffix (a type) or Sig (a fnsig name, for
+// indirect call/tailcall, or the self-referential token for va_start) may
+// be set. OpInvalid is never a legal instruction opcode.
 type Instruction struct {
-	Result string // "" iff the instruction produces no value (§1.3 rule 6)
+	Result string
 	Op     Opcode
-	Suffix Type   // nil if no type suffix
-	Sig    string // fnsig name for call.<fnsig>; "" otherwise
+	Suffix Type
+	Sig    string
 	Args   []Operand
-	Align  int // trailing ", align N"; 0 = unspecified
+	Align  int
 }
 
 // ---------------------------------------------------------------------------
-// Inline assembly (§4).
+// Inline assembly (§4.4).
 // ---------------------------------------------------------------------------
 
-// AsmDialect is the module-wide asmdialect-decl token (§1.1 grammar, §1.2
-// rule 11, §4). It is declared once per module, not per asm block.
 type AsmDialect string
 
 const (
@@ -210,7 +219,6 @@ const (
 	DialectNative AsmDialect = "native"
 )
 
-// AsmBindingKind is the kind of one asm binding line (§4 Bindings).
 type AsmBindingKind string
 
 const (
@@ -219,10 +227,6 @@ const (
 	BindingClobber AsmBindingKind = "clobber"
 )
 
-// AsmBinding is one `in`/`out`/`clobber` line at the top of an asm block.
-// Register is used for in/out (one register each); Registers is used for
-// clobber (one or more registers on the line); Ident is the bound IR value,
-// for in/out only.
 type AsmBinding struct {
 	Kind      AsmBindingKind
 	Register  string
@@ -230,43 +234,33 @@ type AsmBinding struct {
 	Ident     string
 }
 
-// AsmOperandKind discriminates operand forms inside an asm-line (§1.1
-// asm-operand grammar).
 type AsmOperandKind string
 
 const (
 	AsmOperandKindRegister  AsmOperandKind = "register"
 	AsmOperandKindImmediate AsmOperandKind = "immediate"
 	AsmOperandKindMemory    AsmOperandKind = "memory"
-	AsmOperandKindLabel     AsmOperandKind = "label" // branch target, asm-local (§4)
+	AsmOperandKindLabel     AsmOperandKind = "label"
 )
 
-// AsmOperand's Register/Memory/Mnemonic-adjacent fields stay stringly-typed
-// on purpose: §4 defines dialect data (register tables, mnemonic tables)
-// as open, per-architecture tables the verifier looks names up in
-// (targets.go), not a closed Go-level vocabulary the way core Opcodes are.
 type AsmOperand struct {
 	Kind      AsmOperandKind
-	Register  string  // for AsmOperandKindRegister
-	Immediate Operand // for AsmOperandKindImmediate
-	Memory    string  // for AsmOperandKindMemory — raw dialect-specific addressing text
-	Label     string  // for AsmOperandKindLabel
+	Register  string
+	Immediate Operand
+	Memory    string
+	Label     string
 }
 
-func AsmRegister(r string) AsmOperand      { return AsmOperand{Kind: AsmOperandKindRegister, Register: r} }
-func AsmImmediate(o Operand) AsmOperand    { return AsmOperand{Kind: AsmOperandKindImmediate, Immediate: o} }
-func AsmMemory(text string) AsmOperand     { return AsmOperand{Kind: AsmOperandKindMemory, Memory: text} }
+func AsmRegister(r string) AsmOperand   { return AsmOperand{Kind: AsmOperandKindRegister, Register: r} }
+func AsmImmediate(o Operand) AsmOperand { return AsmOperand{Kind: AsmOperandKindImmediate, Immediate: o} }
+func AsmMemory(text string) AsmOperand  { return AsmOperand{Kind: AsmOperandKindMemory, Memory: text} }
 func AsmLabelReference(name string) AsmOperand {
 	return AsmOperand{Kind: AsmOperandKindLabel, Label: name}
 }
 
-// AsmCodeLine is one line inside `code:` — either a mnemonic instruction or
-// a dialect-local label declaration (§1.1 asm-line grammar). Mnemonic is a
-// string because it indexes a per-dialect data table (§4 "Dialect
-// Definitions & Data Structures"), not a closed enum.
 type AsmCodeLine struct {
-	LabelDeclaration string // non-empty ⇒ this line is solely "name:" (§4 label isolation)
-	Mnemonic         string // empty when LabelDeclaration is set
+	LabelDeclaration string
+	Mnemonic         string
 	Operands         []AsmOperand
 }
 
@@ -277,18 +271,13 @@ func AsmLabelDeclaration(name string) AsmCodeLine {
 	return AsmCodeLine{LabelDeclaration: name}
 }
 
-// AsmBlock is a whole inline-assembly block (§4). It is an ordinary
-// body-line — ordering relative to other instructions matters — but is not
-// a terminator (no `asm goto`). The dialect that governs its `code:` syntax
-// comes from the enclosing module's AsmDialect, not from the block itself
-// (§1.2 rule 11).
 type AsmBlock struct {
 	Bindings []AsmBinding
 	Code     []AsmCodeLine
 }
 
 // ---------------------------------------------------------------------------
-// Terminators (§5).
+// Terminators (§4.3).
 // ---------------------------------------------------------------------------
 
 type Terminator interface{ isTerm() }
@@ -307,11 +296,11 @@ type Switch struct {
 	Default string
 	Cases   []SwitchCase
 }
-type Return struct{ Value *Operand } // nil for `return` of void
+type Return struct{ Value *Operand }
 type TailCall struct {
-	Callee string    // direct callee name; "" if indirect
-	Sig    string    // fnsig name for indirect; "" if direct
-	Args   []Operand // for indirect, Args[0] is the callee ptr
+	Callee string
+	Sig    string
+	Args   []Operand
 }
 type Trap struct{}
 type Unreachable struct{}
@@ -345,11 +334,11 @@ func Successors(t Terminator) []string {
 		}
 		return out
 	}
-	return nil // return, tailcall, trap, unreachable
+	return nil
 }
 
 // EntryFunction returns the module's single `entry`-attributed function, or
-// nil if none is declared (§9.4a). At most one exists in a verified module.
+// nil if none is declared (§9.4a).
 func (m *Module) EntryFunction() *Function {
 	for _, f := range m.Functions {
 		if f.HasAttribute(AttributeEntry) {
