@@ -70,6 +70,35 @@ func init() {
 		wantValue: val(2),
 	})
 
+	// Shift by 0 is a no-op — the low boundary of the masking rule, distinct
+	// from "shift by width" below (both reduce to the same masked count,
+	// but this pins the identity case on its own).
+	register(testCase{
+		name:       "bitwise_shl_by_zero_is_noop",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return i32PrintingModule("bitwise_shl_zero", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", vir.OpShl, vir.I32, vir.IntLiteral(1234), vir.IntLiteral(0))
+			})
+		},
+		wantValue: val(1234),
+	})
+
+	// Shifting an i32 by exactly its own bit width (32) masks to a count of
+	// 0 — the high boundary that "shift by 33" (masks to 1) doesn't cover.
+	register(testCase{
+		name:       "bitwise_shl_by_width_masks_to_zero",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return i32PrintingModule("bitwise_shl_width", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				return fb.Emit("v", vir.OpShl, vir.I32, vir.IntLiteral(1), vir.IntLiteral(32))
+			})
+		},
+		wantValue: val(1), // count masks to 0 mod 32, so this is shl by 0
+	})
+
 	register(testCase{
 		name:       "bitwise_lshr_zero_fills",
 		hostArches: []string{"x86_64"},

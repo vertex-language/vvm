@@ -52,6 +52,65 @@ func init() {
 		wantValue: val(1),
 	})
 
+	// --- signed vs. unsigned "greater-or-equal": same bit pattern as the
+	// slt/ult pair above, exercised from the other comparison direction so
+	// sge's signed reading (rather than just slt's) gets a direct case.
+	register(testCase{
+		name:       "cmp_sge_treats_as_signed",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return i32PrintingModule("cmp_sge_signed", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				// -1 >= 1 is false when read as signed.
+				cond := fb.Emit("cond", vir.OpSge, vir.I32, vir.IntLiteral(-1), vir.IntLiteral(1))
+				return fb.Emit("v", vir.OpSelect, vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
+			})
+		},
+		wantValue: val(0),
+	})
+
+	// --- eq/ne on plain integers (previously only exercised via OpEq/OpNe
+	// on ptr operands below; ConstraintIntOrPtr means the integer path is
+	// a distinct, untested branch).
+	register(testCase{
+		name:       "cmp_eq_int_true",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return i32PrintingModule("cmp_eq_int_true", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				cond := fb.Emit("cond", vir.OpEq, vir.I32, vir.IntLiteral(42), vir.IntLiteral(42))
+				return fb.Emit("v", vir.OpSelect, vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
+			})
+		},
+		wantValue: val(1),
+	})
+
+	register(testCase{
+		name:       "cmp_eq_int_false",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return i32PrintingModule("cmp_eq_int_false", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				cond := fb.Emit("cond", vir.OpEq, vir.I32, vir.IntLiteral(42), vir.IntLiteral(43))
+				return fb.Emit("v", vir.OpSelect, vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
+			})
+		},
+		wantValue: val(0),
+	})
+
+	register(testCase{
+		name:       "cmp_ne_int_true",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return i32PrintingModule("cmp_ne_int_true", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				cond := fb.Emit("cond", vir.OpNe, vir.I32, vir.IntLiteral(1), vir.IntLiteral(2))
+				return fb.Emit("v", vir.OpSelect, vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
+			})
+		},
+		wantValue: val(1),
+	})
+
 	register(testCase{
 		name:       "cmp_ptr_eq_same_object",
 		hostArches: []string{"x86_64"},

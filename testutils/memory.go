@@ -109,4 +109,37 @@ func init() {
 		},
 		wantValue: val(117901063),
 	})
+
+	// memmove is overlap-safe (§4 "Bulk Ops"), unlike memcopy where overlap
+	// is UB (§5.4 item 4). This is the one case that actually distinguishes
+	// the two ops: a forward shift of a 4-element array by one slot, where
+	// src and dst genuinely overlap (dst = base+0, src = base+1, 12 bytes
+	// spans 3 of the 4 elements). If this silently behaved like a naive
+	// byte-by-byte forward copy without overlap awareness, element 0 would
+	// end up equal to element 1 before it was itself overwritten by element
+	// 2 — this case reads back element 0 to confirm the shift landed
+	// correctly rather than corrupting through the overlap.
+	register(testCase{
+		name:       "memory_memmove_overlapping_shift",
+		hostArches: []string{"x86_64"},
+		hostOSes:   []string{"linux"},
+		build: func(a, o string) *vir.Module {
+			return i32PrintingModule("memory_memmove", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+				base := fb.Alloca("base", vir.IntLiteral(16), 0) // array[i32, 4]
+				p0 := fb.IndexPointer("p0", base, vir.I32, vir.IntLiteral(0))
+				p1 := fb.IndexPointer("p1", base, vir.I32, vir.IntLiteral(1))
+				p2 := fb.IndexPointer("p2", base, vir.I32, vir.IntLiteral(2))
+				p3 := fb.IndexPointer("p3", base, vir.I32, vir.IntLiteral(3))
+				fb.Store(vir.I32, p0, vir.IntLiteral(1))
+				fb.Store(vir.I32, p1, vir.IntLiteral(2))
+				fb.Store(vir.I32, p2, vir.IntLiteral(3))
+				fb.Store(vir.I32, p3, vir.IntLiteral(4))
+				// Shift elements [1,2,3] down into [0,1,2] — dst and src
+				// overlap by 8 of the 12 bytes moved.
+				fb.Emit("", vir.OpMemmove, nil, p0, p1, vir.IntLiteral(12))
+				return fb.Load("v", vir.I32, p0) // was element 1's value: 2
+			})
+		},
+		wantValue: val(2),
+	})
 }
