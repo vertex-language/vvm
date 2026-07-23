@@ -55,8 +55,12 @@ func EncodeModImm(v uint32) (rotate, imm8 byte, ok bool) {
 
 // DecodeModImm inverts EncodeModImm: it applies the machine's rule to a
 // (rotate, imm8) pair. Total — every pair names some value.
+//
+// math/bits has no RotateRight32; rotating right by n is rotating left by
+// -n, which RotateLeft32 handles directly (its shift argument may be
+// negative).
 func DecodeModImm(rotate, imm8 byte) uint32 {
-	return bits.RotateRight32(uint32(imm8), 2*uint(rotate&0xF))
+	return bits.RotateLeft32(uint32(imm8), -2*int(rotate&0xF))
 }
 
 // FitsModImm reports whether v is representable as a modified immediate at
@@ -99,10 +103,4 @@ func DecodeBranchImm24(field uint32) int32 {
 		v |= 0xFF000000 // sign-extend bit 23
 	}
 	return int32(v)
-}
-
-// DecodeModImm inverts EncodeModImm: it applies the machine's rule to a
-// (rotate, imm8) pair. Total — every pair names some value.
-func DecodeModImm(rotate, imm8 byte) uint32 {
-	return bits.RotateLeft32(uint32(imm8), -2*int(rotate&0xF))
 }
