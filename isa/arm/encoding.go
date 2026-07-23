@@ -100,3 +100,9 @@ func DecodeBranchImm24(field uint32) int32 {
 	}
 	return int32(v)
 }
+
+// DecodeModImm inverts EncodeModImm: it applies the machine's rule to a
+// (rotate, imm8) pair. Total — every pair names some value.
+func DecodeModImm(rotate, imm8 byte) uint32 {
+	return bits.RotateLeft32(uint32(imm8), -2*int(rotate&0xF))
+}
