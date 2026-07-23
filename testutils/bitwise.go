@@ -177,9 +177,12 @@ func init() {
 		hostArches: []string{"x86_64"},
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_popcnt", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+			m := i32PrintingModule("bitwise_popcnt", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpPopcnt, vir.I32, vir.IntLiteral(0b1011))
 			})
+			// Override default target to include the required tier
+			m.SetTarget(a, o, abiFor(o), "popcnt")
+			return m
 		},
 		wantValue: val(3),
 	})

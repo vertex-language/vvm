@@ -85,6 +85,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			m := vir.NewModule("tailcall_indirect")
+			m.SetTarget(a, o, abiFor(o)) // FIX: Add the missing target declaration
 
 			sig := m.DeclareFunctionSignature("answer_sig", nil, false, vir.I32)
 

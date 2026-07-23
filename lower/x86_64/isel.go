@@ -381,8 +381,7 @@ func (s *sel) selAbs(in *vir.Instruction) error {
 // set iff the high half (rdx) is nonzero, i.e. the product didn't fit back
 // in the low half.
 func (s *sel) selOverflow(in *vir.Instruction) error {
-	ot := s.operandType(in.Args[0])
-	bits := intBits(ot)
+	bits := intBits(in.Suffix)
 	cw := 4
 	if bits > 32 {
 		cw = 8
@@ -482,23 +481,29 @@ func (s *sel) selSaturating(in *vir.Instruction) error {
 	}
 	s.emit(Inst{Op: "mov", D: R(RR11), S: R(RRAX), Sz: 8}) // keep a copy of `a`
 
+	// Pre-compute clamp values BEFORE add/sub so flags aren't clobbered
+	switch in.Op {
+	case vir.OpUAddSat:
+		s.emit(Inst{Op: "mov", D: R(RRDX), S: Imm(-1), Sz: 8}) // all-ones = max unsigned
+	case vir.OpUSubSat:
+		s.emit(Inst{Op: "mov", D: R(RRDX), S: Imm(0), Sz: 8})
+	case vir.OpSAddSat, vir.OpSSubSat:
+		maxVal := (int64(1) << uint(bits-1)) - 1
+		s.emit(Inst{Op: "sar", D: R(RR11), S: Imm(int64(cw*8 - 1)), Sz: cw}) // sign(a)
+		s.emit(Inst{Op: "xor", D: R(RR11), S: Imm(maxVal), Sz: cw})          // sign(a) ^ MAX
+	}
+
 	op := "add"
 	if !isAdd {
 		op = "sub"
 	}
 	s.emit(Inst{Op: op, D: R(RRAX), S: R(RRCX), Sz: cw})
 
+	// Perform the conditional move using the preserved flags
 	switch in.Op {
-	case vir.OpUAddSat:
-		s.emit(Inst{Op: "mov", D: R(RRDX), S: Imm(-1), Sz: 8}) // all-ones = max unsigned
-		s.emit(Inst{Op: "cmovcc", D: R(RRAX), S: R(RRDX), CC: CondB, Sz: cw})
-	case vir.OpUSubSat:
-		s.emit(Inst{Op: "mov", D: R(RRDX), S: Imm(0), Sz: 8})
+	case vir.OpUAddSat, vir.OpUSubSat:
 		s.emit(Inst{Op: "cmovcc", D: R(RRAX), S: R(RRDX), CC: CondB, Sz: cw})
 	case vir.OpSAddSat, vir.OpSSubSat:
-		maxVal := (int64(1) << uint(bits-1)) - 1
-		s.emit(Inst{Op: "sar", D: R(RR11), S: Imm(int64(cw*8 - 1)), Sz: cw}) // sign(a)
-		s.emit(Inst{Op: "xor", D: R(RR11), S: Imm(maxVal), Sz: cw})          // sign(a) ^ MAX
 		s.emit(Inst{Op: "cmovcc", D: R(RRAX), S: R(RR11), CC: CondO, Sz: cw})
 	}
 	s.maskTo(RRAX, bits)
@@ -600,8 +605,8 @@ func (s *sel) selDivide(in *vir.Instruction) error {
 
 func (s *sel) cmpCC(in *vir.Instruction) (cc byte, signed bool, w int) {
 	// Operand width comes from the compared type, carried in the args'
-	// declared type. Comparisons yield i1, so we look at the operand.
-	ot := s.operandType(in.Args[0])
+	// declared type. Comparisons yield i1, so we look at the suffix.
+	ot := in.Suffix
 	w = widthOf(ot)
 	switch in.Op {
 	case vir.OpEq:
@@ -630,8 +635,8 @@ func (s *sel) cmpCC(in *vir.Instruction) (cc byte, signed bool, w int) {
 func (s *sel) selCompare(in *vir.Instruction) error {
 	cc, signed, w := s.cmpCC(in)
 	bits := 8 * w
-	if ot := s.operandType(in.Args[0]); vir.IsInt(ot) {
-		bits = ot.(vir.IntType).Bits
+	if vir.IsInt(in.Suffix) {
+		bits = in.Suffix.(vir.IntType).Bits
 	}
 	s.loadOperand(in.Args[0], RRAX)
 	s.loadOperand(in.Args[1], RRCX)
