@@ -9,7 +9,7 @@ import "github.com/vertex-language/vvm/ir/vir"
 var CalleeSaved = []Reg{RRBX, RR12, RR13, RR14, RR15}
 
 // SavedRegBytes is the space below saved-rbp occupied by CalleeSaved.
-const SavedRegBytes = int64(len(CalleeSaved)) * 8
+var SavedRegBytes = int64(len(CalleeSaved)) * 8
 
 // Frame lays out one function from high to low address:
 //

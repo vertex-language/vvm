@@ -300,7 +300,6 @@ func (s *sel) selUnary(in *vir.Instruction) error {
 
 func (s *sel) selShift(in *vir.Instruction) error {
 	t := s.types[in.Result]
-	w := widthOf(t)
 	bits := intBits(t)
 
 	s.loadOperand(in.Args[0], RRAX)

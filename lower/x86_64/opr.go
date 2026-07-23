@@ -27,6 +27,25 @@ const (
 	RNone = enc.RNone
 )
 
+// Condition codes, re-exported from the encoder (which itself re-exports
+// isa/x86_64's tttn encoding), the same way Reg is aliased above. isel.go's
+// cmpCC/selCompare/selShift/etc. reference these bare (CondE, CondNE, ...)
+// without importing either isa/x86_64 or its encoder directly.
+const (
+	CondO  = enc.CondO
+	CondNO = enc.CondNO
+	CondB  = enc.CondB
+	CondAE = enc.CondAE
+	CondE  = enc.CondE
+	CondNE = enc.CondNE
+	CondBE = enc.CondBE
+	CondA  = enc.CondA
+	CondL  = enc.CondL
+	CondGE = enc.CondGE
+	CondLE = enc.CondLE
+	CondG  = enc.CondG
+)
+
 // OprKind is this backend's pre-encoding operand tag. It mirrors the
 // encoder's, plus OSlot — a not-yet-placed stack slot that encode.go
 // resolves to [rbp+off] before handing bytes to the encoder.
