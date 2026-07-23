@@ -512,9 +512,27 @@ func (s *sel) selLoad(in *vir.Instruction) error {
 	return nil
 }
 
+// selStore writes in.Args[1] to the address in in.Args[0]. The write width
+// MUST come from in.Suffix — the store's own declared type — never from
+// inspecting the value operand. operandType(in.Args[1]) previously drove
+// this instead, and for a *literal* value operand (as opposed to a named
+// ident, whose fixed type happens to already agree with the declared
+// Suffix) operandType has no way to know the real type and falls back to
+// its I64 default. That silently turned every literal store into an
+// 8-byte write regardless of the memory location's actual declared size.
+// Stack allocas absorbed the overwrite harmlessly (BuildFrame rounds slots
+// up to 16-byte boundaries, so the extra 4 bytes land in padding) — that's
+// why every alloca-backed store/load-roundtrip test kept passing — but
+// globals are packed tight with no such slack (globals.go/Layout.Size
+// gives a global exactly its declared size, no rounding), so an 8-byte
+// write into a declared-i32 global spills into whatever symbol comes next
+// in the module, corrupting it. selLoad never had this problem: its
+// result type already flows correctly from in.Suffix via typefix.go's
+// resultType (ruleSuffix), since a Load produces a named result whose
+// fixed type IS the Suffix. Store has no result to hang that off of
+// (ruleVoid) — hence reading in.Suffix directly here instead.
 func (s *sel) selStore(in *vir.Instruction) error {
-	vt := s.operandType(in.Args[1])
-	w := widthOf(vt)
+	w := widthOf(in.Suffix)
 	s.loadOperand(in.Args[0], RRCX) // pointer
 	s.loadOperand(in.Args[1], RRAX) // value
 	s.emit(Inst{Op: "mov", D: Mem(RRCX, 0), S: R(RRAX), Sz: w})
@@ -610,9 +628,14 @@ func (s *sel) selAtomic(in *vir.Instruction) error {
 		s.storeReg(RRAX, in.Result)
 		return nil
 	case vir.OpAtomicStore:
+		// Width fixed the same way as selStore above: use in.Suffix (the
+		// op's own declared type), not the value operand's inferred type
+		// — a literal value operand would otherwise silently default to
+		// an 8-byte write via operandType's I64 fallback.
+		w := widthOf(in.Suffix)
 		s.loadOperand(in.Args[0], RRCX)
 		s.loadOperand(in.Args[1], RRAX)
-		s.emit(Inst{Op: "xchg", D: Mem(RRCX, 0), S: R(RRAX), Sz: widthOf(s.operandType(in.Args[1]))})
+		s.emit(Inst{Op: "xchg", D: Mem(RRCX, 0), S: R(RRAX), Sz: w})
 		return nil
 	case vir.OpAtomicAdd:
 		s.loadOperand(in.Args[0], RRCX)

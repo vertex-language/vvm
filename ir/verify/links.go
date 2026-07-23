@@ -83,6 +83,22 @@ func checkExternFunction(f *vir.ExternFunction, tc *typeCtx) error {
 
 // checkParam validates one param against §4/§7.4's byval/sret rules and
 // disallows valist as a bare parameter type (§4.5 — it's alloca-only).
+//
+// byval[S] and sret[S] are mirror-image ABI attributes: both cross the C
+// boundary as a plain pointer (byval: the caller's copy the callee reads
+// through; sret: the destination the callee writes its return value
+// into) — this matches how the x86_64 backend's typefix.go treats both
+// ("byval/sret params arrive as pointers"), how the sret check two lines
+// below this one is written, and how the calls.go test suite's own
+// comment describes byval ("crosses the C boundary as a pointer whose
+// callee-side writes never affect the caller's object"). The byval check
+// previously required p.Type to literally BE `struct S` — the one
+// attribute value real byval/sret usage never has, since the whole point
+// is that the parameter itself is a pointer to the struct, not the
+// struct passed by raw value in a register/slot. Fixed to require
+// IsPtr(p.Type), matching sret's own check exactly, plus a declare-
+// before-use existence check on the named struct (§2.2) that neither
+// check previously performed.
 func checkParam(p vir.Param, tc *typeCtx) error {
 	if vir.IsValist(p.Type) {
 		return fmt.Errorf("param %q: valist is never a legal parameter type (§3, §4.5) — use alloca.valist in the body instead", p.Name)
@@ -94,13 +110,20 @@ func checkParam(p vir.Param, tc *typeCtx) error {
 		return fmt.Errorf("param %q: byval and sret are mutually exclusive on one param", p.Name)
 	}
 	if p.ByVal != "" {
-		st, ok := p.Type.(vir.StructType)
-		if !ok || st.Name != p.ByVal {
-			return fmt.Errorf("param %q: byval[%s] requires type struct %s", p.Name, p.ByVal, p.ByVal)
+		if !vir.IsPtr(p.Type) {
+			return fmt.Errorf("param %q: byval[%s] requires a ptr-typed param", p.Name, p.ByVal)
+		}
+		if !tc.structs[p.ByVal] {
+			return fmt.Errorf("param %q: byval[%s] names an undeclared struct (§2.2)", p.Name, p.ByVal)
 		}
 	}
-	if p.SRet != "" && !vir.IsPtr(p.Type) {
-		return fmt.Errorf("param %q: sret[%s] requires a ptr-typed param", p.Name, p.SRet)
+	if p.SRet != "" {
+		if !vir.IsPtr(p.Type) {
+			return fmt.Errorf("param %q: sret[%s] requires a ptr-typed param", p.Name, p.SRet)
+		}
+		if !tc.structs[p.SRet] {
+			return fmt.Errorf("param %q: sret[%s] names an undeclared struct (§2.2)", p.Name, p.SRet)
+		}
 	}
 	return nil
 }

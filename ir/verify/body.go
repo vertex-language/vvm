@@ -168,10 +168,25 @@ func resultTypeSpecial(i *vir.Instruction, ctx *fnCtx) (vir.Type, error) {
 		return i.Suffix, nil
 
 	case vir.OpAlloca:
+		// Arity is variant-dependent (opinfo.go registers OpAlloca's arity
+		// as -1, "checked elsewhere", specifically so this is the one
+		// place that check happens): alloca.ptr takes exactly one operand
+		// (the size), while alloca.valist takes none at all — its layout
+		// is target-defined, not something a frontend sizes (README §4.4:
+		// "No size/align operand ... its layout is target-defined and not
+		// something a frontend sizes"). AllocaValist's own builder method
+		// (builder.go) never appends an Args entry, precisely matching
+		// this.
 		if vir.IsPtr(i.Suffix) {
+			if len(i.Args) != 1 {
+				return nil, fmt.Errorf("alloca.ptr: expects 1 operand (size), got %d", len(i.Args))
+			}
 			return vir.Ptr, nil
 		}
 		if vir.IsValist(i.Suffix) {
+			if len(i.Args) != 0 {
+				return nil, fmt.Errorf("alloca.valist: expects 0 operands (target-defined layout, no size), got %d", len(i.Args))
+			}
 			return vir.Valist, nil
 		}
 		return nil, fmt.Errorf("alloca: suffix must be .ptr or .valist")

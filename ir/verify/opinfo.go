@@ -61,7 +61,14 @@ var opInfoTable = map[vir.Opcode]opInfo{
 
 	vir.OpSelect: {3, cNone, rSuffix},
 
-	vir.OpAlloca: {1, cNone, rSpecial},
+	// OpAlloca's arity depends on its Suffix (alloca.ptr: 1 operand for
+	// size; alloca.valist: 0 operands, target-defined layout) — not a
+	// single fixed number the generic arity check in checkInstruction can
+	// express, so it's registered here as -1 ("checked structurally
+	// elsewhere") and the real per-variant check lives in
+	// resultTypeSpecial (body.go), which already branches on Suffix for
+	// this opcode.
+	vir.OpAlloca: {-1, cNone, rSpecial},
 	vir.OpLoad: {1, cNone, rSuffix}, vir.OpStore: {2, cNone, rVoid},
 	vir.OpLoadVol: {1, cNone, rSuffix}, vir.OpStoreVol: {2, cNone, rVoid},
 	vir.OpMemcopy: {3, cNone, rVoid}, vir.OpMemmove: {3, cNone, rVoid}, vir.OpMemset: {3, cNone, rVoid},

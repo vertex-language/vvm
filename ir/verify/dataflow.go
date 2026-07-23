@@ -71,6 +71,22 @@ func computePredecessors(f *vir.Function, blocks []*vir.Block) map[string][]stri
 // are always supersets of the true fixpoint), and the final full pass
 // with no further change reflects the true fixpoint everywhere.
 //
+// That "always a superset" invariant requires BOTH inSet and outSet to
+// start at the full universe for every non-entry block — not just inSet.
+// A block's `in` is computed by intersecting its predecessors' `out`
+// sets, and blocks are visited in a fixed order each pass; a back-edge
+// predecessor (e.g. a loop body that hasn't been visited yet this pass)
+// would still be holding its *initial* outSet value at that point. If
+// that initial value were empty rather than the universe, the
+// intersection collapses to {} purely from visitation order — not from
+// any real unassigned path — which incorrectly rejects legal
+// loop-carried values (§4.3 rule 4: "an assignment before the loop plus
+// reassignment in the body satisfies rule 3 on both edges"). Starting
+// outSet at the universe too keeps every set a true superset of the
+// fixpoint at every point in the iteration, which is what makes it sound
+// to report a violation the moment one is seen instead of waiting for
+// convergence.
+//
 // Module-scope names (globals, consts — ctx.moduleScope) are outside this
 // dataflow entirely: they exist before the function is ever entered
 // (§6.2), so a read of one is always legal regardless of path. They are
@@ -105,7 +121,7 @@ func checkDefiniteAssignment(f *vir.Function, blocks []*vir.Block, byLabel map[s
 		} else {
 			inSet[l] = cloneSet(universe)
 		}
-		outSet[l] = map[string]bool{}
+		outSet[l] = cloneSet(universe)
 	}
 
 	changed := true
@@ -195,7 +211,20 @@ func checkTermReadsAssigned(t vir.Terminator, assigned map[string]bool, moduleSc
 			return check(*x.Value)
 		}
 	case vir.TailCall:
-		for _, a := range x.Args {
+		// An indirect tailcall (Sig != "") carries its callee function
+		// pointer in Args[0], the exact same position/shape OpCall uses
+		// for its own indirect-call callee — and checkReadsAssigned above
+		// already exempts OpCall's idx-0 callee operand from this check
+		// (a callee reference, direct or indirect, isn't a "read" in the
+		// local-dataflow sense; a bare fn name used this way takes its
+		// address, same as a global, never requiring prior local
+		// assignment). A direct tailcall never puts its callee in Args at
+		// all (it's the separate Callee field), so this carve-out only
+		// ever applies to the indirect shape.
+		for i, a := range x.Args {
+			if x.Sig != "" && i == 0 {
+				continue
+			}
 			if err := check(a); err != nil {
 				return err
 			}
