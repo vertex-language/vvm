@@ -6,10 +6,15 @@
 // arm.FixupKind -> RelocKind mapping, which for AArch32 ELF is the
 // R_ARM_CALL / R_ARM_JUMP24 / R_ARM_MOVW_ABS_NC / R_ARM_MOVT_ABS /
 // R_ARM_ABS32 shape. AAELF32 relocation codes are identical for arm and
-// armeb; the byte order of the patched containers follows Program.Arch,
-// which `link` must honor when applying them (and where the BE-8 .text
-// word swap + EF_ARM_BE8 + $a/$d mapping symbols live for armeb — see
-// lower/arm/arch.go). No objectfile import; the types are this package's own.
+// armeb; the byte order of the patched containers follows the `big`
+// parameter FromProgram is given, which `link` must honor when applying
+// them (and where the BE-8 .text word swap + EF_ARM_BE8 + $a/$d mapping
+// symbols live for armeb — see lower/arm/arch.go). No objectfile import;
+// the types are this package's own.
+//
+// NOTE: arm.Program carries no Arch/byte-order field of its own, so
+// FromProgram takes `big` explicitly from the caller (who has it from
+// vir.Module.Target.Arch) rather than reading it off the program.
 package object
 
 import arm "github.com/vertex-language/vvm/lower/arm"
@@ -63,9 +68,16 @@ type Symbol struct {
 type RelocKind int
 
 const (
-	// RelocCall24: BL — ((S + A - P) >> 2) into imm24 (R_ARM_CALL shape).
+	// RelocCall24: BL/B — ((S + A - P) >> 2) into imm24 (R_ARM_CALL /
+	// R_ARM_JUMP24 shape). lower/arm no longer distinguishes a bl from a
+	// b at the Fixup level (both are arm.FixupPCRel24, since the
+	// arithmetic is identical), so this is the only 24-bit PC-relative
+	// kind object.go ever produces now.
 	RelocCall24 RelocKind = iota
-	// RelocJump24: B — same arithmetic (R_ARM_JUMP24 shape).
+	// RelocJump24 is retained for container formats that still want the
+	// R_ARM_JUMP24 spelling distinct from R_ARM_CALL, but relocKind below
+	// never emits it: the information needed to tell a bl from a b does
+	// not survive into arm.Fixup.
 	RelocJump24
 	// RelocMovwAbs: (S + A) & 0xFFFF into the split imm16 (R_ARM_MOVW_ABS_NC).
 	RelocMovwAbs
@@ -100,10 +112,8 @@ type Reloc struct {
 
 func relocKind(k arm.FixupKind) RelocKind {
 	switch k {
-	case arm.FixupCall24:
+	case arm.FixupPCRel24:
 		return RelocCall24
-	case arm.FixupJump24:
-		return RelocJump24
 	case arm.FixupMovwAbs:
 		return RelocMovwAbs
 	case arm.FixupMovtAbs:
@@ -121,14 +131,18 @@ func alignUp(n, a uint32) uint32 {
 
 // FromProgram lays the program out into sections. Function code is
 // concatenated into one text section (per-function alignment respected,
-// with A32 NOP padding serialized in the program's byte order); initialized
+// with A32 NOP padding serialized in the requested byte order); initialized
 // globals go to data, zero globals to bss, with tdata/tbss for TLS. Fixup
 // offsets are rebased to section offsets and mapped to RelocKinds.
-func FromProgram(p *arm.Program) []Section {
-	// A32 NOP (mov r0, r0) = 0xE1A00000, serialized per Program.Arch —
-	// the single place this package writes instruction bytes.
+//
+// big selects the target's data byte order (true for armeb). arm.Program
+// itself carries no such field, so the caller supplies it — typically
+// straight from vir.Module.Target.Arch == "armeb".
+func FromProgram(p *arm.Program, big bool) []Section {
+	// A32 NOP (mov r0, r0) = 0xE1A00000, serialized per the caller's byte
+	// order — the single place this package writes instruction bytes.
 	nop := []byte{0x00, 0x00, 0xA0, 0xE1}
-	if p.Arch.Big() {
+	if big {
 		nop = []byte{0xE1, 0xA0, 0x00, 0x00}
 	}
 
