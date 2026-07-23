@@ -935,13 +935,13 @@ func (s *sel) selFloatConvert(in *vir.Instruction) error {
 		s.emit(Inst{Op: movOpTo, D: R(RXMM0), S: R(RRAX), Sz: sz})
 
 		s.emit(Inst{Op: cvtt, D: R(RRAX), S: R(RXMM0), Sz: 8})
-		s.emit(Inst{Op: "mov", D: R(RR11), S: R(RRAX), Sz: 8}) // Keep original result to check for cvttsd2si indefinite value
+		s.emit(Inst{Op: "mov", D: R(RR11), S: R(RRAX), Sz: 8}) // Keep original result to check for indefinite value
 
 		if in.Op == vir.OpStointSat {
 			maxVal := (int64(1) << uint(bits-1)) - 1
 			minVal := -(int64(1) << uint(bits-1))
 
-			// Clamp normal values
+			// Clamp normal values properly based on sign
 			s.emit(Inst{Op: "mov", D: R(RRCX), S: Imm(maxVal), Sz: 8})
 			s.emit(Inst{Op: "cmp", D: R(RRAX), S: R(RRCX), Sz: 8})
 			s.emit(Inst{Op: "cmovcc", D: R(RRAX), S: R(RRCX), CC: CondG, Sz: 8})
@@ -976,13 +976,15 @@ func (s *sel) selFloatConvert(in *vir.Instruction) error {
 				maxVal = (int64(1) << uint(bits)) - 1
 			}
 
-			s.emit(Inst{Op: "mov", D: R(RRCX), S: Imm(maxVal), Sz: 8})
-			s.emit(Inst{Op: "cmp", D: R(RRAX), S: R(RRCX), Sz: 8})
-			s.emit(Inst{Op: "cmovcc", D: R(RRAX), S: R(RRCX), CC: CondA, Sz: 8})
-
+			// Clamp to zero *first* 
 			s.emit(Inst{Op: "mov", D: R(RRCX), S: Imm(0), Sz: 8})
 			s.emit(Inst{Op: "cmp", D: R(RRAX), S: R(RRCX), Sz: 8})
 			s.emit(Inst{Op: "cmovcc", D: R(RRAX), S: R(RRCX), CC: CondL, Sz: 8})
+
+			// Then clamp max unsigned value 
+			s.emit(Inst{Op: "mov", D: R(RRCX), S: Imm(maxVal), Sz: 8})
+			s.emit(Inst{Op: "cmp", D: R(RRAX), S: R(RRCX), Sz: 8})
+			s.emit(Inst{Op: "cmovcc", D: R(RRAX), S: R(RRCX), CC: CondA, Sz: 8})
 
 			s.emit(Inst{Op: "movabs", D: R(RRCX), S: Imm(math.MinInt64)})
 			s.emit(Inst{Op: "cmp", D: R(RR11), S: R(RRCX), Sz: 8})

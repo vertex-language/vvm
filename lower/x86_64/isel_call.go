@@ -3,10 +3,11 @@ package x86_64
 
 import "github.com/vertex-language/vvm/ir/vir"
 
+var xmmArgRegs = []Reg{RXMM0, RXMM1, RXMM2, RXMM3, RXMM4, RXMM5, RXMM6, RXMM7}
+
 // selCall lowers direct, imported (already rewritten), and indirect calls.
 // Arguments go into IntArgRegs / the outgoing stack area per LayoutArgs;
-// the result comes back in rax. Variadic calls set al = 0 (no XMM args —
-// float varargs are a todo).
+// the result comes back in rax.
 func (s *sel) selCall(in *vir.Instruction) error {
 	callee := in.Args[0]
 	args := in.Args[1:]
@@ -40,17 +41,32 @@ func (s *sel) selCall(in *vir.Instruction) error {
 			continue
 		}
 		if !sl.InReg {
-			s.loadOperand(a, RRAX)
+			if vir.IsFloat(s.operandType(a)) {
+				s.loadFloatOperand(a, RRAX, s.operandType(a))
+			} else {
+				s.loadOperand(a, RRAX)
+			}
 			s.emit(Inst{Op: "mov", D: Mem(RRSP, int32(sl.StackOff)), S: R(RRAX), Sz: 8})
 		}
 	}
+
+	xmmCount := 0
 	for i, a := range args {
 		if sl := plan.Slots[i]; sl.InReg {
-			s.loadOperand(a, sl.Reg)
+			if vir.IsFloat(s.operandType(a)) {
+				// C ABI: variadic calls expect floating point values mirrored into XMM registers
+				s.loadFloatOperand(a, sl.Reg, s.operandType(a))
+				if xmmCount < len(xmmArgRegs) {
+					s.emit(Inst{Op: "movq_to_xmm", D: R(xmmArgRegs[xmmCount]), S: R(sl.Reg), Sz: 8})
+					xmmCount++
+				}
+			} else {
+				s.loadOperand(a, sl.Reg)
+			}
 		}
 	}
 	if variadic {
-		s.emit(Inst{Op: "xor", D: R(RRAX), S: R(RRAX), Sz: 4}) // al = 0 XMM regs
+		s.emit(Inst{Op: "mov", D: R(RRAX), S: Imm(int64(xmmCount)), Sz: 8})
 	}
 
 	if callee.Kind == vir.OperandIdent && callee.Qualifier == "" && s.isDirect(callee.Ident) {
@@ -64,7 +80,10 @@ func (s *sel) selCall(in *vir.Instruction) error {
 		s.emit(Inst{Op: "add", D: R(RRSP), S: Imm(reserve), Sz: 8})
 	}
 	if in.Result != "" {
-		s.storeReg(IntRetReg, in.Result)
+		if vir.IsFloat(s.types[in.Result]) {
+			s.emit(Inst{Op: "movq_from_xmm", D: R(RRAX), S: R(RXMM0), Sz: 8})
+		}
+		s.storeReg(RRAX, in.Result)
 	}
 	return nil
 }
@@ -96,7 +115,12 @@ func (s *sel) selTerm(t vir.Terminator) error {
 		s.emit(Inst{Op: "jmp", Lbl: blockLabel(s.f.Name, x.Default)})
 	case vir.Return:
 		if x.Value != nil {
-			s.loadOperand(*x.Value, IntRetReg)
+			if vir.IsFloat(s.operandType(*x.Value)) {
+				s.loadFloatOperand(*x.Value, IntRetReg, s.operandType(*x.Value))
+				s.emit(Inst{Op: "movq_to_xmm", D: R(RXMM0), S: R(IntRetReg), Sz: 8})
+			} else {
+				s.loadOperand(*x.Value, IntRetReg)
+			}
 		}
 		s.emit(Inst{Op: "epi_ret"})
 	case vir.TailCall:
@@ -134,7 +158,11 @@ func (s *sel) selTailCall(x vir.TailCall) error {
 		// register-only tailcalls are the common case).
 		for i, a := range x.Args {
 			if sl := plan.Slots[i]; sl.InReg {
-				s.loadOperand(a, sl.Reg)
+				if vir.IsFloat(s.operandType(a)) {
+					s.loadFloatOperand(a, sl.Reg, s.operandType(a))
+				} else {
+					s.loadOperand(a, sl.Reg)
+				}
 			} else {
 				return todo("tailcall with stack arguments")
 			}
@@ -146,7 +174,11 @@ func (s *sel) selTailCall(x vir.TailCall) error {
 	s.loadOperand(x.Args[0], RR11)
 	for i, a := range x.Args[1:] {
 		if i < len(IntArgRegs) {
-			s.loadOperand(a, IntArgRegs[i])
+			if vir.IsFloat(s.operandType(a)) {
+				s.loadFloatOperand(a, IntArgRegs[i], s.operandType(a))
+			} else {
+				s.loadOperand(a, IntArgRegs[i])
+			}
 		} else {
 			return todo("indirect tailcall with stack arguments")
 		}
