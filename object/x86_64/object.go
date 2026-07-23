@@ -3,11 +3,13 @@
 // arrow 4 of the README taxonomy.
 //
 // The only arch-specific knowledge this package adds is the
-// encoder.FixupKind -> RelocKind mapping, which for AMD64 is exactly the
-// R_X86_64_PLT32 / R_X86_64_PC32 / R_X86_64_64 shape: rel32 branch sites
-// (S+A-P, PLT-eligible), rel32 RIP-relative data references (S+A-P), and
-// 8-byte absolute pointers (S+A). This package does not import objectfile
-// and knows nothing about ELF/COFF/Mach-O.
+// encoder.FixupKind -> RelocKind mapping. The encoder (isa/x86_64/encoder)
+// only distinguishes three fixup shapes — FixupPCRel32, FixupAbs32, and
+// FixupAbs64 — and does not separately tag PLT-eligible branch sites: both
+// call_sym/jmp_sym and RIP-relative data references emit FixupPCRel32.
+// This package mirrors that vocabulary exactly rather than inventing a
+// PLT32 distinction the encoder has no way to produce. This package does
+// not import objectfile and knows nothing about ELF/COFF/Mach-O.
 package object
 
 import (
@@ -64,20 +66,25 @@ type Symbol struct {
 type RelocKind int
 
 const (
-	// RelocPLT32: field := S + A - P, branch site (R_X86_64_PLT32 shape).
-	RelocPLT32 RelocKind = iota
-	// RelocPCRel32: field := S + A - P, data reference (R_X86_64_PC32 shape).
-	RelocPCRel32
-	// RelocAbs64: field := S + A, 8-byte field (R_X86_64_64 shape).
+	// RelocPCRel32: field := S + A - P, where P is the field's address.
+	// Covers both branch sites (call/jmp rel32) and RIP-relative data
+	// references — the encoder does not distinguish them (both are
+	// encoder.FixupPCRel32).
+	RelocPCRel32 RelocKind = iota
+	// RelocAbs32: field := S + A, a 4-byte field (encoder.FixupAbs32:
+	// symbolic 32-bit immediates and absolute [msym+disp] operands).
+	RelocAbs32
+	// RelocAbs64: field := S + A, 8-byte field (encoder.FixupAbs64: a
+	// movabs r64, imm64 whose immediate is a symbol address).
 	RelocAbs64
 )
 
 func (k RelocKind) String() string {
 	switch k {
-	case RelocPLT32:
-		return "plt32"
 	case RelocPCRel32:
 		return "pcrel32"
+	case RelocAbs32:
+		return "abs32"
 	case RelocAbs64:
 		return "abs64"
 	}
@@ -93,10 +100,10 @@ type Reloc struct {
 
 func relocKind(k encoder.FixupKind) RelocKind {
 	switch k {
-	case encoder.FixupPLT32:
-		return RelocPLT32
 	case encoder.FixupPCRel32:
 		return RelocPCRel32
+	case encoder.FixupAbs32:
+		return RelocAbs32
 	}
 	return RelocAbs64
 }
