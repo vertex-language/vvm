@@ -80,7 +80,7 @@ func MoveWideShift(hw byte) int { return int(hw&3) * 16 }
 // EncodeAddSubImm finds a (sh, imm12) encoding of an unsigned value, if one
 // exists. It prefers the unshifted form: a value under 4096 encodes with
 // sh 0.
-func EncodeAddSubImm(v uint64) (sh, imm12 byte12, ok bool) { //nolint:revive // see below
+func EncodeAddSubImm(v uint64) (sh byte, imm12 byte12, ok bool) { //nolint:revive // see below
 	return encodeAddSubImm(v)
 }
 
