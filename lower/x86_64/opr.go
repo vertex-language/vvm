@@ -25,12 +25,28 @@ const (
 	RR14  = enc.RR14
 	RR15  = enc.RR15
 	RNone = enc.RNone
+
+	// XMM register aliases (sharing the 0-15 encoding space in ModRM)
+	RXMM0  = enc.RRAX
+	RXMM1  = enc.RRCX
+	RXMM2  = enc.RRDX
+	RXMM3  = enc.RRBX
+	RXMM4  = enc.RRSP
+	RXMM5  = enc.RRBP
+	RXMM6  = enc.RRSI
+	RXMM7  = enc.RRDI
+	RXMM8  = enc.RR8
+	RXMM9  = enc.RR9
+	RXMM10 = enc.RR10
+	RXMM11 = enc.RR11
+	RXMM12 = enc.RR12
+	RXMM13 = enc.RR13
+	RXMM14 = enc.RR14
+	RXMM15 = enc.RR15
 )
 
 // Condition codes, re-exported from the encoder (which itself re-exports
-// isa/x86_64's tttn encoding), the same way Reg is aliased above. isel.go's
-// cmpCC/selCompare/selShift/etc. reference these bare (CondE, CondNE, ...)
-// without importing either isa/x86_64 or its encoder directly.
+// isa/x86_64's tttn encoding).
 const (
 	CondO  = enc.CondO
 	CondNO = enc.CondNO
@@ -44,11 +60,11 @@ const (
 	CondGE = enc.CondGE
 	CondLE = enc.CondLE
 	CondG  = enc.CondG
+	CondP  = enc.CondP
+	CondNP = enc.CondNP
 )
 
-// OprKind is this backend's pre-encoding operand tag. It mirrors the
-// encoder's, plus OSlot — a not-yet-placed stack slot that encode.go
-// resolves to [rbp+off] before handing bytes to the encoder.
+// OprKind is this backend's pre-encoding operand tag.
 type OprKind byte
 
 const (
@@ -56,7 +72,7 @@ const (
 	OReg
 	OImm
 	OMem
-	OSlot // resolved to Mem(RBP, Frame.Offset(Slot)) in encode.go
+	OSlot
 )
 
 type Opr struct {
@@ -70,7 +86,7 @@ type Opr struct {
 	Disp   int32
 	MSym   string
 	RIPSym string
-	Slot   int // OSlot: index into the frame's local-slot array
+	Slot   int
 }
 
 func R(r Reg) Opr          { return Opr{Kind: OReg, Reg: r} }
@@ -91,16 +107,6 @@ func Slot(n int) Opr { return Opr{Kind: OSlot, Slot: n} }
 
 func (o Opr) isSlot() bool { return o.Kind == OSlot }
 
-// Inst is one pre-encoding pseudo instruction. Op spellings are exactly the
-// encoder's (encode.go's switch is authoritative) plus three epilogue
-// pseudo-ops the encoder never sees:
-//
-//	epi_ret       expand epilogue, then ret
-//	epi_jmp_sym   expand epilogue, then jmp <Sym>   (tailcall to symbol)
-//	epi_jmp_r     expand epilogue, then jmp <S reg> (indirect tailcall)
-//
-// Sz is an operand width in bytes (1/2/4/8); 0 means unset and is treated
-// as 8, the pointer/register width of a 64-bit backend.
 type Inst struct {
 	Op  string
 	D   Opr

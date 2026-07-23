@@ -7,10 +7,6 @@ import (
 	isax64 "github.com/vertex-language/vvm/isa/x86_64"
 )
 
-// Encode turns a fully-resolved Inst stream into x86-64 machine bytes.
-// Like the 32-bit encoder it knows nothing about stack frames or calling
-// conventions — a caller that wants those builds them as ordinary
-// push/mov/sub/lea/pop Insts and prepends/appends them itself.
 func Encode(insts []Inst) ([]byte, []Fixup, error) {
 	e := &enc{labels: map[string]int{}}
 	for i := range insts {
@@ -51,12 +47,6 @@ func putLE32(b []byte, v uint32) {
 	b[0], b[1], b[2], b[3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
 }
 
-// ---------------------------------------------------------------------------
-// Operand-level helpers.
-// ---------------------------------------------------------------------------
-
-// width normalizes an Inst.Sz into an operand width in bytes. Zero means
-// unset, which in a 64-bit backend means 8.
 func width(sz int) (int, error) {
 	switch sz {
 	case 0, 8:
@@ -71,18 +61,12 @@ func width(sz int) (int, error) {
 	return 0, fmt.Errorf("operand size %d is not 1, 2, 4, or 8", sz)
 }
 
-// sizePrefix emits the operand-size override for 16-bit operands. The
-// 8-bit forms use distinct opcode bytes, and 64-bit operand size comes
-// from REX.W rather than a prefix, so only width 2 produces anything.
 func (e *enc) sizePrefix(w int) {
 	if w == 2 {
 		e.u8(isax64.Prefix66)
 	}
 }
 
-// reg validates that an operand is an encodable register and returns its
-// full 0-15 value. Callers split it into the low 3 bits (ModRM/SIB field)
-// and the high bit (a REX slot) themselves, via the rex helper below.
 func reg(o Opr, role string) (Reg, error) {
 	if o.Kind != OReg {
 		return 0, fmt.Errorf("%s operand must be a register", role)
@@ -93,23 +77,15 @@ func reg(o Opr, role string) (Reg, error) {
 	return o.Reg, nil
 }
 
-// rexNeed accumulates the facts that force, or shape, a REX prefix for one
-// instruction. It is built up as the operands are inspected and then
-// emitted once, immediately before the opcode.
 type rexNeed struct {
-	w    bool // 64-bit operand size (REX.W)
-	r    bool // ModRM.reg is an extended register (REX.R)
-	x    bool // SIB.index is an extended register (REX.X)
-	b    bool // ModRM.rm / SIB.base / opcode-reg is extended (REX.B)
-	must bool // a byte operand on spl/bpl/sil/dil forces REX even if 0x40
-	no   bool // a byte operand on ah/ch/dh/bh forbids REX
+	w    bool 
+	r    bool 
+	x    bool 
+	b    bool 
+	must bool 
+	no   bool 
 }
 
-// emit writes the REX prefix if one is needed, and reports an error if the
-// instruction both requires and forbids one (a byte operand on
-// spl/bpl/sil/dil together with ah/ch/dh/bh, which can never coexist).
-// It must be called after any legacy/mandatory prefix and immediately
-// before the opcode (or its 0F escape).
 func (rn rexNeed) emit(e *enc) error {
 	if rn.no && (rn.w || rn.r || rn.x || rn.b || rn.must) {
 		return fmt.Errorf("instruction needs a REX prefix but also uses ah/ch/dh/bh, which forbids one")
@@ -123,22 +99,15 @@ func (rn rexNeed) emit(e *enc) error {
 	return nil
 }
 
-// byteRegREX folds a byte-operand register into the REX requirement: an
-// spl/bpl/sil/dil source/dest forces a prefix, an ah/ch/dh/bh one forbids
-// it. Only relevant at width 1.
 func (rn *rexNeed) byteRegREX(r Reg) {
 	switch r {
-	case RRSP, RRBP, RRSI, RRDI: // spl/bpl/sil/dil — need REX
+	case RRSP, RRBP, RRSI, RRDI: 
 		rn.must = true
 	case RRAX, RRCX, RRDX, RRBX:
-		// al/cl/dl/bl — fine either way
 	default:
-		// r8b-r15b need REX via the .b/.r bit, handled by the caller
 	}
 }
 
-// memREX sets the X and B bits for a memory operand's index and base
-// (or the rm register in the register-direct case). Called before emit.
 func (rn *rexNeed) memREX(m Opr) {
 	if m.Kind == OReg {
 		rn.b = m.Reg.NeedsREXBit()
@@ -152,10 +121,6 @@ func (rn *rexNeed) memREX(m Opr) {
 	}
 }
 
-// imm emits an immediate of the given width (1/2/4), recording an absolute
-// fixup first when the operand names a symbol. A symbolic immediate is an
-// address; at these widths it can only be a 32-bit abs32 relocation. A full
-// 64-bit symbol address goes through movabs, not here.
 func (e *enc) imm(w int, o Opr) error {
 	if o.Sym != "" {
 		if w != 4 {
@@ -176,12 +141,6 @@ func (e *enc) imm(w int, o Opr) error {
 	return nil
 }
 
-// mem emits the ModRM (+SIB, +disp) bytes addressing operand m, with
-// regField (low 3 bits) in ModRM.reg. REX bits for the base/index must
-// already have been folded into rn by the caller via memREX. Handles the
-// long-mode special cases: an index or an RSP/r12 base forces a SIB byte;
-// a RIP-relative operand uses mod=00 rm=101; an absolute address uses the
-// SIB no-base form; an RBP/r13 base always carries a displacement.
 func (e *enc) mem(regField byte, m Opr) error {
 	if m.Kind == OReg {
 		if !m.Reg.IsGPR() {
@@ -194,15 +153,11 @@ func (e *enc) mem(regField byte, m Opr) error {
 		return fmt.Errorf("operand is not a memory operand")
 	}
 
-	// RIP-relative: mod=00, rm=101, disp32 is a PC-relative fixup.
 	if m.RIPSym != "" {
 		if m.Base != RNone || m.Index != RNone {
 			return fmt.Errorf("RIP-relative operand %q cannot carry a base or index", m.RIPSym)
 		}
 		e.u8(isax64.PackModRM(isax64.ModIndir, regField, isax64.RMRIP))
-		// Reference point is the end of the instruction. The disp32 field
-		// is the last four bytes, so its own end is that point: addend =
-		// disp - 4.
 		e.fx = append(e.fx, Fixup{
 			Offset: uint32(len(e.b)), Symbol: m.RIPSym,
 			Kind: FixupPCRel32, Addend: int64(m.Disp) - 4,
@@ -220,8 +175,6 @@ func (e *enc) mem(regField byte, m Opr) error {
 		return fmt.Errorf("memory index names no encodable register")
 	}
 
-	// Absolute [disp32], with or without a symbol: the SIB no-base form.
-	// mod=00, rm=100 (SIB follows), SIB index=100 (none), base=101 (none).
 	if !hasBase && !hasIndex {
 		e.u8(isax64.PackModRM(isax64.ModIndir, regField, isax64.RMSIB))
 		e.u8(isax64.PackSIB(0, isax64.SIBNoIndex, isax64.SIBNoBase))
@@ -241,19 +194,13 @@ func (e *enc) mem(regField byte, m Opr) error {
 		return fmt.Errorf("rsp cannot be used as a SIB index register")
 	}
 
-	// A SIB byte is needed for any index, and for an RSP/r12 base (both
-	// share the low-3 encoding 100, which in ModRM.rm means "SIB follows").
 	needSIB := hasIndex || m.Base.Low3() == isax64.RMSIB
-
-	// An RBP/r13 base (low-3 encoding 101) has no mod=00 form — that slot
-	// means RIP-relative in ModRM.rm and "no base" in SIB.base — so it
-	// always carries at least a disp8, even at displacement zero.
 	baseIsBPLike := hasBase && m.Base.Low3() == isax64.RMRIP
 
 	var mod byte
 	switch {
 	case !hasBase:
-		mod = isax64.ModIndir // [index*scale+disp32], no base
+		mod = isax64.ModIndir
 	case m.Disp == 0 && !baseIsBPLike:
 		mod = isax64.ModIndir
 	case isax64.FitsDisp8(m.Disp):
@@ -296,8 +243,6 @@ func (e *enc) mem(regField byte, m Opr) error {
 	return nil
 }
 
-// relFix emits a one-byte opcode followed by a PC-relative rel32 fixup —
-// shared by call_sym and jmp_sym.
 func (e *enc) relFix(opcode byte, sym string) error {
 	if sym == "" {
 		return fmt.Errorf("no target symbol")
@@ -309,10 +254,6 @@ func (e *enc) relFix(opcode byte, sym string) error {
 	e.u32(uint32(0xFFFFFFFC))
 	return nil
 }
-
-// ---------------------------------------------------------------------------
-// The instruction switch.
-// ---------------------------------------------------------------------------
 
 func (e *enc) one(in *Inst) error {
 	w, err := width(in.Sz)
@@ -345,12 +286,11 @@ func (e *enc) one(in *Inst) error {
 			return err
 		}
 		var rn rexNeed
-		rn.w = true // movzx/movsx target a full register; REX.W is the 64-bit widen
+		rn.w = true 
 		rn.r = dr.NeedsREXBit()
 		rn.memREX(in.S)
 		if in.Sz == 1 && in.S.Kind == OReg {
 			if in.S.Reg == RRAX || in.S.Reg == RRCX || in.S.Reg == RRDX || in.S.Reg == RRBX {
-				// al/cl/dl/bl — fine
 			} else {
 				rn.byteRegREX(in.S.Reg)
 			}
@@ -358,7 +298,7 @@ func (e *enc) one(in *Inst) error {
 		if err := rn.emit(e); err != nil {
 			return err
 		}
-		op2 := byte(0xB6) // movzx r, r/m8
+		op2 := byte(0xB6) 
 		switch {
 		case in.Op == "movzx" && in.Sz == 2:
 			op2 = 0xB7
@@ -403,7 +343,7 @@ func (e *enc) one(in *Inst) error {
 		}
 		var rn rexNeed
 		rn.w = w == 8
-		rn.r = sr.NeedsREXBit() // reg field carries the source here
+		rn.r = sr.NeedsREXBit() 
 		rn.b = dr.NeedsREXBit()
 		if w == 1 {
 			rn.byteRegREX(sr)
@@ -419,7 +359,7 @@ func (e *enc) one(in *Inst) error {
 		}
 		e.u8(op, isax64.PackModRM(isax64.ModReg, sr.Low3(), dr.Low3()))
 
-	case "imul2": // 0F AF /r
+	case "imul2":
 		dr, err := reg(in.D, "destination")
 		if err != nil {
 			return err
@@ -435,7 +375,7 @@ func (e *enc) one(in *Inst) error {
 		e.u8(isax64.Imul2Esc, isax64.Imul2Op)
 		return e.mem(dr.Low3(), in.S)
 
-	case "imul3": // 69 / 6B /r
+	case "imul3":
 		dr, err := reg(in.D, "destination")
 		if err != nil {
 			return err
@@ -460,7 +400,6 @@ func (e *enc) one(in *Inst) error {
 		if err := e.mem(dr.Low3(), in.S); err != nil {
 			return err
 		}
-		// imm32 even at width 8: the field is sign-extended to 64 bits.
 		return e.imm(4, Imm(in.Imm))
 
 	case "not", "neg", "mul", "imul1", "div", "idiv":
@@ -490,9 +429,6 @@ func (e *enc) one(in *Inst) error {
 		return e.mem(g3.Ext, in.S)
 
 	case "inc", "dec":
-		// The one-byte 0x40+r / 0x48+r forms are gone in long mode — those
-		// bytes are REX prefixes now. inc/dec must use the group-5 ModRM
-		// forms: FF /0 (inc) and FF /1 (dec), FE for the byte width.
 		var rn rexNeed
 		rn.w = w == 8
 		rn.memREX(in.D)
@@ -508,16 +444,13 @@ func (e *enc) one(in *Inst) error {
 		} else {
 			e.u8(0xFF)
 		}
-		ext := byte(0) // inc
+		ext := byte(0)
 		if in.Op == "dec" {
 			ext = 1
 		}
 		return e.mem(ext, in.D)
 
 	case "cqo":
-		// REX.W CDQ (0x99) sign-extends RAX into RDX:RAX. Without REX.W
-		// this is CDQ (EAX into EDX:EAX); the 64-bit backend wants the
-		// wide form by default.
 		if w == 8 {
 			e.u8(isax64.PackREX(true, false, false, false))
 		} else {
@@ -587,8 +520,6 @@ func (e *enc) one(in *Inst) error {
 		if err != nil {
 			return err
 		}
-		// setcc writes a byte. Any GPR is byte-addressable with REX, but
-		// ah/ch/dh/bh are not reachable — force/allow REX accordingly.
 		var rn rexNeed
 		rn.b = dr.NeedsREXBit()
 		rn.byteRegREX(dr)
@@ -636,8 +567,6 @@ func (e *enc) one(in *Inst) error {
 		return e.relFix(0xE9, in.Sym)
 
 	case "call_r":
-		// Near call/jmp default to 64-bit operand size in long mode, so no
-		// REX.W is needed — only REX.B for an extended target register.
 		sr, err := reg(in.S, "target")
 		if err != nil {
 			return err
@@ -669,7 +598,6 @@ func (e *enc) one(in *Inst) error {
 			if err != nil {
 				return err
 			}
-			// push defaults to 64-bit; only REX.B for r8-r15.
 			if sr.NeedsREXBit() {
 				e.u8(isax64.PackREX(false, false, false, true))
 			}
@@ -834,7 +762,7 @@ func (e *enc) one(in *Inst) error {
 	case "rep_stosb":
 		e.u8(isax64.PrefixF3, 0xAA)
 
-	case "popcnt": // F3 0F B8 /r
+	case "popcnt":
 		dr, err := reg(in.D, "destination")
 		if err != nil {
 			return err
@@ -851,17 +779,176 @@ func (e *enc) one(in *Inst) error {
 		e.u8(0x0F, 0xB8)
 		return e.mem(dr.Low3(), in.S)
 
+	case "movq_to_xmm", "movd_to_xmm":
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		sr, err := reg(in.S, "source")
+		if err != nil {
+			return err
+		}
+		rn := rexNeed{w: in.Op == "movq_to_xmm", r: dr.NeedsREXBit(), b: sr.NeedsREXBit()}
+		e.u8(isax64.Prefix66)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x0F, 0x6E, isax64.PackModRM(isax64.ModReg, dr.Low3(), sr.Low3()))
+
+	case "movq_from_xmm", "movd_from_xmm":
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		sr, err := reg(in.S, "source")
+		if err != nil {
+			return err
+		}
+		rn := rexNeed{w: in.Op == "movq_from_xmm", r: sr.NeedsREXBit(), b: dr.NeedsREXBit()}
+		e.u8(isax64.Prefix66)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x0F, 0x7E, isax64.PackModRM(isax64.ModReg, sr.Low3(), dr.Low3()))
+
+	case "addsd", "subsd", "mulsd", "divsd", "minsd", "maxsd", "sqrtsd",
+		"addss", "subss", "mulss", "divss", "minss", "maxss", "sqrtss",
+		"ucomisd", "ucomiss", "andpd", "orpd", "xorpd", "andps", "orps", "xorps":
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		sr, err := reg(in.S, "source")
+		if err != nil {
+			return err
+		}
+		rn := rexNeed{r: dr.NeedsREXBit(), b: sr.NeedsREXBit()}
+
+		var prefix byte
+		var op2 byte
+
+		switch in.Op {
+		case "addsd": prefix = isax64.PrefixF2; op2 = 0x58
+		case "addss": prefix = isax64.PrefixF3; op2 = 0x58
+		case "subsd": prefix = isax64.PrefixF2; op2 = 0x5C
+		case "subss": prefix = isax64.PrefixF3; op2 = 0x5C
+		case "mulsd": prefix = isax64.PrefixF2; op2 = 0x59
+		case "mulss": prefix = isax64.PrefixF3; op2 = 0x59
+		case "divsd": prefix = isax64.PrefixF2; op2 = 0x5E
+		case "divss": prefix = isax64.PrefixF3; op2 = 0x5E
+		case "minsd": prefix = isax64.PrefixF2; op2 = 0x5D
+		case "minss": prefix = isax64.PrefixF3; op2 = 0x5D
+		case "maxsd": prefix = isax64.PrefixF2; op2 = 0x5F
+		case "maxss": prefix = isax64.PrefixF3; op2 = 0x5F
+		case "sqrtsd": prefix = isax64.PrefixF2; op2 = 0x51
+		case "sqrtss": prefix = isax64.PrefixF3; op2 = 0x51
+		case "ucomisd": prefix = isax64.Prefix66; op2 = 0x2E
+		case "ucomiss": prefix = 0x00; op2 = 0x2E
+		case "andpd": prefix = isax64.Prefix66; op2 = 0x54
+		case "andps": prefix = 0x00; op2 = 0x54
+		case "orpd": prefix = isax64.Prefix66; op2 = 0x56
+		case "orps": prefix = 0x00; op2 = 0x56
+		case "xorpd": prefix = isax64.Prefix66; op2 = 0x57
+		case "xorps": prefix = 0x00; op2 = 0x57
+		}
+
+		if prefix != 0 {
+			e.u8(prefix)
+		}
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x0F, op2, isax64.PackModRM(isax64.ModReg, dr.Low3(), sr.Low3()))
+
+	case "cvtsi2sd", "cvtsi2ss":
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		sr, err := reg(in.S, "source")
+		if err != nil {
+			return err
+		}
+		rn := rexNeed{w: in.Sz == 8, r: dr.NeedsREXBit(), b: sr.NeedsREXBit()}
+		if in.Op == "cvtsi2sd" {
+			e.u8(isax64.PrefixF2)
+		} else {
+			e.u8(isax64.PrefixF3)
+		}
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x0F, 0x2A, isax64.PackModRM(isax64.ModReg, dr.Low3(), sr.Low3()))
+
+	case "cvttsd2si", "cvttss2si":
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		sr, err := reg(in.S, "source")
+		if err != nil {
+			return err
+		}
+		rn := rexNeed{w: in.Sz == 8, r: dr.NeedsREXBit(), b: sr.NeedsREXBit()}
+		if in.Op == "cvttsd2si" {
+			e.u8(isax64.PrefixF2)
+		} else {
+			e.u8(isax64.PrefixF3)
+		}
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x0F, 0x2C, isax64.PackModRM(isax64.ModReg, dr.Low3(), sr.Low3()))
+
+	case "cvtsd2ss", "cvtss2sd":
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		sr, err := reg(in.S, "source")
+		if err != nil {
+			return err
+		}
+		rn := rexNeed{r: dr.NeedsREXBit(), b: sr.NeedsREXBit()}
+		if in.Op == "cvtsd2ss" {
+			e.u8(isax64.PrefixF2)
+		} else {
+			e.u8(isax64.PrefixF3)
+		}
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x0F, 0x5A, isax64.PackModRM(isax64.ModReg, dr.Low3(), sr.Low3()))
+
+	case "roundsd", "roundss":
+		dr, err := reg(in.D, "destination")
+		if err != nil {
+			return err
+		}
+		sr, err := reg(in.S, "source")
+		if err != nil {
+			return err
+		}
+		rn := rexNeed{r: dr.NeedsREXBit(), b: sr.NeedsREXBit()}
+		e.u8(isax64.Prefix66)
+		if err := rn.emit(e); err != nil {
+			return err
+		}
+		e.u8(0x0F, 0x3A)
+		if in.Op == "roundsd" {
+			e.u8(0x0B)
+		} else {
+			e.u8(0x0A)
+		}
+		e.u8(isax64.PackModRM(isax64.ModReg, dr.Low3(), sr.Low3()))
+		e.u8(byte(in.Imm))
+
 	default:
 		return fmt.Errorf("unknown inst op")
 	}
 	return nil
 }
 
-// movabs encodes mov r64, imm64 (0xB8+r with REX.W). This is the only form
-// that takes a full 64-bit immediate; a symbol here becomes an abs64
-// relocation. Callers rarely reach for it directly — mov auto-promotes to
-// it — but it exists as its own op for the cases that want the full-width
-// load unconditionally.
 func (e *enc) movabs(in *Inst) error {
 	dr, err := reg(in.D, "destination")
 	if err != nil {
@@ -881,9 +968,6 @@ func (e *enc) movabs(in *Inst) error {
 	return nil
 }
 
-// mov encodes every mov form this backend needs, width-aware throughout.
-// A register-immediate that doesn't fit a sign-extended imm32 (or is a
-// full-width symbol address) is auto-promoted to movabs.
 func (e *enc) mov(in *Inst, w int) error {
 	d, s := in.D, in.S
 	switch {
@@ -892,15 +976,10 @@ func (e *enc) mov(in *Inst, w int) error {
 		if err != nil {
 			return err
 		}
-		// Promote to the 64-bit-immediate form when the value can't be
-		// expressed as a sign-extended imm32, or when it's a symbol we'd
-		// otherwise have to truncate. Otherwise use the compact
-		// C7 /0 imm32 form, which sign-extends into a 64-bit register.
 		if w == 8 && (s.Sym != "" || !isax64.FitsImm32(s.Imm)) {
 			return e.movabs(&Inst{D: d, S: s})
 		}
 		if w == 8 {
-			// mov r/m64, imm32 (sign-extended): C7 /0.
 			rn := rexNeed{w: true, b: dr.NeedsREXBit()}
 			if err := rn.emit(e); err != nil {
 				return err
@@ -908,7 +987,6 @@ func (e *enc) mov(in *Inst, w int) error {
 			e.u8(0xC7, isax64.PackModRM(isax64.ModReg, 0, dr.Low3()))
 			return e.imm(4, s)
 		}
-		// Narrower widths: the B8+r imm form at the operand width.
 		var rn rexNeed
 		rn.r = false
 		rn.b = dr.NeedsREXBit()
@@ -1001,9 +1079,6 @@ func (e *enc) mov(in *Inst, w int) error {
 		return e.mem(sr.Low3(), d)
 
 	case d.Kind == OMem && s.Kind == OImm:
-		// mov r/m, imm — C6 (byte) / C7 (wider), imm is imm32 even at
-		// width 8 (sign-extended). A full 64-bit store-immediate isn't a
-		// single instruction; callers materialize it in a register first.
 		if w == 8 && (s.Sym != "" || !isax64.FitsImm32(s.Imm)) {
 			return fmt.Errorf("64-bit memory immediate must be materialized via a register")
 		}
@@ -1024,16 +1099,13 @@ func (e *enc) mov(in *Inst, w int) error {
 		}
 		iw := w
 		if w == 8 {
-			iw = 4 // the field is 32 bits, sign-extended
+			iw = 4 
 		}
 		return e.imm(iw, s)
 	}
 	return fmt.Errorf("unsupported operand combination")
 }
 
-// alu encodes the six two-operand ALU instructions. Same shape as the
-// 32-bit encoder's alu, with REX folded in and the imm32 immediate field
-// sign-extended into 64-bit operands.
 func (e *enc) alu(in *Inst, w int) error {
 	op, ok := isax64.AluByName(in.Op)
 	if !ok {
@@ -1157,10 +1229,6 @@ func (e *enc) alu(in *Inst, w int) error {
 	return fmt.Errorf("unsupported operand combination")
 }
 
-// opByWidth turns a word/dword ALU opcode into its byte counterpart. The
-// byte form is the even member of the pair. Unchanged from IA-32 — the
-// opcode-pair regularity is the same, and 64-bit width uses the same
-// dword opcode byte with REX.W supplying the width.
 func opByWidth(op byte, w int) byte {
 	if w == 1 {
 		return op - 1
