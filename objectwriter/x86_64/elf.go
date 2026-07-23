@@ -88,12 +88,20 @@ func bindingELF(export bool) elf.Binding {
 	return elf.BindingLocal
 }
 
-// relocKindELF maps object/x86_64's three fixup shapes onto elf's AMD64
-// relocation vocabulary. All three exist on both sides — no gaps here.
+// relocKindELF maps object/x86_64's reloc vocabulary onto elf's AMD64
+// relocation kinds.
+//
+// object.RelocPCRel32 now covers both call/jmp branch sites and
+// RIP-relative data references (see object/x86_64/object.go — the
+// encoder's FixupPCRel32 doesn't distinguish them). There used to be a
+// separate object.RelocPLT32 for the branch case; it's gone, and this
+// package can no longer tell the two apart either. We map to the generic
+// PC-relative reloc rather than PLT32: R_X86_64_PLT32 signals "may need a
+// PLT stub", which is meaningless (and wrong) for a data reference, while
+// R_X86_64_PC32 is correct for data and still resolves correctly for calls
+// that don't need PLT indirection.
 func relocKindELF(k object.RelocKind) (elf.RelocKind, error) {
 	switch k {
-	case object.RelocPLT32:
-		return elf.RelocPLT32, nil
 	case object.RelocPCRel32:
 		return elf.RelocPCRel32, nil
 	case object.RelocAbs64:

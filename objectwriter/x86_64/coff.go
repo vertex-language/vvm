@@ -90,10 +90,19 @@ func bindingCOFF(export bool) coff.Binding {
 	return coff.BindingLocal
 }
 
+// relocKindCOFF maps object/x86_64's reloc vocabulary onto coff's amd64
+// relocation kinds.
+//
+// object.RelocPCRel32 covers both call/jmp branch sites and RIP-relative
+// data references (see object/x86_64/object.go — the encoder's
+// FixupPCRel32 doesn't distinguish them, so object package no longer does
+// either). There used to be a separate object.RelocPLT32 for the branch
+// case; that distinction is gone. We map the merged kind to the generic
+// PC-relative reloc rather than PLT32, since PLT32 is only meaningful for
+// externally-interposable calls and would be wrong for a plain data
+// reference like `lea rax, [rip+global]`.
 func relocKindCOFF(k object.RelocKind) (coff.RelocKind, error) {
 	switch k {
-	case object.RelocPLT32:
-		return coff.RelocPLT32, nil
 	case object.RelocPCRel32:
 		return coff.RelocPCRel32, nil
 	case object.RelocAbs64:

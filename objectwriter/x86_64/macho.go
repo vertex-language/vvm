@@ -2,13 +2,20 @@
 //
 // Bridges object/x86_64 to objectfile/macho (macho.TargetDarwinAMD64).
 //
-// Known gap: object.RelocPCRel32 (a plain RIP-relative *data* reference —
-// e.g. `lea rax, [rip+global]`) has no target in macho's current x86_64
-// RelocKind set. macho only exposes RelocPCRel32 for CALL/JMP branch sites
-// (X86_64_RELOC_BRANCH) and RelocGOTLoad for GOT-indirected loads; there is
-// no X86_64_RELOC_SIGNED equivalent wired up. Until objectfile/macho grows
-// that case, any non-call PC-relative data reloc fails loudly below rather
-// than being miscompiled into a branch-shaped relocation.
+// Known gap: object.RelocPCRel32 now covers both call/jmp branch sites and
+// plain RIP-relative *data* references (e.g. `lea rax, [rip+global]`) —
+// the encoder's FixupPCRel32 doesn't tag which is which, and object/x86_64
+// deliberately mirrors that (see object/x86_64/object.go) rather than
+// inventing a distinction the encoder can't produce. macho's x86_64
+// RelocKind set only really has a correct home for the branch case
+// (X86_64_RELOC_BRANCH, via macho.RelocPCRel32); there's no
+// X86_64_RELOC_SIGNED equivalent wired up for the generic data case. We
+// still emit macho.RelocPCRel32 for the merged kind below, since branches
+// are the overwhelmingly common instance and refusing them all would be a
+// worse regression than mis-tagging the rarer data-reference case. Once
+// objectfile/macho grows a generic PC-relative data relocation, this
+// mapping should be revisited (and would need the fixup-kind distinction
+// restored upstream in the encoder to be done correctly).
 package x86_64
 
 import (
@@ -95,14 +102,14 @@ func bindingMachO(export bool) macho.Binding {
 
 func relocKindMachO(k object.RelocKind) (macho.RelocKind, error) {
 	switch k {
-	case object.RelocPLT32:
-		return macho.RelocPCRel32, nil // X86_64_RELOC_BRANCH — call/jmp sites only
+	case object.RelocPCRel32:
+		// See package-level comment: this merged kind covers both branch
+		// sites (correct here) and RIP-relative data refs (not truly
+		// representable in macho's current reloc set). We emit the branch
+		// reloc rather than failing every call site.
+		return macho.RelocPCRel32, nil
 	case object.RelocAbs64:
 		return macho.RelocAbs64, nil
-	case object.RelocPCRel32:
-		return 0, fmt.Errorf(
-			"macho/x86_64 has no generic RIP-relative data relocation (only branch and GOT-load); " +
-				"objectfile/macho needs an X86_64_RELOC_SIGNED case added before this can be emitted")
 	}
 	return 0, fmt.Errorf("unmapped reloc kind %v for macho/amd64", k)
 }
