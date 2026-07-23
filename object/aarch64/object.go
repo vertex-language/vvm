@@ -3,19 +3,22 @@
 // arrow 4 of the README taxonomy, for 64-bit ARM in either data byte order.
 //
 // The only arch-specific knowledge this package adds is the
-// aarch64.FixupKind -> RelocKind mapping, which for AArch64 ELF is the
-// R_AARCH64_CALL26 / R_AARCH64_JUMP26 / R_AARCH64_MOVW_UABS_G3 /
-// R_AARCH64_MOVW_UABS_G2_NC / R_AARCH64_MOVW_UABS_G1_NC /
-// R_AARCH64_MOVW_UABS_G0_NC / R_AARCH64_ABS64 shape (AAELF64: the checking
-// form relocates the MOVZ, the _NC forms relocate MOVKs). AAELF64
-// relocation codes are identical for aarch64 and aarch64_be, and — unlike
-// AArch32 — the patched instruction containers are little-endian in both,
-// because A64 instruction words are architecturally little-endian
-// (lower/aarch64/arch.go). Only 64-bit *data* fields (RelocAbs64 sites in
-// data sections) follow Program.Arch's byte order, which `link` must honor
-// when applying them. There is no BE-8 text-swap step and no mapping-symbol
-// requirement for code byte order. No objectfile import; the types are
-// this package's own.
+// aarch64.FixupKind -> RelocKind mapping. lower/aarch64 reaches a global by
+// the adrp + add :lo12: idiom (the position-independent form and the only
+// one isa/aarch64/encoder names), never by a movz/movk absolute sequence,
+// so the AAELF64 shapes here are R_AARCH64_CALL26 / R_AARCH64_JUMP26 /
+// R_AARCH64_CONDBR19 / R_AARCH64_TSTBR14 / R_AARCH64_ADR_PREL_PG_HI21 /
+// R_AARCH64_ADR_PREL_LO21 / R_AARCH64_ADD_ABS_LO12_NC /
+// R_AARCH64_LDST{8,16,32,64}_ABS_LO12_NC / R_AARCH64_ABS64 (the last for a
+// `global g ptr = addr f` data word, which has no instruction-field
+// counterpart at all). AAELF64 relocation codes are identical for aarch64
+// and aarch64_be, and — unlike AArch32 — the patched instruction containers
+// are little-endian in both, because A64 instruction words are
+// architecturally little-endian (lower/aarch64/arch.go). Only 64-bit *data*
+// fields (RelocAbs64 sites in data sections) follow Program.Arch's byte
+// order, which `link` must honor when applying them. There is no BE-8
+// text-swap step and no mapping-symbol requirement for code byte order.
+// No objectfile import; the types are this package's own.
 package object
 
 import aarch64 "github.com/vertex-language/vvm/lower/aarch64"
@@ -73,15 +76,37 @@ const (
 	RelocCall26 RelocKind = iota
 	// RelocJump26: B — same arithmetic (R_AARCH64_JUMP26 shape).
 	RelocJump26
-	// RelocMovzG3: ((S + A) >> 48) & 0xFFFF into imm16 (R_AARCH64_MOVW_UABS_G3).
-	RelocMovzG3
-	// RelocMovkG2: ((S + A) >> 32) & 0xFFFF into imm16 (R_AARCH64_MOVW_UABS_G2_NC).
-	RelocMovkG2
-	// RelocMovkG1: ((S + A) >> 16) & 0xFFFF into imm16 (R_AARCH64_MOVW_UABS_G1_NC).
-	RelocMovkG1
-	// RelocMovkG0: (S + A) & 0xFFFF into imm16 (R_AARCH64_MOVW_UABS_G0_NC).
-	RelocMovkG0
-	// RelocAbs64: 64-bit data field := S + A (R_AARCH64_ABS64 shape).
+	// RelocCondBr19: B.cond/CBZ/CBNZ — ((S + A - P) >> 2) into imm19
+	// (R_AARCH64_CONDBR19 shape).
+	RelocCondBr19
+	// RelocTstBr14: TBZ/TBNZ — ((S + A - P) >> 2) into imm14
+	// (R_AARCH64_TSTBR14 shape).
+	RelocTstBr14
+	// RelocAdrPrelPgHi21: ADRP — the page-relative delta of S+A into the
+	// immhi/immlo split (R_AARCH64_ADR_PREL_PG_HI21 shape).
+	RelocAdrPrelPgHi21
+	// RelocAdrPrelLo21: ADR — (S + A - P) into the immhi/immlo split
+	// (R_AARCH64_ADR_PREL_LO21 shape).
+	RelocAdrPrelLo21
+	// RelocAddAbsLo12Nc: ADD (immediate) — (S + A) & 0xFFF into imm12
+	// (R_AARCH64_ADD_ABS_LO12_NC shape).
+	RelocAddAbsLo12Nc
+	// RelocLdSt8AbsLo12Nc: byte load/store — (S + A) & 0xFFF into imm12,
+	// unscaled (R_AARCH64_LDST8_ABS_LO12_NC shape).
+	RelocLdSt8AbsLo12Nc
+	// RelocLdSt16AbsLo12Nc: halfword load/store — ((S + A) & 0xFFF) >> 1
+	// into imm12 (R_AARCH64_LDST16_ABS_LO12_NC shape).
+	RelocLdSt16AbsLo12Nc
+	// RelocLdSt32AbsLo12Nc: word load/store — ((S + A) & 0xFFF) >> 2
+	// into imm12 (R_AARCH64_LDST32_ABS_LO12_NC shape).
+	RelocLdSt32AbsLo12Nc
+	// RelocLdSt64AbsLo12Nc: doubleword load/store — ((S + A) & 0xFFF) >> 3
+	// into imm12 (R_AARCH64_LDST64_ABS_LO12_NC shape).
+	RelocLdSt64AbsLo12Nc
+	// RelocAbs64: 64-bit data field := S + A (R_AARCH64_ABS64 shape). The
+	// one kind with no instruction-field counterpart: a `global g ptr =
+	// addr f` relocates a whole data word, not a bit-field inside an
+	// instruction.
 	RelocAbs64
 )
 
@@ -91,14 +116,24 @@ func (k RelocKind) String() string {
 		return "call26"
 	case RelocJump26:
 		return "jump26"
-	case RelocMovzG3:
-		return "movz_uabs_g3"
-	case RelocMovkG2:
-		return "movk_uabs_g2"
-	case RelocMovkG1:
-		return "movk_uabs_g1"
-	case RelocMovkG0:
-		return "movk_uabs_g0"
+	case RelocCondBr19:
+		return "condbr19"
+	case RelocTstBr14:
+		return "tstbr14"
+	case RelocAdrPrelPgHi21:
+		return "adr_prel_pg_hi21"
+	case RelocAdrPrelLo21:
+		return "adr_prel_lo21"
+	case RelocAddAbsLo12Nc:
+		return "add_abs_lo12_nc"
+	case RelocLdSt8AbsLo12Nc:
+		return "ldst8_abs_lo12_nc"
+	case RelocLdSt16AbsLo12Nc:
+		return "ldst16_abs_lo12_nc"
+	case RelocLdSt32AbsLo12Nc:
+		return "ldst32_abs_lo12_nc"
+	case RelocLdSt64AbsLo12Nc:
+		return "ldst64_abs_lo12_nc"
 	case RelocAbs64:
 		return "abs64"
 	}
@@ -112,20 +147,36 @@ type Reloc struct {
 	Addend int64
 }
 
+// relocKind translates lower/aarch64's FixupKind into this package's
+// RelocKind. An explicit switch, not a numeric cast, even though the two
+// enums are declared in the same order: a switch fails loudly if either
+// side gains a case instead of silently misreinterpreting it, matching the
+// convention aarch64.fromEncoderKind and encode.go's toEncoderOpr already
+// use for the same reason.
 func relocKind(k aarch64.FixupKind) RelocKind {
 	switch k {
 	case aarch64.FixupCall26:
 		return RelocCall26
 	case aarch64.FixupJump26:
 		return RelocJump26
-	case aarch64.FixupMovzG3:
-		return RelocMovzG3
-	case aarch64.FixupMovkG2:
-		return RelocMovkG2
-	case aarch64.FixupMovkG1:
-		return RelocMovkG1
-	case aarch64.FixupMovkG0:
-		return RelocMovkG0
+	case aarch64.FixupCondBr19:
+		return RelocCondBr19
+	case aarch64.FixupTestBr14:
+		return RelocTstBr14
+	case aarch64.FixupAdrPrelPgHi21:
+		return RelocAdrPrelPgHi21
+	case aarch64.FixupAdrPrelLo21:
+		return RelocAdrPrelLo21
+	case aarch64.FixupAddAbsLo12Nc:
+		return RelocAddAbsLo12Nc
+	case aarch64.FixupLdSt8AbsLo12Nc:
+		return RelocLdSt8AbsLo12Nc
+	case aarch64.FixupLdSt16AbsLo12Nc:
+		return RelocLdSt16AbsLo12Nc
+	case aarch64.FixupLdSt32AbsLo12Nc:
+		return RelocLdSt32AbsLo12Nc
+	case aarch64.FixupLdSt64AbsLo12Nc:
+		return RelocLdSt64AbsLo12Nc
 	}
 	return RelocAbs64
 }
