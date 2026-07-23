@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/vertex-language/vvm/importer"
+	"github.com/vertex-language/vvm/ir/verify"
 	"github.com/vertex-language/vvm/ir/vir"
 )
 
@@ -30,7 +31,7 @@ func BuildGraph(srcs [][]byte, rootModuleName string, t Target) ([]byte, error) 
 //
 //	importer.NewSet(modules)   — index by qualified identity
 //	set.ResolveImports()       — every `import "X"` -> real module
-//	vir.Verify(m) per module   — ir/verify, import-agnostic, unchanged
+//	verify.Verify(m) per module — ir/verify, import-agnostic, unchanged
 //	set.CheckReferences()      — every qualified ref checked against the
 //	                              real target's real declarations
 //	set.Rewrite()              — erase cross-module refs: const -> inline
@@ -62,7 +63,7 @@ func BuildModuleGraph(modules []*vir.Module, rootModuleName string, t Target) ([
 		return nil, fmt.Errorf("vvm: %w", err)
 	}
 	for _, m := range modules {
-		if err := vir.Verify(m); err != nil {
+		if err := verify.Verify(m); err != nil {
 			return nil, fmt.Errorf("vvm: verify %q: %w", m.Name, err)
 		}
 	}

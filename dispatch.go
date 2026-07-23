@@ -82,26 +82,32 @@ func toObjectBytes(m *vir.Module, t Target, f objFormat) ([]byte, error) {
 					"e_machine entry and BE support) — only flat is reachable today; " +
 					"see objectwriter/README.md 'Why arm has no elf.go'")
 		}
-		arch := lowerarm.ArchARM
-		if t.bigEndian() {
-			arch = lowerarm.ArchARMEB
-		}
-		p, err := lowerarm.Lower(m, arch)
+		// lower/arm.Lower derives arm-vs-armeb straight from m.Target.Arch
+		// itself (arm.go's index.be) — it takes no separate arch argument.
+		p, err := lowerarm.Lower(m)
 		if err != nil {
 			return nil, fmt.Errorf("vvm: lower/arm: %w", err)
 		}
-		secs := objarm.FromProgram(p)
+		// arm.Program carries no Arch/byte-order field of its own
+		// (object/arm's package doc says so explicitly), so object/arm's
+		// FromProgram takes the byte order as an explicit `big` bool —
+		// true for armeb — supplied by the caller.
+		secs := objarm.FromProgram(p, t.bigEndian())
 		return objwarm.ToFlat(secs, t.FlatBaseAddress)
 
 	case "aarch64":
-		arch := loweraarch64.ArchAArch64
-		if t.bigEndian() {
-			arch = loweraarch64.ArchAArch64BE
-		}
-		p, err := loweraarch64.Lower(m, arch)
+		// lower/aarch64.Lower similarly derives aarch64-vs-aarch64_be from
+		// m.Target.Arch (aarch64.go's ArchNameBE check) — no separate arch
+		// argument.
+		p, err := loweraarch64.Lower(m)
 		if err != nil {
 			return nil, fmt.Errorf("vvm: lower/aarch64: %w", err)
 		}
+		// Unlike object/arm, object/aarch64.FromProgram takes no byte-order
+		// parameter: A64 instruction words are little-endian in both
+		// aarch64 and aarch64_be (no BE-8-style text swap), so only
+		// RelocAbs64 data fields are endianness-sensitive, and that's
+		// handled downstream by the linker, not here.
 		secs := objaarch64.FromProgram(p)
 		switch f {
 		case formatELF:

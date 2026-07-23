@@ -4,6 +4,7 @@ package vvm
 import (
 	"fmt"
 
+	"github.com/vertex-language/vvm/ir/verify"
 	"github.com/vertex-language/vvm/ir/vir"
 )
 
@@ -14,7 +15,7 @@ import (
 //
 // This is the no-imports path. A module that declares any `import` must
 // go through BuildGraph/BuildModuleGraph (graph.go) instead — Build
-// always runs bare vir.Verify, which has no notion of cross-module
+// always runs bare verify.Verify, which has no notion of cross-module
 // references at all (that's importer's entire reason to exist), so any
 // qualified-ident operand in m fails Verify here rather than resolving.
 func Build(src []byte, t Target) ([]byte, error) {
@@ -35,7 +36,7 @@ func BuildModule(m *vir.Module, t Target) ([]byte, error) {
 				"which runs importer.Set before lowering", m.Name, len(m.Imports))
 	}
 
-	if err := vir.Verify(m); err != nil {
+	if err := verify.Verify(m); err != nil {
 		return nil, fmt.Errorf("vvm: verify: %w", err)
 	}
 
