@@ -128,6 +128,24 @@ func (s *sel) loadOperand(o vir.Operand, dst Reg) {
 			s.emit(Inst{Op: "mov", D: R(dst), S: Imm(c.Value.Int), Sz: 8})
 			return
 		}
+		// Stack-passed named parameter (7th+ INTEGER arg, or any byval
+		// arg — byval is always MEMORY class, never a register). A byval
+		// param's "value" is the address of the copied struct bytes that
+		// live right at this stack slot, so it's a lea, not a load; an
+		// ordinary scalar stack param's value genuinely lives there, so
+		// it's a load. This must be checked before SlotOf: every named
+		// value (params included) gets a local slot from BuildFrame, but
+		// a stack param's slot is never spilled into by the prologue
+		// (encode.go's prologue only spills InReg params) — falling
+		// through to SlotOf here would read an uninitialized local.
+		if off, ok := s.fr.ParamStackOff(o.Ident); ok {
+			if s.paramByVal(o.Ident) {
+				s.emit(Inst{Op: "lea", D: R(dst), S: Mem(RRBP, int32(off))})
+			} else {
+				s.emit(Inst{Op: "mov", D: R(dst), S: Mem(RRBP, int32(off)), Sz: 8})
+			}
+			return
+		}
 		if slot, ok := s.fr.SlotOf(o.Ident); ok {
 			s.emit(Inst{Op: "mov", D: R(dst), S: Slot(slot), Sz: 8})
 			return
@@ -148,6 +166,18 @@ func (s *sel) loadOperand(o vir.Operand, dst Reg) {
 		// Types/orderings/vectors are handled at their specific call sites.
 		s.emit(Inst{Op: "mov", D: R(dst), S: Imm(0), Sz: 8})
 	}
+}
+
+// paramByVal reports whether name is a byval parameter of the current
+// function — used by loadOperand to decide lea-address-of vs. mov-load for
+// a stack-passed param.
+func (s *sel) paramByVal(name string) bool {
+	for _, p := range s.f.Params {
+		if p.Name == name {
+			return p.ByVal != ""
+		}
+	}
+	return false
 }
 
 func (s *sel) storeReg(src Reg, name string) {
@@ -181,11 +211,23 @@ func (s *sel) selInst(in *vir.Instruction) error {
 	case vir.OpShl, vir.OpLShr, vir.OpAShr:
 		return s.selShift(in)
 
+	case vir.OpRotl, vir.OpRotr:
+		return s.selRotate(in)
+
 	case vir.OpNeg, vir.OpNot:
 		return s.selUnary(in)
 
+	case vir.OpAbs:
+		return s.selAbs(in)
+
 	case vir.OpUDiv, vir.OpSDiv, vir.OpURem, vir.OpSRem:
 		return s.selDivide(in)
+
+	case vir.OpSAddO, vir.OpUAddO, vir.OpSSubO, vir.OpUSubO, vir.OpSMulO, vir.OpUMulO:
+		return s.selOverflow(in)
+
+	case vir.OpUMulH, vir.OpSMulH:
+		return s.selWideningMul(in)
 
 	case vir.OpEq, vir.OpNe, vir.OpSlt, vir.OpSgt, vir.OpSle, vir.OpSge,
 		vir.OpUlt, vir.OpUgt, vir.OpUle, vir.OpUge:
@@ -239,6 +281,9 @@ func (s *sel) selInst(in *vir.Instruction) error {
 	case vir.OpBSwap:
 		return s.selBswap(in)
 
+	case vir.OpUAddSat, vir.OpSAddSat, vir.OpUSubSat, vir.OpSSubSat:
+		return s.selSaturating(in)
+
 	// Deferred, matching lower/x86's unimplemented set.
 	case vir.OpSqrt, vir.OpFma, vir.OpCopysign, vir.OpFloor, vir.OpCeil,
 		vir.OpTruncF, vir.OpNearest, vir.OpSfromint, vir.OpUfromint,
@@ -250,8 +295,6 @@ func (s *sel) selInst(in *vir.Instruction) error {
 		vir.OpReduceAdd, vir.OpReduceMin, vir.OpReduceMax,
 		vir.OpReduceAnd, vir.OpReduceOr, vir.OpReduceXor:
 		return todo("vector op %s", in.Op)
-	case vir.OpUAddSat, vir.OpSAddSat, vir.OpUSubSat, vir.OpSSubSat:
-		return todo("saturating op %s", in.Op)
 	case vir.OpBitrev:
 		return todo("bitrev")
 
@@ -301,6 +344,168 @@ func (s *sel) selUnary(in *vir.Instruction) error {
 	return nil
 }
 
+// selAbs lowers abs via the standard branchless mask trick:
+//
+//	mask = x >> (width-1)   (arithmetic shift: all-ones if x<0, else 0)
+//	abs  = (x ^ mask) - mask
+//
+// This wraps INT_MIN back to INT_MIN for free (ir.md §4's documented
+// exception to ordinary absolute-value behavior), since (INT_MIN ^ -1) -
+// (-1) = ~INT_MIN + 1 = INT_MIN in modular arithmetic — no separate case
+// needed.
+func (s *sel) selAbs(in *vir.Instruction) error {
+	t := s.types[in.Result]
+	bits := intBits(t)
+	cw := 4
+	if bits > 32 {
+		cw = 8
+	}
+
+	s.loadOperand(in.Args[0], RRAX)
+	if bits < 32 {
+		s.sext32(RRAX, bits)
+	}
+	s.emit(Inst{Op: "mov", D: R(RRCX), S: R(RRAX), Sz: 8})
+	s.emit(Inst{Op: "sar", D: R(RRCX), S: Imm(int64(cw*8 - 1)), Sz: cw})
+	s.emit(Inst{Op: "xor", D: R(RRAX), S: R(RRCX), Sz: cw})
+	s.emit(Inst{Op: "sub", D: R(RRAX), S: R(RRCX), Sz: cw})
+	s.maskTo(RRAX, bits)
+	s.storeReg(RRAX, in.Result)
+	return nil
+}
+
+// selOverflow lowers the six overflow predicates by running the real
+// operation once and reading the flag it already sets: OF for the signed
+// forms, CF for the unsigned add/sub forms. Unsigned multiply overflow
+// uses the one-operand `mul` (F7 /4) widening form — CF and OF are both
+// set iff the high half (rdx) is nonzero, i.e. the product didn't fit back
+// in the low half.
+func (s *sel) selOverflow(in *vir.Instruction) error {
+	ot := s.operandType(in.Args[0])
+	bits := intBits(ot)
+	cw := 4
+	if bits > 32 {
+		cw = 8
+	}
+	signed := in.Op == vir.OpSAddO || in.Op == vir.OpSSubO || in.Op == vir.OpSMulO
+
+	s.loadOperand(in.Args[0], RRAX)
+	s.loadOperand(in.Args[1], RRCX)
+	if signed && bits < 32 {
+		s.sext32(RRAX, bits)
+		s.sext32(RRCX, bits)
+	}
+
+	var cc byte
+	switch in.Op {
+	case vir.OpSAddO:
+		s.emit(Inst{Op: "add", D: R(RRAX), S: R(RRCX), Sz: cw})
+		cc = CondO
+	case vir.OpUAddO:
+		s.emit(Inst{Op: "add", D: R(RRAX), S: R(RRCX), Sz: cw})
+		cc = CondB
+	case vir.OpSSubO:
+		s.emit(Inst{Op: "sub", D: R(RRAX), S: R(RRCX), Sz: cw})
+		cc = CondO
+	case vir.OpUSubO:
+		s.emit(Inst{Op: "sub", D: R(RRAX), S: R(RRCX), Sz: cw})
+		cc = CondB
+	case vir.OpSMulO:
+		s.emit(Inst{Op: "imul2", D: R(RRAX), S: R(RRCX), Sz: cw})
+		cc = CondO
+	case vir.OpUMulO:
+		s.emit(Inst{Op: "mul", S: R(RRCX), Sz: cw})
+		cc = CondO
+	default:
+		return todo("overflow predicate %s", in.Op)
+	}
+	s.emit(Inst{Op: "mov", D: R(RRAX), S: Imm(0), Sz: 8}) // clear before setcc
+	s.emit(Inst{Op: "setcc", D: R(RRAX), CC: cc})
+	s.storeReg(RRAX, in.Result)
+	return nil
+}
+
+// selWideningMul lowers umulh/smulh via the one-operand mul/imul (F7 /4,
+// /5) widening forms: rdx:rax = rax * r/m, high half in rdx. Signed narrow
+// operands are sign-extended into the working width first, matching every
+// other signed op in this file (selCompare, selDivide, ...); unsigned
+// narrow operands are already correctly zero-extended by the value-slot
+// invariant and need no adjustment.
+func (s *sel) selWideningMul(in *vir.Instruction) error {
+	t := s.types[in.Result]
+	bits := intBits(t)
+	cw := 4
+	if bits > 32 {
+		cw = 8
+	}
+	signed := in.Op == vir.OpSMulH
+
+	s.loadOperand(in.Args[0], RRAX)
+	s.loadOperand(in.Args[1], RRCX)
+	if signed && bits < 32 {
+		s.sext32(RRAX, bits)
+		s.sext32(RRCX, bits)
+	}
+	op := "mul"
+	if signed {
+		op = "imul1"
+	}
+	s.emit(Inst{Op: op, S: R(RRCX), Sz: cw})
+	s.maskTo(RRDX, bits)
+	s.storeReg(RRDX, in.Result)
+	return nil
+}
+
+// selSaturating lowers uadd_sat/sadd_sat/usub_sat/ssub_sat. The unsigned
+// forms clamp directly off the carry flag the add/sub already sets. The
+// signed forms use sign(a) ^ MAX as the clamp value — the same formula
+// covers both overflow directions for both add and sub, since a signed
+// add/sub can only overflow toward the bound `a`'s own sign already points
+// at (add overflowing needs a and b same-signed, landing past that sign's
+// bound; sub overflowing needs a and the *negated* b same-signed, same
+// conclusion).
+func (s *sel) selSaturating(in *vir.Instruction) error {
+	t := s.types[in.Result]
+	bits := intBits(t)
+	cw := 4
+	if bits > 32 {
+		cw = 8
+	}
+	isAdd := in.Op == vir.OpUAddSat || in.Op == vir.OpSAddSat
+	signed := in.Op == vir.OpSAddSat || in.Op == vir.OpSSubSat
+
+	s.loadOperand(in.Args[0], RRAX) // a
+	s.loadOperand(in.Args[1], RRCX) // b
+	if signed && bits < 32 {
+		s.sext32(RRAX, bits)
+		s.sext32(RRCX, bits)
+	}
+	s.emit(Inst{Op: "mov", D: R(RR11), S: R(RRAX), Sz: 8}) // keep a copy of `a`
+
+	op := "add"
+	if !isAdd {
+		op = "sub"
+	}
+	s.emit(Inst{Op: op, D: R(RRAX), S: R(RRCX), Sz: cw})
+
+	switch in.Op {
+	case vir.OpUAddSat:
+		s.emit(Inst{Op: "mov", D: R(RRDX), S: Imm(-1), Sz: 8}) // all-ones = max unsigned
+		s.emit(Inst{Op: "cmovcc", D: R(RRAX), S: R(RRDX), CC: CondB, Sz: cw})
+	case vir.OpUSubSat:
+		s.emit(Inst{Op: "mov", D: R(RRDX), S: Imm(0), Sz: 8})
+		s.emit(Inst{Op: "cmovcc", D: R(RRAX), S: R(RRDX), CC: CondB, Sz: cw})
+	case vir.OpSAddSat, vir.OpSSubSat:
+		maxVal := (int64(1) << uint(bits-1)) - 1
+		s.emit(Inst{Op: "sar", D: R(RR11), S: Imm(int64(cw*8 - 1)), Sz: cw}) // sign(a)
+		s.emit(Inst{Op: "xor", D: R(RR11), S: Imm(maxVal), Sz: cw})          // sign(a) ^ MAX
+		s.emit(Inst{Op: "cmovcc", D: R(RRAX), S: R(RR11), CC: CondO, Sz: cw})
+	}
+	s.maskTo(RRAX, bits)
+	s.storeReg(RRAX, in.Result)
+	return nil
+}
+
 func (s *sel) selShift(in *vir.Instruction) error {
 	t := s.types[in.Result]
 	bits := intBits(t)
@@ -314,6 +519,34 @@ func (s *sel) selShift(in *vir.Instruction) error {
 	s.loadOperand(in.Args[1], RRCX) // count in cl
 	op := map[vir.Opcode]string{vir.OpShl: "shl", vir.OpLShr: "shr", vir.OpAShr: "sar"}[in.Op]
 	s.emit(Inst{Op: op, D: R(RRAX), S: R(RRCX), Sz: 4})
+	s.maskTo(RRAX, bits)
+	s.storeReg(RRAX, in.Result)
+	return nil
+}
+
+// selRotate lowers rotl/rotr via the native rol/ror instructions
+// (opcodes.go's shift/rotate group 2, confirmed wired in encode.go's shift
+// case). Unlike selShift above — which always operates at a forced 32-bit
+// register width — this uses the value's own width (widthOf, exactly 1/2/
+// 4/8 bytes for the standard iN sizes this backend supports). That matters
+// here specifically because rotation is periodic in the operand's own bit
+// width (rotating an i8 by 9 is identical to rotating it by 1), so a
+// native-width rol/ror already gives the right answer for any count
+// without extra masking machinery — whereas forcing 32-bit width the way
+// selShift does would rotate garbage in from the upper, logically-unused
+// bits of the register.
+func (s *sel) selRotate(in *vir.Instruction) error {
+	t := s.types[in.Result]
+	bits := intBits(t)
+	w := widthOf(t)
+
+	op := "rol"
+	if in.Op == vir.OpRotr {
+		op = "ror"
+	}
+	s.loadOperand(in.Args[0], RRAX)
+	s.loadOperand(in.Args[1], RRCX) // count -> cl
+	s.emit(Inst{Op: op, D: R(RRAX), S: R(RRCX), Sz: w})
 	s.maskTo(RRAX, bits)
 	s.storeReg(RRAX, in.Result)
 	return nil
@@ -594,7 +827,7 @@ func (s *sel) selAlloca(in *vir.Instruction) error {
 	return nil
 }
 
-// ---- bulk / atomics (subset) -----------------------------------------------
+// ---- bulk / atomics ---------------------------------------------------------
 
 func (s *sel) selBulk(in *vir.Instruction) error {
 	switch in.Op {
@@ -612,9 +845,40 @@ func (s *sel) selBulk(in *vir.Instruction) error {
 		s.emit(Inst{Op: "rep_movsb"})
 		return nil
 	case vir.OpMemmove:
-		return todo("memmove (runtime direction pick)")
+		return s.selMemmove(in)
 	}
 	return errBadModule("unexpected bulk op")
+}
+
+// selMemmove picks a copy direction at runtime: dst <= src copies forward
+// exactly like memcopy; dst > src (the only order where a forward
+// byte-by-byte copy could clobber source bytes not yet read) copies
+// backward from the last byte instead, using rep movsb with the direction
+// flag set (std) so each step decrements rdi/rsi.
+func (s *sel) selMemmove(in *vir.Instruction) error {
+	fwd := ".Lmove.fwd." + uniq(s)
+	done := ".Lmove.done." + uniq(s)
+
+	s.loadOperand(in.Args[0], RRDI) // dst
+	s.loadOperand(in.Args[1], RRSI) // src
+	s.loadOperand(in.Args[2], RRCX) // n
+
+	s.emit(Inst{Op: "cmp", D: R(RRDI), S: R(RRSI), Sz: 8})
+	s.emit(Inst{Op: "jcc", CC: CondBE, Lbl: fwd})
+
+	s.emit(Inst{Op: "lea", D: R(RRDI), S: MemIndexed(RRDI, RRCX, 1, -1)})
+	s.emit(Inst{Op: "lea", D: R(RRSI), S: MemIndexed(RRSI, RRCX, 1, -1)})
+	s.emit(Inst{Op: "std"})
+	s.emit(Inst{Op: "rep_movsb"})
+	s.emit(Inst{Op: "cld"})
+	s.emit(Inst{Op: "jmp", Lbl: done})
+
+	s.emit(Inst{Op: "label", Lbl: fwd})
+	s.emit(Inst{Op: "cld"})
+	s.emit(Inst{Op: "rep_movsb"})
+
+	s.emit(Inst{Op: "label", Lbl: done})
+	return nil
 }
 
 func (s *sel) selAtomic(in *vir.Instruction) error {
@@ -670,15 +934,56 @@ func (s *sel) selAtomic(in *vir.Instruction) error {
 		s.emit(Inst{Op: "xchg", D: Mem(RRCX, 0), S: R(RRAX), Sz: w})
 		s.storeReg(RRAX, in.Result) // old value, swapped out by xchg
 		return nil
+	case vir.OpAtomicAnd:
+		return s.selAtomicRMW(in, "and")
+	case vir.OpAtomicOr:
+		return s.selAtomicRMW(in, "or")
+	case vir.OpAtomicXor:
+		return s.selAtomicRMW(in, "xor")
+	case vir.OpCmpxchg:
+		// D=[addr], S=desired register, implicit compare against rax
+		// (expected). rax holds the actual previous memory value on exit
+		// either way — unchanged on success (it already equaled the old
+		// value), overwritten with the real old value on failure — which
+		// is exactly this op's "old" result convention.
+		w := widthOf(s.types[in.Result])
+		s.loadOperand(in.Args[0], RRDX) // pointer
+		s.loadOperand(in.Args[1], RRAX) // expected
+		s.loadOperand(in.Args[2], RRCX) // desired
+		s.emit(Inst{Op: "lock_cmpxchg", D: Mem(RRDX, 0), S: R(RRCX), Sz: w})
+		s.storeReg(RRAX, in.Result)
+		return nil
 	default:
-		// and/or/xor return-previous have no fetch-and-op x86 instruction
-		// (unlike add/sub via xadd) — a correct lowering needs a
-		// lock-cmpxchg retry loop, and cmpxchg isn't proven to be a wired
-		// encoder mnemonic anywhere else in this file's currently-passing
-		// paths. Left as todo rather than guessing new machine-instruction
-		// plumbing (see README's "Not yet implemented" list).
 		return todo("atomic %s", in.Op)
 	}
+}
+
+// selAtomicRMW lowers atomic_and/or/xor via a lock-cmpxchg retry loop —
+// x86 has no fetch-and-op instruction for these three (unlike add/sub,
+// which XADD covers directly). Each iteration snapshots the current value,
+// computes old <op> operand, and attempts to swap it in; a failed swap
+// (someone else touched the location first) means rax has been refreshed
+// to the real current value by the hardware, so the next iteration just
+// recomputes off that and retries. On success rax still holds the
+// snapshot it compared against, which is exactly the pre-op "old" value
+// this suite's rmw ops all return.
+func (s *sel) selAtomicRMW(in *vir.Instruction, aluOp string) error {
+	w := widthOf(s.types[in.Result])
+	retry := ".Lrmw.retry." + uniq(s)
+
+	s.loadOperand(in.Args[0], RRDX) // pointer, live across the whole loop
+	s.loadOperand(in.Args[1], RR11) // operand, live across the whole loop
+
+	s.emit(Inst{Op: "label", Lbl: retry})
+	s.emit(Inst{Op: "mov", D: R(RRAX), S: Mem(RRDX, 0), Sz: w}) // snapshot
+	s.emit(Inst{Op: "mov", D: R(RRCX), S: R(RRAX), Sz: 8})
+	s.emit(Inst{Op: aluOp, D: R(RRCX), S: R(RR11), Sz: w})
+	s.emit(Inst{Op: "lock_cmpxchg", D: Mem(RRDX, 0), S: R(RRCX), Sz: w})
+	s.emit(Inst{Op: "jcc", CC: CondNE, Lbl: retry})
+
+	s.maskTo(RRAX, intBits(s.types[in.Result]))
+	s.storeReg(RRAX, in.Result)
+	return nil
 }
 
 // ---- bit intrinsics --------------------------------------------------------
@@ -694,10 +999,49 @@ func (s *sel) selPopcnt(in *vir.Instruction) error {
 	return nil
 }
 
+// selBitScan lowers ctlz/cttz via bsr/bsf plus an explicit zero-input
+// fallback (bsr/bsf leave the destination register's value officially
+// undefined when the source is zero, so this doesn't rely on whatever a
+// given chip happens to do — it branchlessly overwrites with the
+// conventional "count == width" answer instead).
+//
+// cttz needs no width adjustment: bsf's index IS the trailing-zero count
+// regardless of the value's declared bit width, since any bits above that
+// width are already zero per this backend's zero-extension invariant.
+//
+// ctlz needs bits-1-bsr_index. That subtraction can't happen with an
+// ordinary `sub` between the bsr and the zero-input cmovcc, because sub
+// would clobber the very ZF flag the cmovcc needs to read. Instead it uses
+// the identity bits-1-x = bits+(~x): `not` doesn't touch flags at all, and
+// `lea` computing base+disp doesn't either, so the flag from bsr survives
+// intact all the way to the cmovcc.
 func (s *sel) selBitScan(in *vir.Instruction) error {
-	// bsr/bsf give index; ctlz/cttz want counts. Baseline lowering via
-	// bsr/bsf + fixups is nontrivial for the zero input — defer.
-	return todo("%s", in.Op)
+	t := s.types[in.Result]
+	bits := intBits(t)
+	cw := 4
+	if bits > 32 {
+		cw = 8
+	}
+	s.loadOperand(in.Args[0], RRAX)
+
+	if in.Op == vir.OpCttz {
+		s.emit(Inst{Op: "bsf", D: R(RRCX), S: R(RRAX), Sz: cw}) // ZF set iff input == 0
+		s.emit(Inst{Op: "mov", D: R(RRDX), S: Imm(int64(bits)), Sz: 8})
+		s.emit(Inst{Op: "cmovcc", D: R(RRCX), S: R(RRDX), CC: CondE, Sz: cw})
+		s.maskTo(RRCX, bits)
+		s.storeReg(RRCX, in.Result)
+		return nil
+	}
+
+	// ctlz
+	s.emit(Inst{Op: "bsr", D: R(RRCX), S: R(RRAX), Sz: cw}) // ZF set iff input == 0
+	s.emit(Inst{Op: "not", S: R(RRCX), Sz: cw})             // ~bsr_index; flags untouched
+	s.emit(Inst{Op: "lea", D: R(RRAX), S: Mem(RRCX, int32(bits))}) // bits + ~idx == bits-1-idx
+	s.emit(Inst{Op: "mov", D: R(RRDX), S: Imm(int64(bits)), Sz: 8})
+	s.emit(Inst{Op: "cmovcc", D: R(RRAX), S: R(RRDX), CC: CondE, Sz: cw})
+	s.maskTo(RRAX, bits)
+	s.storeReg(RRAX, in.Result)
+	return nil
 }
 
 func (s *sel) selBswap(in *vir.Instruction) error {
