@@ -620,8 +620,40 @@ func (s *sel) selAtomic(in *vir.Instruction) error {
 		s.emit(Inst{Op: "lock_xadd", D: Mem(RRCX, 0), S: R(RRAX), Sz: widthOf(s.types[in.Result])})
 		s.storeReg(RRAX, in.Result)
 		return nil
+	case vir.OpAtomicSub:
+		// Fetch-and-subtract has no dedicated x86 instruction; x86 only
+		// offers fetch-and-ADD (XADD). So this negates the operand first
+		// and reuses the identical lock_xadd path OpAtomicAdd already
+		// proves works: fetch_add(-v) == fetch_sub(v), and lock xadd still
+		// leaves the pre-op (old) value in the register, same convention
+		// as OpAtomicAdd's result.
+		w := widthOf(s.types[in.Result])
+		s.loadOperand(in.Args[0], RRCX)
+		s.loadOperand(in.Args[1], RRAX)
+		s.emit(Inst{Op: "neg", S: R(RRAX), Sz: w})
+		s.emit(Inst{Op: "lock_xadd", D: Mem(RRCX, 0), S: R(RRAX), Sz: w})
+		s.storeReg(RRAX, in.Result)
+		return nil
+	case vir.OpAtomicXchg:
+		// XCHG against a memory operand is atomic on x86 with no LOCK
+		// prefix needed, and it's already this backend's own lowering for
+		// OpAtomicStore. The one difference here: atomic_xchg's result is
+		// the value XCHG leaves in the register — the memory location's
+		// old contents — which OpAtomicStore's lowering computes but
+		// discards.
+		w := widthOf(s.types[in.Result])
+		s.loadOperand(in.Args[0], RRCX) // pointer
+		s.loadOperand(in.Args[1], RRAX) // new value
+		s.emit(Inst{Op: "xchg", D: Mem(RRCX, 0), S: R(RRAX), Sz: w})
+		s.storeReg(RRAX, in.Result) // old value, swapped out by xchg
+		return nil
 	default:
-		// sub/and/or/xor return-previous and cmpxchg lower as retry loops.
+		// and/or/xor return-previous have no fetch-and-op x86 instruction
+		// (unlike add/sub via xadd) — a correct lowering needs a
+		// lock-cmpxchg retry loop, and cmpxchg isn't proven to be a wired
+		// encoder mnemonic anywhere else in this file's currently-passing
+		// paths. Left as todo rather than guessing new machine-instruction
+		// plumbing (see README's "Not yet implemented" list).
 		return todo("atomic %s", in.Op)
 	}
 }
