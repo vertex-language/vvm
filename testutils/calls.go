@@ -62,6 +62,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			m := vir.NewModule("tailcall_direct")
+			m.SetTarget(a, o, abiFor(o))
 
 			callee := m.DeclareFunction("answer", nil, vir.I32, false)
 			callee.Return(vir.IntLiteral(55))

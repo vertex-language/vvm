@@ -21,6 +21,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			m := vir.NewModule("exit_zero")
+			m.SetTarget(a, o, abiFor(o))
 			fb := m.DeclareFunction("main", nil, vir.I32, true, vir.AttributeEntry)
 			fb.Return(vir.IntLiteral(0))
 			return m
@@ -34,6 +35,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			m := vir.NewModule("exit_custom")
+			m.SetTarget(a, o, abiFor(o))
 			fb := m.DeclareFunction("main", nil, vir.I32, true, vir.AttributeEntry)
 			fb.Return(vir.IntLiteral(42))
 			return m
