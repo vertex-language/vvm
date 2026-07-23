@@ -64,6 +64,18 @@ Target triples in `vvm` follow an `arch-os-abi[tiers]` format with no vendor fie
 
 ---
 
+## Installation
+
+Install the `vvm` CLI directly with `go install`:
+
+```sh
+GOPROXY=direct go install github.com/vertex-language/vvm/cmd/vvm@latest
+```
+
+This builds the `vvm` binary from the latest tagged release and places it in your `$GOBIN` (or `$GOPATH/bin`). Make sure that directory is on your `PATH` so the `vvm` command is available in your shell.
+
+---
+
 ## Quick Start
 
 ### `vvm run` — compile and execute immediately
