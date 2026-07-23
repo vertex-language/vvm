@@ -845,7 +845,7 @@ func (e *enc) loadStore(in *Inst) error {
 
 	// Register offset: size 111000 opc 1 Rm option S 10 Rn Rt.
 	if m.Index != RNone {
-		if m.Mode != MemOffset {
+		if m.Mode != ModeOffset {
 			return fmt.Errorf("a register index cannot be pre- or post-indexed")
 		}
 		if !m.Index.Encodable() {
@@ -864,7 +864,7 @@ func (e *enc) loadStore(in *Inst) error {
 	// [base, #:lo12:sym]: the low half of an adrp pair. The field is left
 	// zero and the linker scales the symbol's low 12 bits to the access.
 	if m.Sym != "" {
-		if m.Mode != MemOffset {
+		if m.Mode != ModeOffset {
 			return fmt.Errorf("a symbolic offset cannot be pre- or post-indexed")
 		}
 		e.fixup(m.Sym, lo12FixupFor(sh.size))
@@ -880,7 +880,7 @@ func (e *enc) loadStore(in *Inst) error {
 	// encoder's choice, not a machine requirement — both spell the same
 	// access, and the alternative would be to reject offsets the hardware
 	// can plainly carry.
-	if m.Mode == MemOffset && m.Disp >= 0 && m.Disp%scale == 0 && m.Disp/scale <= 0xFFF {
+	if m.Mode == ModeOffset && m.Disp >= 0 && m.Disp%scale == 0 && m.Disp/scale <= 0xFFF {
 		e.word(0x39000000 | head | uint32(m.Disp/scale)<<10)
 		return nil
 	}
@@ -890,11 +890,11 @@ func (e *enc) loadStore(in *Inst) error {
 	}
 	var tail uint32
 	switch m.Mode {
-	case MemOffset:
+	case ModeOffset:
 		tail = 0b00 << 10 // LDUR/STUR: unscaled, no write-back
-	case MemPost:
+	case ModePost:
 		tail = 0b01 << 10
-	case MemPre:
+	case ModePre:
 		tail = 0b11 << 10
 	}
 	e.word(0x38000000 | head | uint32(m.Disp&0x1FF)<<12 | tail)
@@ -945,11 +945,11 @@ func (e *enc) loadStorePair(in *Inst) error {
 
 	var mode uint32
 	switch m.Mode {
-	case MemPost:
+	case ModePost:
 		mode = 0b01
-	case MemOffset:
+	case ModeOffset:
 		mode = 0b10
-	case MemPre:
+	case ModePre:
 		mode = 0b11
 	}
 	e.word(0x28000000 | opc<<30 | mode<<23 | bit(load)<<22 |

@@ -2,7 +2,6 @@
 package arm
 
 import (
-	"fmt"
 
 	"github.com/vertex-language/vvm/ir/vir"
 	"github.com/vertex-language/vvm/isa/arm/encoder"
