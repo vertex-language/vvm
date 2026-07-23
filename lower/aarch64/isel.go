@@ -1040,8 +1040,12 @@ func (s *sel) selAlloca(in *vir.Instruction) error {
 			return err
 		}
 		// Round the dynamic size up to 16: sp is unusable while misaligned.
+		// -StackAlign is the AND mask that clears the low alignment bits
+		// (^(StackAlign-1) in two's complement), computed this way because
+		// StackAlign is a power of two and the bitwise-complement form
+		// overflows int64 as a compile-time constant.
 		s.emit(Inst{Op: "add", D: R(RegA), N: R(RegA), M: Imm(StackAlign - 1)})
-		s.emit(Inst{Op: "and", D: R(RegA), N: R(RegA), M: Imm(int64(^uint64(StackAlign - 1)))})
+		s.emit(Inst{Op: "and", D: R(RegA), N: R(RegA), M: Imm(-int64(StackAlign))})
 		// The shifted-register form cannot name sp at all; the extended form
 		// takes Xn|SP in both Rd and Rn.
 		s.emit(Inst{Op: "sub", D: Rsp(), N: Rsp(), M: RExt(RegA, encoder.UXTX, 0)})

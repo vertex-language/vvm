@@ -58,19 +58,19 @@ func RExt(r encoder.Reg, ext, amt byte) Opr {
 }
 
 func Mem(base encoder.Reg, disp int64) Opr {
-	return Opr{Kind: OMem, Base: base, Index: encoder.RNone, Disp: disp, Mode: encoder.MemOffset}
+	return Opr{Kind: OMem, Base: base, Index: encoder.RNone, Disp: disp, Mode: encoder.ModeOffset}
 }
 
 func MemPre(base encoder.Reg, disp int64) Opr {
-	return Opr{Kind: OMem, Base: base, Index: encoder.RNone, Disp: disp, Mode: encoder.MemPre}
+	return Opr{Kind: OMem, Base: base, Index: encoder.RNone, Disp: disp, Mode: encoder.ModePre}
 }
 
 func MemPost(base encoder.Reg, disp int64) Opr {
-	return Opr{Kind: OMem, Base: base, Index: encoder.RNone, Disp: disp, Mode: encoder.MemPost}
+	return Opr{Kind: OMem, Base: base, Index: encoder.RNone, Disp: disp, Mode: encoder.ModePost}
 }
 
 func MemSym(base encoder.Reg, sym string) Opr {
-	return Opr{Kind: OMem, Base: base, Index: encoder.RNone, Sym: sym, Mode: encoder.MemOffset}
+	return Opr{Kind: OMem, Base: base, Index: encoder.RNone, Sym: sym, Mode: encoder.ModeOffset}
 }
 
 // Inst is one pre-encoding pseudo instruction. Op spellings are the

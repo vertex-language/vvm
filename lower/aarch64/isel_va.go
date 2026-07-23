@@ -42,7 +42,7 @@ func (s *sel) selVaStart(in *vir.Instruction) error {
 	// ParamEnd is computed from the actual argument layout, never from
 	// ArgBase + 8*(i+1), which is only right when no preceding parameter is
 	// an sret or already spilled to the stack.
-	s.addImm(RegA, encoder.RFP, int64(s.fr.ParamEnd), false, false)
+	s.addImm(RegA, encoder.FP, int64(s.fr.ParamEnd), false, false)
 	s.store(dst.Ident, RegA)
 	return nil
 }

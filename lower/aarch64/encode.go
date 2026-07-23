@@ -176,7 +176,7 @@ func toEncoderOpr(fr *Frame, o Opr) (encoder.Opr, error) {
 			return encoder.Opr{}, err
 		}
 		return encoder.Opr{
-			Kind: encoder.OMem, Mode: encoder.MemOffset,
+			Kind: encoder.OMem, Mode: encoder.ModeOffset,
 			Base: encoder.FP, Index: encoder.RNone, Disp: off,
 		}, nil
 	}
