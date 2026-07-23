@@ -280,6 +280,8 @@ func (s *sel) selInst(in *vir.Instruction) error {
 		return s.selBitScan(in)
 	case vir.OpBSwap:
 		return s.selBswap(in)
+	case vir.OpBitrev:
+		return s.selBitrev(in)
 
 	case vir.OpUAddSat, vir.OpSAddSat, vir.OpUSubSat, vir.OpSSubSat:
 		return s.selSaturating(in)
@@ -295,8 +297,6 @@ func (s *sel) selInst(in *vir.Instruction) error {
 		vir.OpReduceAdd, vir.OpReduceMin, vir.OpReduceMax,
 		vir.OpReduceAnd, vir.OpReduceOr, vir.OpReduceXor:
 		return todo("vector op %s", in.Op)
-	case vir.OpBitrev:
-		return todo("bitrev")
 
 	default:
 		return todo("opcode %s", in.Op)
@@ -1061,6 +1061,53 @@ func (s *sel) selBswap(in *vir.Instruction) error {
 	}
 	s.loadOperand(in.Args[0], RRAX)
 	s.emit(Inst{Op: "bswap", D: R(RRAX), Sz: w})
+	s.storeReg(RRAX, in.Result)
+	return nil
+}
+
+func (s *sel) selBitrev(in *vir.Instruction) error {
+	t := s.types[in.Result]
+	bits := intBits(t)
+	w := widthOf(t)
+
+	s.loadOperand(in.Args[0], RRAX)
+
+	// 1. Reverse Bytes
+	if w > 1 {
+		s.emit(Inst{Op: "bswap", D: R(RRAX), Sz: w})
+	}
+
+	// 2. Swap Nibbles
+	s.emit(Inst{Op: "mov", D: R(RRCX), S: R(RRAX), Sz: w})
+	s.emit(Inst{Op: "mov", D: R(RR11), S: Imm(int64(0x0F0F0F0F0F0F0F0F)), Sz: 8})
+	s.emit(Inst{Op: "and", D: R(RRAX), S: R(RR11), Sz: w})
+	s.emit(Inst{Op: "shl", D: R(RRAX), S: Imm(4), Sz: w})
+	s.emit(Inst{Op: "not", S: R(RR11), Sz: w})
+	s.emit(Inst{Op: "and", D: R(RRCX), S: R(RR11), Sz: w})
+	s.emit(Inst{Op: "shr", D: R(RRCX), S: Imm(4), Sz: w})
+	s.emit(Inst{Op: "or", D: R(RRAX), S: R(RRCX), Sz: w})
+
+	// 3. Swap Pairs
+	s.emit(Inst{Op: "mov", D: R(RRCX), S: R(RRAX), Sz: w})
+	s.emit(Inst{Op: "mov", D: R(RR11), S: Imm(int64(0x3333333333333333)), Sz: 8})
+	s.emit(Inst{Op: "and", D: R(RRAX), S: R(RR11), Sz: w})
+	s.emit(Inst{Op: "shl", D: R(RRAX), S: Imm(2), Sz: w})
+	s.emit(Inst{Op: "not", S: R(RR11), Sz: w})
+	s.emit(Inst{Op: "and", D: R(RRCX), S: R(RR11), Sz: w})
+	s.emit(Inst{Op: "shr", D: R(RRCX), S: Imm(2), Sz: w})
+	s.emit(Inst{Op: "or", D: R(RRAX), S: R(RRCX), Sz: w})
+
+	// 4. Swap Bits
+	s.emit(Inst{Op: "mov", D: R(RRCX), S: R(RRAX), Sz: w})
+	s.emit(Inst{Op: "mov", D: R(RR11), S: Imm(int64(0x5555555555555555)), Sz: 8})
+	s.emit(Inst{Op: "and", D: R(RRAX), S: R(RR11), Sz: w})
+	s.emit(Inst{Op: "shl", D: R(RRAX), S: Imm(1), Sz: w})
+	s.emit(Inst{Op: "not", S: R(RR11), Sz: w})
+	s.emit(Inst{Op: "and", D: R(RRCX), S: R(RR11), Sz: w})
+	s.emit(Inst{Op: "shr", D: R(RRCX), S: Imm(1), Sz: w})
+	s.emit(Inst{Op: "or", D: R(RRAX), S: R(RRCX), Sz: w})
+
+	s.maskTo(RRAX, bits)
 	s.storeReg(RRAX, in.Result)
 	return nil
 }
