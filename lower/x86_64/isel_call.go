@@ -31,7 +31,13 @@ func (s *sel) selCall(in *vir.Instruction) error {
 	for i, a := range args {
 		sl := plan.Slots[i]
 		if sl.Class == classMemory {
-			return todo("byval struct argument (MEMORY-class copy)")
+			// byval struct argument (MEMORY-class copy)
+			s.loadOperand(a, RRSI)
+			s.emit(Inst{Op: "lea", D: R(RRDI), S: Mem(RRSP, int32(sl.StackOff))})
+			s.emit(Inst{Op: "mov", D: R(RRCX), S: Imm(sl.Bytes), Sz: 8})
+			s.emit(Inst{Op: "cld"})
+			s.emit(Inst{Op: "rep_movsb"})
+			continue
 		}
 		if !sl.InReg {
 			s.loadOperand(a, RRAX)
