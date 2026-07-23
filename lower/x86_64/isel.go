@@ -416,6 +416,7 @@ func (s *sel) selFloatMinMax(in *vir.Instruction) error {
 	s.emit(Inst{Op: movOpTo, D: R(RXMM1), S: R(RRCX), Sz: sz})
 
 	isNan := ".Lminmax.nan." + uniq(s)
+	isEqual := ".Lminmax.eq." + uniq(s)
 	done := ".Lminmax.done." + uniq(s)
 
 	ucomi := "ucomisd"
@@ -428,19 +429,36 @@ func (s *sel) selFloatMinMax(in *vir.Instruction) error {
 	}
 	if isF32 {
 		ucomi = "ucomiss"
-		if in.Op == vir.OpMin { minmax = "minss"; bitOp = "orps" } else { minmax = "maxss"; bitOp = "andps" }
+		if in.Op == vir.OpMin {
+			minmax = "minss"
+			bitOp = "orps"
+		} else {
+			minmax = "maxss"
+			bitOp = "andps"
+		}
 		addOp = "addss"
 	}
 
+	// 1. Check for NaNs. If either is NaN, add them to propagate NaN.
 	s.emit(Inst{Op: ucomi, D: R(RXMM0), S: R(RXMM0)})
 	s.emit(Inst{Op: "jcc", CC: CondP, Lbl: isNan})
 	s.emit(Inst{Op: ucomi, D: R(RXMM1), S: R(RXMM1)})
 	s.emit(Inst{Op: "jcc", CC: CondP, Lbl: isNan})
 
+	// 2. Check if they are equal (catches -0.0 == 0.0)
+	s.emit(Inst{Op: ucomi, D: R(RXMM0), S: R(RXMM1)})
+	s.emit(Inst{Op: "jcc", CC: CondE, Lbl: isEqual})
+
+	// 3. Normal min/max logic
 	s.emit(Inst{Op: minmax, D: R(RXMM0), S: R(RXMM1)})
+	s.emit(Inst{Op: "jmp", Lbl: done})
+
+	// 4. Handle Equal Values (Bitwise merge naturally preserves the sign of -0.0 appropriately)
+	s.emit(Inst{Op: "label", Lbl: isEqual})
 	s.emit(Inst{Op: bitOp, D: R(RXMM0), S: R(RXMM1)})
 	s.emit(Inst{Op: "jmp", Lbl: done})
 
+	// 5. Handle NaN Values
 	s.emit(Inst{Op: "label", Lbl: isNan})
 	s.emit(Inst{Op: addOp, D: R(RXMM0), S: R(RXMM1)})
 
