@@ -1,14 +1,18 @@
 // objectwriter/aarch64/macho.go
 //
 // Bridges object/aarch64 to objectfile/macho (macho.TargetDarwinARM64).
-// Same MOVZ/MOVK gap and Call26/Jump26 approximation as elf.go — see there.
+// Same Call26/Jump26 approximation as elf.go — see there. object/aarch64's
+// RelocKind has no MOVZ/MOVK-style entries (see elf.go), so there is
+// nothing to map here.
+//
 // Unlike x86_64/macho.go, ADRP/ADD-style absolute addressing (the case
 // lower/aarch64 actually uses for globals) is fully supported here via
 // RelocADRPage21/RelocAddOff12 — those two just aren't reachable from
-// object.RelocKind's current set, which only has Call26/Jump26/Movz*/Abs64.
-// If lower/aarch64 starts emitting ADRP+ADD instead of MOVZ/MOVK for
-// absolute addresses, object/aarch64 needs those two RelocKinds added
-// first — this file will pick them up trivially once it does.
+// object.RelocKind's current set, which only has Call26/Jump26/Abs64 (plus
+// the PC-relative branch/adr/lo12 kinds handled elsewhere in object/aarch64).
+// If lower/aarch64 starts emitting ADRP+ADD relocs that need distinct
+// handling here rather than folding into Abs64, object/aarch64 needs those
+// RelocKinds added first — this file will pick them up trivially once it does.
 package aarch64
 
 import (
@@ -99,10 +103,6 @@ func relocKindMachO(k object.RelocKind) (macho.RelocKind, error) {
 		return macho.RelocPCRel26, nil // single BRANCH26 code covers both B and BL
 	case object.RelocAbs64:
 		return macho.RelocAbs64, nil
-	case object.RelocMovzG3, object.RelocMovkG2, object.RelocMovkG1, object.RelocMovkG0:
-		return 0, fmt.Errorf(
-			"macho/arm64 has no MOVZ/MOVK-style relocation kind — use ADRP+ADD in lower/aarch64 " +
-				"and object.RelocADRPage21/AddOff12 instead if code-address loads are needed")
 	}
 	return 0, fmt.Errorf("unmapped reloc kind %v for macho/arm64", k)
 }

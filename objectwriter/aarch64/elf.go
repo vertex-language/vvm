@@ -2,12 +2,12 @@
 //
 // Bridges object/aarch64 to objectfile/elf (elf.ArchARM64).
 //
-// Known gap: object.RelocMovzG3/MovkG2/MovkG1/MovkG0 (the four-instruction
-// MOVZ/MOVK absolute-address sequence) have no target here — elf's
-// RelocKind set has no R_AARCH64_MOVW_UABS_* entries at all, only
-// ADRPage21/AddOff12 (the page+offset form) and Abs64 (data). If
-// lower/aarch64's isel ever emits MOVZ/MOVK for code addresses rather than
-// ADRP+ADD, this fails loudly rather than silently mis-relocating.
+// object/aarch64's RelocKind has no MOVZ/MOVK-style entries at all — per
+// that package's doc, lower/aarch64 only ever reaches a global via the
+// adrp + add :lo12: idiom, never a movz/movk absolute sequence — so there
+// is nothing to map here. elf's RelocKind set mirrors this: it only has
+// RelocPCRel26 and RelocAbs64 (no R_AARCH64_MOVW_UABS_* entries), which is
+// sufficient for everything object/aarch64 can actually produce.
 //
 // Approximation taken knowingly: object.RelocJump26 (B) is mapped onto the
 // same elf.RelocPCRel26 as RelocCall26 (BL), i.e. R_AARCH64_CALL26 in both
@@ -109,10 +109,6 @@ func relocKindELF(k object.RelocKind) (elf.RelocKind, error) {
 		return elf.RelocPCRel26, nil
 	case object.RelocAbs64:
 		return elf.RelocAbs64, nil
-	case object.RelocMovzG3, object.RelocMovkG2, object.RelocMovkG1, object.RelocMovkG0:
-		return 0, fmt.Errorf(
-			"elf/aarch64 has no R_AARCH64_MOVW_UABS_* relocation kind yet; " +
-				"objectfile/elf needs those four added before MOVZ/MOVK sequences can be emitted")
 	}
 	return 0, fmt.Errorf("unmapped reloc kind %v for elf/aarch64", k)
 }

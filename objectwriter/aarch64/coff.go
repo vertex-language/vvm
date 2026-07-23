@@ -1,7 +1,9 @@
 // objectwriter/aarch64/coff.go
 //
 // Bridges object/aarch64 to objectfile/coff (coff.TargetWindowsARM64).
-// Same MOVZ/MOVK gap and Call26/Jump26 approximation as elf.go — see there.
+// Same Call26/Jump26 approximation as elf.go — see there. object/aarch64's
+// RelocKind has no MOVZ/MOVK-style entries (see elf.go), so there is
+// nothing to map here beyond what coff.RelocKind already covers.
 package aarch64
 
 import (
@@ -93,9 +95,6 @@ func relocKindCOFF(k object.RelocKind) (coff.RelocKind, error) {
 		return coff.RelocPCRel26, nil // both are BRANCH26 on Windows/ARM64
 	case object.RelocAbs64:
 		return coff.RelocAbs64, nil
-	case object.RelocMovzG3, object.RelocMovkG2, object.RelocMovkG1, object.RelocMovkG0:
-		return 0, fmt.Errorf(
-			"coff/arm64 has no MOVW/MOVK-style relocation kind yet in objectfile/coff")
 	}
 	return 0, fmt.Errorf("unmapped reloc kind %v for coff/arm64", k)
 }
