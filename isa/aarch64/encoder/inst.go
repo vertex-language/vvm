@@ -111,9 +111,9 @@ func (w Width) isa() isaa64.Width {
 	return isaa64.W64
 }
 
-func (w Width) sf() uint32  { return uint32(w.isa().SF()) }
-func (w Width) bits() int   { return w.isa().Bits() }
-func (w Width) is32() bool  { return w == W }
+func (w Width) sf() uint32 { return uint32(w.isa().SF()) }
+func (w Width) bits() int  { return w.isa().Bits() }
+func (w Width) is32() bool { return w == W }
 
 // Cond is a condition selector. Unlike the A32 encoder, the ISA codes are
 // re-exported raw: a condition is an operand of three instruction families
@@ -193,12 +193,17 @@ const (
 // forms take a scaled unsigned imm12 (or an unscaled signed imm9 via the
 // LDUR/STUR encodings), the indexed forms only the unscaled imm9 — so this
 // is an enum rather than the A32 encoder's Pre/Wback bool pair.
+//
+// Named ModeOffset/ModePre/ModePost (not MemOffset/MemPre/MemPost) because
+// the latter two names belong to the Opr-builder functions below
+// (MemPre(base, disp), MemPost(base, disp)); an enum value and a function
+// can't share an identifier in the same package.
 type MemMode byte
 
 const (
-	MemOffset MemMode = iota // [Xn{, #imm}] or [Xn, Xm{, ext}] — no write-back
-	MemPre                   // [Xn, #imm]! — write back the updated base
-	MemPost                  // [Xn], #imm — write back the updated base
+	ModeOffset MemMode = iota // [Xn{, #imm}] or [Xn, Xm{, ext}] — no write-back
+	ModePre                   // [Xn, #imm]! — write back the updated base
+	ModePost                  // [Xn], #imm — write back the updated base
 )
 
 // Opr is one fully-resolved operand. There is deliberately no "unresolved
@@ -232,8 +237,8 @@ type Opr struct {
 
 	// Memory fields (OMem).
 	Mode   MemMode
-	Base   Reg  // always Xn|SP
-	Index  Reg  // RNone => immediate offset
+	Base   Reg // always Xn|SP
+	Index  Reg // RNone => immediate offset
 	Disp   int64
 	Scaled bool // register index: apply the access-size shift (the S bit)
 }
@@ -271,18 +276,18 @@ func SymAddr(s string) Opr { return Opr{Kind: OImm, Sym: s} }
 
 // Mem is [base{, #disp}] with no write-back.
 func Mem(base Reg, disp int64) Opr {
-	return Opr{Kind: OMem, Base: base, Index: RNone, Disp: disp, Mode: MemOffset}
+	return Opr{Kind: OMem, Base: base, Index: RNone, Disp: disp, Mode: ModeOffset}
 }
 
 // MemPre is [base, #disp]! — the base is updated before the access.
 func MemPre(base Reg, disp int64) Opr {
-	return Opr{Kind: OMem, Base: base, Index: RNone, Disp: disp, Mode: MemPre}
+	return Opr{Kind: OMem, Base: base, Index: RNone, Disp: disp, Mode: ModePre}
 }
 
 // MemPost is [base], #disp — the access uses the old base, which is then
 // updated.
 func MemPost(base Reg, disp int64) Opr {
-	return Opr{Kind: OMem, Base: base, Index: RNone, Disp: disp, Mode: MemPost}
+	return Opr{Kind: OMem, Base: base, Index: RNone, Disp: disp, Mode: ModePost}
 }
 
 // MemIdx is [base, index, <ext> {#amt}]. scaled selects the S bit, which
@@ -290,14 +295,14 @@ func MemPost(base Reg, disp int64) Opr {
 // the register-offset form can express. ext must be UXTW, UXTX, SXTW or
 // SXTX; the sub-word extends are UNDEFINED as an index.
 func MemIdx(base, index Reg, ext byte, scaled bool) Opr {
-	return Opr{Kind: OMem, Base: base, Index: index, Ext: ext, Scaled: scaled, Mode: MemOffset}
+	return Opr{Kind: OMem, Base: base, Index: index, Ext: ext, Scaled: scaled, Mode: ModeOffset}
 }
 
 // MemSym is [base, #:lo12:sym] — the low-12 half of an adrp/add or
 // adrp/ldr pair. The encoder emits the access-size-appropriate
 // LDST*_ABS_LO12_NC fixup and leaves the imm12 field zero.
 func MemSym(base Reg, sym string) Opr {
-	return Opr{Kind: OMem, Base: base, Index: RNone, Sym: sym, Mode: MemOffset}
+	return Opr{Kind: OMem, Base: base, Index: RNone, Sym: sym, Mode: ModeOffset}
 }
 
 // Inst is one pre-encoding pseudo instruction. encode.go's Encode switch is
