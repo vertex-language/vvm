@@ -93,7 +93,7 @@ type Reloc struct {
 
 func relocKind(k encoder.FixupKind) RelocKind {
 	switch k {
-	case encoder.FixupPCRel32Call:
+	case encoder.FixupPLT32:
 		return RelocPLT32
 	case encoder.FixupPCRel32:
 		return RelocPCRel32
