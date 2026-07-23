@@ -2,6 +2,7 @@
 package encoder
 
 import (
+	"fmt"
 
 	isaarm "github.com/vertex-language/vvm/isa/arm"
 )
