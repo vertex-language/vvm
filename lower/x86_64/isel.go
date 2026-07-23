@@ -814,11 +814,11 @@ func (s *sel) selIndex(in *vir.Instruction) error {
 
 func (s *sel) selAlloca(in *vir.Instruction) error {
 	if _, ok := in.Suffix.(vir.ValistType); ok {
-		// A valist slot is a fixed 24-byte local; its address is its slot.
-		if slot, ok := s.fr.SlotOf(in.Result); ok {
-			s.emit(Inst{Op: "lea", D: R(RRAX), S: Slot(slot)})
-			s.storeReg(RRAX, in.Result)
-		}
+		// Dynamically allocate 32 bytes (maintaining 16-byte alignment)
+		// for the 24-byte valist structure on the stack.
+		s.emit(Inst{Op: "sub", D: R(RRSP), S: Imm(32), Sz: 8})
+		s.emit(Inst{Op: "mov", D: R(RRAX), S: R(RRSP), Sz: 8})
+		s.storeReg(RRAX, in.Result)
 		return nil
 	}
 	// alloca.ptr size: dynamic stack bump. sub rsp, roundUp16(size); result

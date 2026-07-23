@@ -711,6 +711,9 @@ func (e *enc) one(in *Inst) error {
 
 	case "ret":
 		e.u8(0xC3)
+		
+	case "syscall":
+		e.u8(0x0F, 0x05)
 
 	case "ud2":
 		e.u8(0x0F, 0x0B)
