@@ -14,8 +14,8 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("i8_literal", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				v := fb.Emit("v", "mov", vir.I8, vir.IntLiteral(100))
-				return fb.Emit("vz", "zext", vir.I32, v)
+				v := identity(fb, "v", vir.I8, vir.IntLiteral(100))
+				return fb.Emit("vz", vir.OpZext, vir.I32, v)
 			})
 		},
 		wantValue: val(100),
@@ -28,7 +28,7 @@ func init() {
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("i8_wrap", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				v := fb.Add("v", vir.I8, vir.IntLiteral(250), vir.IntLiteral(10)) // 260 mod 256 = 4
-				return fb.Emit("vz", "zext", vir.I32, v)
+				return fb.Emit("vz", vir.OpZext, vir.I32, v)
 			})
 		},
 		wantValue: val(4),
@@ -41,8 +41,8 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("i16_literal", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				v := fb.Emit("v", "mov", vir.I16, vir.IntLiteral(30000))
-				return fb.Emit("vz", "zext", vir.I32, v)
+				v := identity(fb, "v", vir.I16, vir.IntLiteral(30000))
+				return fb.Emit("vz", vir.OpZext, vir.I32, v)
 			})
 		},
 		wantValue: val(30000),
@@ -55,7 +55,7 @@ func init() {
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("i16_wrap", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				v := fb.Add("v", vir.I16, vir.IntLiteral(65530), vir.IntLiteral(10)) // 65540 mod 65536 = 4
-				return fb.Emit("vz", "zext", vir.I32, v)
+				return fb.Emit("vz", vir.OpZext, vir.I32, v)
 			})
 		},
 		wantValue: val(4),
@@ -68,7 +68,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("i32_literal", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				return fb.Emit("v", "mov", vir.I32, vir.IntLiteral(-12345))
+				return identity(fb, "v", vir.I32, vir.IntLiteral(-12345))
 			})
 		},
 		wantValue: val(-12345),
@@ -129,7 +129,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i64PrintingModule("i64_literal", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				return fb.Emit("v", "mov", vir.I64, vir.IntLiteral(9000000000)) // exceeds i32 range
+				return identity(fb, "v", vir.I64, vir.IntLiteral(9000000000)) // exceeds i32 range
 			})
 		},
 		wantValue: val(9000000000),

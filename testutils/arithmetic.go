@@ -17,7 +17,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_udiv", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				return fb.Emit("v", "udiv", vir.I32, vir.IntLiteral(100), vir.IntLiteral(7))
+				return fb.Emit("v", vir.OpUDiv, vir.I32, vir.IntLiteral(100), vir.IntLiteral(7))
 			})
 		},
 		wantValue: val(14),
@@ -29,7 +29,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_sdiv_negative", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				return fb.Emit("v", "sdiv", vir.I32, vir.IntLiteral(-100), vir.IntLiteral(7))
+				return fb.Emit("v", vir.OpSDiv, vir.I32, vir.IntLiteral(-100), vir.IntLiteral(7))
 			})
 		},
 		wantValue: val(-14),
@@ -41,7 +41,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_urem", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				return fb.Emit("v", "urem", vir.I32, vir.IntLiteral(100), vir.IntLiteral(7))
+				return fb.Emit("v", vir.OpURem, vir.I32, vir.IntLiteral(100), vir.IntLiteral(7))
 			})
 		},
 		wantValue: val(2),
@@ -53,7 +53,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_srem_negative", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				return fb.Emit("v", "srem", vir.I32, vir.IntLiteral(-100), vir.IntLiteral(7))
+				return fb.Emit("v", vir.OpSRem, vir.I32, vir.IntLiteral(-100), vir.IntLiteral(7))
 			})
 		},
 		wantValue: val(-2),
@@ -65,7 +65,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_neg", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				return fb.Emit("v", "neg", vir.I32, vir.IntLiteral(5))
+				return fb.Emit("v", vir.OpNeg, vir.I32, vir.IntLiteral(5))
 			})
 		},
 		wantValue: val(-5),
@@ -77,7 +77,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_abs", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				return fb.Emit("v", "abs", vir.I32, vir.IntLiteral(-5))
+				return fb.Emit("v", vir.OpAbs, vir.I32, vir.IntLiteral(-5))
 			})
 		},
 		wantValue: val(5),
@@ -91,7 +91,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_abs_int_min", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				return fb.Emit("v", "abs", vir.I32, vir.IntLiteral(-2147483648))
+				return fb.Emit("v", vir.OpAbs, vir.I32, vir.IntLiteral(-2147483648))
 			})
 		},
 		wantValue: val(-2147483648),
@@ -107,8 +107,8 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_saddo_true", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				of := fb.Emit("of", "saddo", vir.I32, vir.IntLiteral(2147483647), vir.IntLiteral(1))
-				return fb.Emit("v", "select", vir.I32, of, vir.IntLiteral(1), vir.IntLiteral(0))
+				of := fb.Emit("of", vir.OpSAddO, vir.I32, vir.IntLiteral(2147483647), vir.IntLiteral(1))
+				return fb.Emit("v", vir.OpSelect, vir.I32, of, vir.IntLiteral(1), vir.IntLiteral(0))
 			})
 		},
 		wantValue: val(1),
@@ -120,8 +120,8 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_saddo_false", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				of := fb.Emit("of", "saddo", vir.I32, vir.IntLiteral(1), vir.IntLiteral(1))
-				return fb.Emit("v", "select", vir.I32, of, vir.IntLiteral(1), vir.IntLiteral(0))
+				of := fb.Emit("of", vir.OpSAddO, vir.I32, vir.IntLiteral(1), vir.IntLiteral(1))
+				return fb.Emit("v", vir.OpSelect, vir.I32, of, vir.IntLiteral(1), vir.IntLiteral(0))
 			})
 		},
 		wantValue: val(0),
@@ -133,8 +133,8 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_uaddo_true", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				of := fb.Emit("of", "uaddo", vir.I32, vir.IntLiteral(-1), vir.IntLiteral(1)) // 0xFFFFFFFF + 1
-				return fb.Emit("v", "select", vir.I32, of, vir.IntLiteral(1), vir.IntLiteral(0))
+				of := fb.Emit("of", vir.OpUAddO, vir.I32, vir.IntLiteral(-1), vir.IntLiteral(1)) // 0xFFFFFFFF + 1
+				return fb.Emit("v", vir.OpSelect, vir.I32, of, vir.IntLiteral(1), vir.IntLiteral(0))
 			})
 		},
 		wantValue: val(1),
@@ -146,8 +146,8 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_usubo_true", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				of := fb.Emit("of", "usubo", vir.I32, vir.IntLiteral(0), vir.IntLiteral(1))
-				return fb.Emit("v", "select", vir.I32, of, vir.IntLiteral(1), vir.IntLiteral(0))
+				of := fb.Emit("of", vir.OpUSubO, vir.I32, vir.IntLiteral(0), vir.IntLiteral(1))
+				return fb.Emit("v", vir.OpSelect, vir.I32, of, vir.IntLiteral(1), vir.IntLiteral(0))
 			})
 		},
 		wantValue: val(1),
@@ -159,8 +159,8 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_smulo_true", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				of := fb.Emit("of", "smulo", vir.I32, vir.IntLiteral(2147483647), vir.IntLiteral(2))
-				return fb.Emit("v", "select", vir.I32, of, vir.IntLiteral(1), vir.IntLiteral(0))
+				of := fb.Emit("of", vir.OpSMulO, vir.I32, vir.IntLiteral(2147483647), vir.IntLiteral(2))
+				return fb.Emit("v", vir.OpSelect, vir.I32, of, vir.IntLiteral(1), vir.IntLiteral(0))
 			})
 		},
 		wantValue: val(1),
@@ -175,7 +175,7 @@ func init() {
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_umulh", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				// 0xFFFFFFFF (unsigned) * 2 = 0x1FFFFFFFE; high 32 bits = 1.
-				return fb.Emit("v", "umulh", vir.I32, vir.IntLiteral(-1), vir.IntLiteral(2))
+				return fb.Emit("v", vir.OpUMulH, vir.I32, vir.IntLiteral(-1), vir.IntLiteral(2))
 			})
 		},
 		wantValue: val(1),
@@ -188,7 +188,7 @@ func init() {
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_smulh", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				// 0x40000000 * 4 = 0x100000000; high 32 bits = 1.
-				return fb.Emit("v", "smulh", vir.I32, vir.IntLiteral(1073741824), vir.IntLiteral(4))
+				return fb.Emit("v", vir.OpSMulH, vir.I32, vir.IntLiteral(1073741824), vir.IntLiteral(4))
 			})
 		},
 		wantValue: val(1),
@@ -203,7 +203,7 @@ func init() {
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_uadd_sat", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				// UINT32_MAX + 10 saturates at UINT32_MAX (prints as -1).
-				return fb.Emit("v", "uadd_sat", vir.I32, vir.IntLiteral(-1), vir.IntLiteral(10))
+				return fb.Emit("v", vir.OpUAddSat, vir.I32, vir.IntLiteral(-1), vir.IntLiteral(10))
 			})
 		},
 		wantValue: val(-1),
@@ -215,7 +215,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_sadd_sat", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				return fb.Emit("v", "sadd_sat", vir.I32, vir.IntLiteral(2147483647), vir.IntLiteral(1))
+				return fb.Emit("v", vir.OpSAddSat, vir.I32, vir.IntLiteral(2147483647), vir.IntLiteral(1))
 			})
 		},
 		wantValue: val(2147483647),
@@ -227,7 +227,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_usub_sat", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				return fb.Emit("v", "usub_sat", vir.I32, vir.IntLiteral(5), vir.IntLiteral(10))
+				return fb.Emit("v", vir.OpUSubSat, vir.I32, vir.IntLiteral(5), vir.IntLiteral(10))
 			})
 		},
 		wantValue: val(0),
@@ -239,7 +239,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("arith_ssub_sat", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				return fb.Emit("v", "ssub_sat", vir.I32, vir.IntLiteral(-2147483648), vir.IntLiteral(1))
+				return fb.Emit("v", vir.OpSSubSat, vir.I32, vir.IntLiteral(-2147483648), vir.IntLiteral(1))
 			})
 		},
 		wantValue: val(-2147483648),

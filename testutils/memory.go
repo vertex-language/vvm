@@ -89,7 +89,7 @@ func init() {
 				src := fb.Alloca("src", vir.IntLiteral(4), 0)
 				dst := fb.Alloca("dst", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, src, vir.IntLiteral(999))
-				fb.Emit("", "memcopy", nil, dst, src, vir.IntLiteral(4))
+				fb.Emit("", vir.OpMemcopy, nil, dst, src, vir.IntLiteral(4))
 				return fb.Load("v", vir.I32, dst)
 			})
 		},
@@ -103,7 +103,7 @@ func init() {
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("memory_memset", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				dst := fb.Alloca("dst", vir.IntLiteral(4), 0)
-				fb.Emit("", "memset", nil, dst, vir.IntLiteral(7), vir.IntLiteral(4))
+				fb.Emit("", vir.OpMemset, nil, dst, vir.IntLiteral(7), vir.IntLiteral(4))
 				return fb.Load("v", vir.I32, dst) // 0x07070707
 			})
 		},

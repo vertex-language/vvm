@@ -1,107 +1,131 @@
-# testutils
+# vvm/testutils
 
-An in-memory, no-`.vir`-files, no-`go test` correctness suite for `ir/vir`
-and the rest of the `vvm` pipeline. Every case builds a `*vir.Module`
-directly via the `vir.FunctionBuilder` API (`ir/vir/builder.go`), runs it
-through `vvm.RunModule`, and checks **one thing**: a single printed
-integer, a single printed float, or an exit code. Nothing else about
-stdout is checked — no string/format matching, no golden files.
+A conformance test suite that builds `vir.Module` values in memory, runs
+them through `vvm.RunModule`, and checks the observed result (printed
+stdout value or process exit code) against an expected value. It exists to
+pin down observable behavior for every opcode and structural feature
+described in `ir.md`, one fact at a time.
+
+This is a standalone `package main` — a small test runner, not a `go test`
+suite — so it can be invoked directly:
 
 ```sh
+cd testutils
 go run .
 ```
 
-## Layout
+It prints one `PASS`/`FAIL`/`SKIP` line per case and a final summary, and
+exits non-zero if anything failed.
 
-Grouped by IR concept, not by type width — `i8`/`i16`/`i32`/`i64` all live
-together, control flow constructs live together, and so on.
+## How it works
 
-```
-testutils/
-├── main.go            — testCase type, registry, host autodetect, run()
-├── helpers.go          — printerModule(s), i32/i64/f32/f64 printing helpers
-├── floatconsts.go       — shared NaN / negative-zero float64 constants
-├── integers.go          — i8/i16/i32/i64 literal, arith, wraparound
-├── arithmetic.go        — div/rem, neg/abs, overflow predicates,
-│                          widening multiply, saturating add/sub
-├── bitwise.go            — and/or/xor/not, shifts + count masking,
-│                          rotl/rotr, ctlz/cttz/popcnt
-├── comparisons.go        — signed vs. unsigned int comparisons, ptr cmp
-├── conversions.go        — trunc/sext/zext, ptr<->usize-int bitcast
-├── floats.go             — f32/f64 arith, min/max (NaN, signed zero),
-│                          float comparisons, fpromote/fdemote,
-│                          int<->float conversions
-├── control_flow.go       — br, br_if, switch, select, loop-carried values
-├── memory.go             — alloca, index.ptr, field.ptr, memcopy/memset
-├── globals_consts.go     — const-as-operand, global store/load roundtrip
-├── calls.go              — recursion, tailcall (direct + indirect),
-│                          byval/sret
-├── process_exit.go       — plain exit-code cases, no libc involved
-└── asm_exit.go           — inline asm raw-syscall exit (unchanged)
+Every case is a `testCase` (see `main.go`):
+
+```go
+type testCase struct {
+    name       string
+    hostArches []string // vir-canonical arch names this case can run on; nil = any
+    hostOSes   []string // vir-canonical os names this case can run on; nil = any
+    build      func(arch, osName string) *vir.Module
+
+    wantValue      *int64   // checked against parsed integer stdout when non-nil
+    wantFloatValue *float64 // checked against parsed float stdout when non-nil
+    wantExit       int
+}
 ```
 
-## One fact per test
+`register(testCase{...})` appends a case to the global `registry`. Each
+file's own `init()` registers its own cases — there's no separate manual
+wiring step. `run()` (called from `main()`) walks the registry, skips
+cases whose `hostArches`/`hostOSes` don't match the current host, builds
+and runs the rest via `vvm.RunModule`, and checks the result:
 
-Each `testCase` checks exactly one opcode/behavior. Nothing loops or
-branches inside a `build` func unless the fact under test is control flow
-itself (`control_flow.go`) — an arithmetic or conversion test shouldn't
-need a `for`/`BranchIf`/`Switch` to express what it's checking.
+- If `wantValue` is set, stdout is parsed as a plain base-10 integer and
+  compared exactly.
+- If `wantFloatValue` is set, stdout is parsed as a float and compared via
+  `floatMatches` — exact for `NaN` and signed zero (so IEEE-754 sign-bit
+  and NaN-propagation behavior can't silently pass), epsilon-tolerant
+  (`1e-6` relative) otherwise, since `printf("%f")` only carries six
+  decimal digits.
+- Otherwise, only `wantExit` (default `0`) is checked against the
+  process's exit code.
 
-## `wantValue` vs `wantFloatValue` vs `wantExit`
+All currently-registered cases are gated to `hostArches: ["x86_64"]`,
+`hostOSes: ["linux"]`, since that's the only combination with a
+registered entry-thunk today (see `entrythunk.go` / `asm_exit.go`,
+referenced from `helpers.go`).
 
-- Set `wantValue` for a case that prints one integer via
-  `i32PrintingModule`/`i64PrintingModule` and returns exit 0.
-- Set `wantFloatValue` for a case that prints one float via
-  `f32PrintingModule`/`f64PrintingModule`. Comparison is epsilon-based
-  except: `math.NaN()` as the want value asserts the result is NaN, and
-  `0.0` as the want value additionally checks the sign bit (so
-  `min(-0.0, +0.0) == -0.0` is actually distinguished from `+0.0`, not
-  just numerically equal to it).
-- Set only `wantExit` for a case where the exit code itself is the thing
-  under test (`process_exit.go`, `calls.go`'s tailcall cases,
-  `asm_exit.go`) — no libc, no printf.
+## File layout
 
-## Why every extern group names `"c"` explicitly
+Cases are grouped by the IR area they exercise, matching `ir.md`'s own
+section structure rather than being one flat list:
 
-`ir.md` §1.2 rule 9 / §9.9 and `verify.go` are explicit: **there is no
-anonymous/default-namespace extern group.** `DeclareExternGroup("")` fails
-`Verify` outright. Every module here that calls `printf` therefore
-declares `link shared "c"` and a matching `extern "c" : ... end` group —
-same pattern a real `.vir` file would use, and the only thing
-`resolveEntryPoint`'s libc-aware `_start` synthesis (`entrythunk.go`)
-actually looks for when deciding whether to call libc's `exit()`
-(flushing stdio) instead of a raw `SYS_exit`.
+| File | Covers |
+|---|---|
+| `main.go` | `testCase`, `register`, the runner, and `floatMatches` |
+| `helpers.go` | Shared module-building helpers (see below) |
+| `integers.go` | i8/i16/i32/i64 literals, arithmetic, modular wraparound |
+| `arithmetic.go` | div/rem, neg/abs, overflow predicates, widening multiply, saturating add/sub |
+| `bitwise.go` | and/or/xor/not, shifts (incl. count masking), rotates, ctlz/cttz/popcnt |
+| `comparisons.go` | Signed vs. unsigned integer comparisons, pointer comparisons |
+| `control_flow.go` | br/br_if/switch/select, loop-carried values |
+| `conversions.go` | trunc/sext/zext, ptr↔int bitcast round-trip |
+| `floats.go` | f32/f64 literals & arithmetic, min/max IEEE-754 semantics, float comparisons, fpromote/fdemote, int↔float conversions |
+| `floatconsts.go` | Shared NaN / negative-zero constants used by `floats.go` |
+| `calls.go` | Recursion, direct/indirect tailcalls, byval/sret ABI attributes |
+| `globals_consts.go` | `const` and `global` declarations |
+| `memory.go` | alloca, index.ptr, field.ptr, memcopy/memset |
+| `process_exit.go` | Plain exit-code cases with no libc linked |
 
-## i64 printing uses `%lld`, f32 printing promotes to `%f`
+### `helpers.go`
 
-`%d` reads a variadic argument as a 32-bit `int` — for an `i64` value this
-silently truncates instead of erroring, so `i64PrintingModule` uses
-`"%lld"`. Similarly, a variadic `f32` argument is illegal at the C
-boundary without manual promotion to `f64` (ir.md §4 "Variadic Calls");
-`f32PrintingModule` inserts that `fpromote` itself so individual `f32`
-test cases don't each have to remember it.
+Most cases don't hand-build a full module. Instead they use one of:
 
-## Host gating
+- `i32PrintingModule` / `i64PrintingModule` / `f64PrintingModule` /
+  `f32PrintingModule` — each builds the smallest module capable of
+  computing one value via a `build` func and printing it with the
+  matching `printf` format specifier, declaring the `libc` link and
+  `extern "c"` group required to call it.
+- `identity(fb, name, t, v)` — materializes a literal (or any operand) as
+  a named value, using `add x, 0` since the opcode vocabulary has no bare
+  identity/mov op.
+- `abiFor(osName)` — picks the canonical ABI matching a target OS.
 
-Every case here currently sets `hostArches: []string{"x86_64"}`,
-`hostOSes: []string{"linux"}`, because that's the only `(arch, os)` pair
-with a registered entry thunk right now (`entrythunk.go`). Cases outside
-that combination report `SKIP`, not a silent no-op. This restriction goes
-away case by case as more entry thunks land.
+Cases that need more than one function (`calls.go`), a real struct
+(`memory.go`, `calls.go`), or a `const`/`global` declaration
+(`globals_consts.go`) build their `*vir.Module` by hand instead, since
+`printerModule` only ever declares a single function (`main`).
 
-## Not yet covered
+## Conventions for adding a case
 
-- **`trap` / `unreachable` as an expected outcome.** Both are legitimate,
-  spec-defined terminators, but this package has no confirmed convention
-  for what `vvm.RunModule` reports in `res.ExitCode` when the process
-  dies that way. Add these once that convention is pinned down against a
-  real run, rather than guessing an exit code.
-- **Vectors, atomics, and the asm dialects beyond `asm_exit.go`'s single
-  raw-exit case.** Removed in a previous rewrite to get back to a
-  known-correct, finer-grained baseline; re-add following the same
-  one-fact-per-file shape as this baseline, not by reviving old files
-  as-is.
-- **Mutual recursion via the global-slot pattern** (ir.md §1.2 rule 3).
-- **Bulk memory's `memmove`** specifically (overlap-safe variant) —
-  `memory.go` only exercises `memcopy`/`memset` so far, both
-  non-overlapping.
+- **One fact per case.** A case should check exactly one printed value or
+  exit code — never a combination of several opcodes' worth of behavior.
+  If a case's `build` func needs a loop or a branch to express what it's
+  testing, it likely belongs in `control_flow.go` instead of wherever you
+  were about to put it.
+- **Put it in the file matching its `ir.md` section**, not the file that
+  happens to have a convenient helper already.
+- **Prefer the smallest helper that fits** (`i32PrintingModule`, etc.)
+  unless the case genuinely needs multiple functions, a struct, or
+  global/const state.
+- **Use `identity`** rather than reaching for a raw literal operand when
+  you need a literal to have a name (e.g. so it can be referenced from a
+  later label/branch).
+- **Comment the "why," not the "what."** Existing files lean on short
+  header comments explaining what's deliberately in/out of scope for that
+  file, and inline comments only where the expected value isn't obvious
+  from the literals alone (e.g. bit patterns, wraparound arithmetic).
+
+## Known gaps (intentionally not covered yet)
+
+- **Trapping inputs** (div-by-zero, `INT_MIN / -1`, out-of-range
+  `stoint`) are deliberately excluded from `arithmetic.go` and
+  `floats.go` — there's no confirmed convention yet for what
+  `vvm.RunModule` reports for a trapped process.
+- **`trap` / `unreachable` as an expected outcome** are deliberately
+  excluded from `process_exit.go` for the same reason: signal-based exit
+  codes are a convention, not something derivable from this package
+  alone.
+
+Both should get dedicated cases once `vvm.RunModule`'s trap-reporting
+behavior is pinned down — don't guess an exit code in the meantime.

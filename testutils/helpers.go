@@ -19,6 +19,19 @@ func abiFor(osName string) string {
 	}
 }
 
+// identity materializes a literal (or any operand) as a named value of
+// type t. §4's opcode vocabulary is closed and has no bare "mov"/identity
+// op, so this uses the same idiom real .vir code would: add the value to
+// a same-typed zero, which is the identity element for both integer and
+// float add (OpAdd is ConstraintIntOrFloat, so it accepts either).
+func identity(fb *vir.FunctionBuilder, name string, t vir.Type, v vir.Operand) vir.Operand {
+	zero := vir.Operand(vir.IntLiteral(0))
+	if vir.IsFloat(t) {
+		zero = vir.FloatLiteral(0)
+	}
+	return fb.Emit(name, vir.OpAdd, t, v, zero)
+}
+
 // printerModuleWith builds the smallest module capable of computing one
 // value via body, optionally converting it via conv (e.g. an f32->f64
 // fpromote for variadic promotion), and printing it with format. It
@@ -83,6 +96,6 @@ func f64PrintingModule(name, arch, osName string, body func(fb *vir.FunctionBuil
 // remember it.
 func f32PrintingModule(name, arch, osName string, body func(fb *vir.FunctionBuilder) vir.Operand) *vir.Module {
 	return printerModuleWith(name, arch, osName, "%f", body, func(fb *vir.FunctionBuilder, v vir.Operand) vir.Operand {
-		return fb.Emit("vpromoted", "fpromote", vir.F64, v)
+		return fb.Emit("vpromoted", vir.OpFpromote, vir.F64, v)
 	})
 }

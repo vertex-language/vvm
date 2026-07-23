@@ -31,7 +31,7 @@ func init() {
 			ext.DeclareFunction("printf", []vir.Param{{Name: "f", Type: vir.Ptr}}, vir.I32).SetVariadic()
 
 			fact := m.DeclareFunction("factorial", []vir.Param{{Name: "n", Type: vir.I32}}, vir.I32, false)
-			cond := fact.Emit("cond", "sle", vir.I32, vir.Ident("n"), vir.IntLiteral(1))
+			cond := fact.Emit("cond", vir.OpSle, vir.I32, vir.Ident("n"), vir.IntLiteral(1))
 			fact.BranchIf(cond, "base", "rec")
 
 			fact.Label("base")

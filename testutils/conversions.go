@@ -17,9 +17,9 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("convert_trunc", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				v := fb.Emit("v", "mov", vir.I32, vir.IntLiteral(300))
-				t := fb.Emit("t", "trunc", vir.I8, v) // 300 mod 256 = 44
-				return fb.Emit("z", "zext", vir.I32, t)
+				v := identity(fb, "v", vir.I32, vir.IntLiteral(300))
+				t := fb.Emit("t", vir.OpTrunc, vir.I8, v) // 300 mod 256 = 44
+				return fb.Emit("z", vir.OpZext, vir.I32, t)
 			})
 		},
 		wantValue: val(44),
@@ -32,8 +32,8 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("convert_sext", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				v := fb.Emit("v", "mov", vir.I8, vir.IntLiteral(-5))
-				return fb.Emit("s", "sext", vir.I32, v)
+				v := identity(fb, "v", vir.I8, vir.IntLiteral(-5))
+				return fb.Emit("s", vir.OpSext, vir.I32, v)
 			})
 		},
 		wantValue: val(-5),
@@ -45,8 +45,8 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("convert_zext", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				v := fb.Emit("v", "mov", vir.I8, vir.IntLiteral(-5)) // same bits as convert_sext
-				return fb.Emit("z", "zext", vir.I32, v)
+				v := identity(fb, "v", vir.I8, vir.IntLiteral(-5)) // same bits as convert_sext
+				return fb.Emit("z", vir.OpZext, vir.I32, v)
 			})
 		},
 		wantValue: val(251),
@@ -59,8 +59,8 @@ func init() {
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("convert_ptr_bitcast", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				p := fb.Alloca("p", vir.IntLiteral(4), 0)
-				asInt := fb.Emit("as_int", "bitcast", vir.I64, p) // x86_64 usize = 64 bits
-				asPtr := fb.Emit("as_ptr", "bitcast", vir.Ptr, asInt)
+				asInt := fb.Emit("as_int", vir.OpBitcast, vir.I64, p) // x86_64 usize = 64 bits
+				asPtr := fb.Emit("as_ptr", vir.OpBitcast, vir.Ptr, asInt)
 				fb.Store(vir.I32, asPtr, vir.IntLiteral(77))
 				return fb.Load("v", vir.I32, p)
 			})

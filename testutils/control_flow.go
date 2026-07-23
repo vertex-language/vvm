@@ -16,7 +16,7 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("br_unconditional", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				v := fb.Emit("v", "mov", vir.I32, vir.IntLiteral(7))
+				v := identity(fb, "v", vir.I32, vir.IntLiteral(7))
 				fb.Branch("cont")
 				fb.Label("cont")
 				return v
@@ -34,11 +34,11 @@ func init() {
 				fb.BranchIf(vir.BoolLiteral(true), "then", "else")
 
 				fb.Label("then")
-				fb.Emit("v", "mov", vir.I32, vir.IntLiteral(111))
+				identity(fb, "v", vir.I32, vir.IntLiteral(111))
 				fb.Branch("join")
 
 				fb.Label("else")
-				fb.Emit("v", "mov", vir.I32, vir.IntLiteral(222))
+				identity(fb, "v", vir.I32, vir.IntLiteral(222))
 				fb.Branch("join")
 
 				fb.Label("join")
@@ -57,11 +57,11 @@ func init() {
 				fb.BranchIf(vir.BoolLiteral(false), "then", "else")
 
 				fb.Label("then")
-				fb.Emit("v", "mov", vir.I32, vir.IntLiteral(111))
+				identity(fb, "v", vir.I32, vir.IntLiteral(111))
 				fb.Branch("join")
 
 				fb.Label("else")
-				fb.Emit("v", "mov", vir.I32, vir.IntLiteral(222))
+				identity(fb, "v", vir.I32, vir.IntLiteral(222))
 				fb.Branch("join")
 
 				fb.Label("join")
@@ -77,22 +77,22 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("switch_match", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				x := fb.Emit("x", "mov", vir.I32, vir.IntLiteral(2))
+				x := identity(fb, "x", vir.I32, vir.IntLiteral(2))
 				fb.Switch(x, "default",
 					vir.SwitchCase{Value: 1, Label: "case1"},
 					vir.SwitchCase{Value: 2, Label: "case2"},
 				)
 
 				fb.Label("default")
-				fb.Emit("v", "mov", vir.I32, vir.IntLiteral(0))
+				identity(fb, "v", vir.I32, vir.IntLiteral(0))
 				fb.Branch("join")
 
 				fb.Label("case1")
-				fb.Emit("v", "mov", vir.I32, vir.IntLiteral(100))
+				identity(fb, "v", vir.I32, vir.IntLiteral(100))
 				fb.Branch("join")
 
 				fb.Label("case2")
-				fb.Emit("v", "mov", vir.I32, vir.IntLiteral(200))
+				identity(fb, "v", vir.I32, vir.IntLiteral(200))
 				fb.Branch("join")
 
 				fb.Label("join")
@@ -108,22 +108,22 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("switch_default", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				x := fb.Emit("x", "mov", vir.I32, vir.IntLiteral(99))
+				x := identity(fb, "x", vir.I32, vir.IntLiteral(99))
 				fb.Switch(x, "default",
 					vir.SwitchCase{Value: 1, Label: "case1"},
 					vir.SwitchCase{Value: 2, Label: "case2"},
 				)
 
 				fb.Label("default")
-				fb.Emit("v", "mov", vir.I32, vir.IntLiteral(0))
+				identity(fb, "v", vir.I32, vir.IntLiteral(0))
 				fb.Branch("join")
 
 				fb.Label("case1")
-				fb.Emit("v", "mov", vir.I32, vir.IntLiteral(100))
+				identity(fb, "v", vir.I32, vir.IntLiteral(100))
 				fb.Branch("join")
 
 				fb.Label("case2")
-				fb.Emit("v", "mov", vir.I32, vir.IntLiteral(200))
+				identity(fb, "v", vir.I32, vir.IntLiteral(200))
 				fb.Branch("join")
 
 				fb.Label("join")
@@ -139,8 +139,8 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("select_true", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				cond := fb.Emit("cond", "slt", vir.I32, vir.IntLiteral(3), vir.IntLiteral(5))
-				return fb.Emit("v", "select", vir.I32, cond, vir.IntLiteral(10), vir.IntLiteral(20))
+				cond := fb.Emit("cond", vir.OpSlt, vir.I32, vir.IntLiteral(3), vir.IntLiteral(5))
+				return fb.Emit("v", vir.OpSelect, vir.I32, cond, vir.IntLiteral(10), vir.IntLiteral(20))
 			})
 		},
 		wantValue: val(10),
@@ -152,8 +152,8 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("select_false", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				cond := fb.Emit("cond", "sgt", vir.I32, vir.IntLiteral(3), vir.IntLiteral(5))
-				return fb.Emit("v", "select", vir.I32, cond, vir.IntLiteral(10), vir.IntLiteral(20))
+				cond := fb.Emit("cond", vir.OpSgt, vir.I32, vir.IntLiteral(3), vir.IntLiteral(5))
+				return fb.Emit("v", vir.OpSelect, vir.I32, cond, vir.IntLiteral(10), vir.IntLiteral(20))
 			})
 		},
 		wantValue: val(20),
@@ -165,12 +165,12 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("loop_sum", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				fb.Emit("i", "mov", vir.I32, vir.IntLiteral(1))
-				fb.Emit("sum", "mov", vir.I32, vir.IntLiteral(0))
+				identity(fb, "i", vir.I32, vir.IntLiteral(1))
+				identity(fb, "sum", vir.I32, vir.IntLiteral(0))
 				fb.Branch("loop")
 
 				fb.Label("loop")
-				cond := fb.Emit("cond", "sle", vir.I32, vir.Ident("i"), vir.IntLiteral(5))
+				cond := fb.Emit("cond", vir.OpSle, vir.I32, vir.Ident("i"), vir.IntLiteral(5))
 				fb.BranchIf(cond, "body", "done")
 
 				fb.Label("body")

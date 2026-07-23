@@ -17,8 +17,8 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("cmp_slt_signed", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				cond := fb.Emit("cond", "slt", vir.I32, vir.IntLiteral(-1), vir.IntLiteral(1)) // -1 < 1
-				return fb.Emit("v", "select", vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
+				cond := fb.Emit("cond", vir.OpSlt, vir.I32, vir.IntLiteral(-1), vir.IntLiteral(1)) // -1 < 1
+				return fb.Emit("v", vir.OpSelect, vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
 			})
 		},
 		wantValue: val(1),
@@ -32,8 +32,8 @@ func init() {
 			return i32PrintingModule("cmp_ult_unsigned", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				// Same bit pattern (-1 == 0xFFFFFFFF), opposite comparison
 				// result once read as unsigned: 0xFFFFFFFF is not < 1.
-				cond := fb.Emit("cond", "ult", vir.I32, vir.IntLiteral(-1), vir.IntLiteral(1))
-				return fb.Emit("v", "select", vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
+				cond := fb.Emit("cond", vir.OpUlt, vir.I32, vir.IntLiteral(-1), vir.IntLiteral(1))
+				return fb.Emit("v", vir.OpSelect, vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
 			})
 		},
 		wantValue: val(0),
@@ -45,8 +45,8 @@ func init() {
 		hostOSes:   []string{"linux"},
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("cmp_uge_unsigned", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
-				cond := fb.Emit("cond", "uge", vir.I32, vir.IntLiteral(-1), vir.IntLiteral(1))
-				return fb.Emit("v", "select", vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
+				cond := fb.Emit("cond", vir.OpUge, vir.I32, vir.IntLiteral(-1), vir.IntLiteral(1))
+				return fb.Emit("v", vir.OpSelect, vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
 			})
 		},
 		wantValue: val(1),
@@ -59,8 +59,8 @@ func init() {
 		build: func(a, o string) *vir.Module {
 			return i32PrintingModule("cmp_ptr_eq", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				p := fb.Alloca("p", vir.IntLiteral(4), 0)
-				cond := fb.Emit("cond", "eq", vir.Ptr, p, p)
-				return fb.Emit("v", "select", vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
+				cond := fb.Emit("cond", vir.OpEq, vir.Ptr, p, p)
+				return fb.Emit("v", vir.OpSelect, vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
 			})
 		},
 		wantValue: val(1),
@@ -74,8 +74,8 @@ func init() {
 			return i32PrintingModule("cmp_ptr_ne", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				p1 := fb.Alloca("p1", vir.IntLiteral(4), 0)
 				p2 := fb.Alloca("p2", vir.IntLiteral(4), 0)
-				cond := fb.Emit("cond", "ne", vir.Ptr, p1, p2)
-				return fb.Emit("v", "select", vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
+				cond := fb.Emit("cond", vir.OpNe, vir.Ptr, p1, p2)
+				return fb.Emit("v", vir.OpSelect, vir.I32, cond, vir.IntLiteral(1), vir.IntLiteral(0))
 			})
 		},
 		wantValue: val(1),
