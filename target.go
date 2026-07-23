@@ -9,35 +9,41 @@ import (
 // Target is vvm's own (arch, os, abi[, tier]) triple — deliberately not
 // shared with linker/elf.Target, linker/macho.Target, or linker/pe.Target,
 // which each have their own shape for their own format's native naming
-// (per the repo's "no shared types across format boundaries" principle,
-// ir.md §10, README "Extended Design Principles"). dispatch.go is the one
-// place that translates a vvm.Target into whichever format-specific Target
-// the chosen backend actually wants.
+// (the repo's "no shared types across format boundaries" principle).
+// dispatch.go is the one place that translates a vvm.Target into
+// whichever format-specific Target the chosen backend actually wants.
 type Target struct {
-	Arch string   // canonical spelling, ir.md §10.1: x86, x86_64, arm, armeb, aarch64, aarch64_be, ...
-	OS   string   // canonical spelling, ir.md §10.2: linux, macos, ios, windows, none, ...
-	ABI  string   // canonical spelling, ir.md §10.3: gnu, musl, msvc, eabi, eabihf, ...
-	Tier []string // optional feature tiers, ir.md §10.4 (e.g. "avx2")
+	Arch string   // canonical spelling, §10.1: x86, x86_64, arm, armeb, aarch64, aarch64_be, ...
+	OS   string   // canonical spelling, §10.2: linux, macos, ios, windows, none, ...
+	ABI  string   // canonical spelling, §10.3: gnu, musl, msvc, eabi, eabihf, ...
+	Tier []string // optional feature tiers, §10.4 (e.g. "avx2")
 
 	// MinOSVersion is required when OS selects the Mach-O family (macos,
 	// ios, watchos, tvos, visionos) — Apple's triple grammar has no
-	// "unversioned" form (linker/macho's ParseTarget: "<arch>-apple-<sdk><ver>").
-	// Ignored for every other OS.
+	// "unversioned" form. Ignored for every other OS.
 	MinOSVersion string
 
-	// Kind selects what BuildModule actually produces. Zero value
-	// (OutputExecutable) is today's only reachable behavior; it exists
-	// mainly so entry-point resolution (entrythunk.go) has something
-	// concrete to gate the libc-style _start synthesis against — a
-	// shared-library build must never get one, regardless of what an
-	// `entry`-attributed fn looks like.
+	// Kind selects what BuildModule/BuildModuleGraph actually produce.
 	Kind OutputKind
+
+	// Flat selects objectwriter's ToFlat path directly instead of a real
+	// linker/<format> backend. Only legal when OS == "none": a flat
+	// image has no loader, so it only makes sense paired with the
+	// "no os" convention — requesting Flat against, say, os=linux would
+	// produce bytes no linux loader can run. objFormat() enforces this.
+	//
+	// flat.Section has no Relocs field at all (objectfile forbids
+	// relocations in flat output by construction) — which is also why
+	// BuildModuleGraph refuses Flat outright: a multi-module build's
+	// entire reason for existing is cross-object symbol resolution, and
+	// flat has nowhere to put the relocations that requires.
+	Flat            bool
+	FlatBaseAddress uint64
 }
 
-// OutputKind is not part of the (arch, os, abi) triple string (ir.md §10
-// only ever talks about the triple); it's set programmatically by the
-// caller building the module, the same way real toolchains take a
-// separate "-shared" flag alongside a target triple.
+// OutputKind is not part of the (arch, os, abi) triple string; it's set
+// programmatically, the same way real toolchains take a separate
+// "-shared" flag alongside a target triple.
 type OutputKind int
 
 const (
@@ -47,33 +53,30 @@ const (
 
 // isHostedProcessOS reports whether t.OS implies a hosted process image
 // with a libc-style argc/argv/exit(3) convention worth auto-wiring —
-// i.e. everything except os=none (bare-metal/kernel) and os=uefi, which
-// have no such convention to synthesize against (ir.md §1.2 rule 7's
-// os=none TLS gating is the same shape of check).
+// i.e. everything except os=none (bare-metal/kernel) and os=uefi.
 func (t Target) isHostedProcessOS() bool {
 	return t.OS != "none" && t.OS != "uefi"
 }
 
-// ParseTarget parses vvm's own CLI-friendly triple spelling, matching the
-// dash-joined shape linker/elf already uses for the same purpose:
+// ParseTarget parses vvm's own CLI-friendly triple spelling:
 //
 //	x86_64-linux-gnu
-//	aarch64-macos-none[avx2]     // MinOSVersion still has to be set separately
+//	aarch64-macos-none[avx2]   // MinOSVersion still has to be set separately
 //	x86_64-windows-msvc
 //
-// No alias resolution happens here (ir.md §10.5 — aliases are a
-// build-system-boundary concern); only canonical spellings are accepted.
+// No alias resolution happens here (§10.5 — aliases are a build-system-
+// boundary concern); only canonical spellings are accepted.
 func ParseTarget(s string) (Target, error) {
 	tierStart := strings.IndexByte(s, '[')
-	tiers := []string(nil)
+	var tiers []string
 	if tierStart != -1 {
 		if !strings.HasSuffix(s, "]") {
 			return Target{}, fmt.Errorf("vvm: malformed tier list in target %q", s)
 		}
 		tierStr := s[tierStart+1 : len(s)-1]
 		s = s[:tierStart]
-		for _, t := range strings.Split(tierStr, ",") {
-			tiers = append(tiers, strings.TrimSpace(t))
+		for _, tier := range strings.Split(tierStr, ",") {
+			tiers = append(tiers, strings.TrimSpace(tier))
 		}
 	}
 
@@ -95,8 +98,7 @@ func (t Target) String() string {
 // baseArch folds the endianness variants (armeb, aarch64_be) down to the
 // arch family that picks the lower/<arch> and object/<arch> packages —
 // endianness is threaded through as a bool argument to those packages'
-// Lower, never a separate package (per lower/arm's and lower/aarch64's
-// own READMEs).
+// Lower, never a separate package.
 func (t Target) baseArch() string {
 	switch t.Arch {
 	case "armeb":
@@ -112,17 +114,24 @@ func (t Target) bigEndian() bool {
 	return t.Arch == "armeb" || t.Arch == "aarch64_be"
 }
 
-// objFormat is the container format family, derived from OS per the same
-// table linker/README.md publishes.
+// objFormat is the container-format family, derived from OS (or from
+// Flat, which bypasses the OS table entirely).
 type objFormat int
 
 const (
 	formatELF objFormat = iota
 	formatMachO
 	formatPE
+	formatFlat
 )
 
 func (t Target) objFormat() (objFormat, error) {
+	if t.Flat {
+		if t.OS != "none" {
+			return 0, fmt.Errorf("vvm: Target.Flat is only valid for os=\"none\", got %q (§10.2)", t.OS)
+		}
+		return formatFlat, nil
+	}
 	switch t.OS {
 	case "linux", "freebsd", "netbsd", "openbsd", "android", "none":
 		return formatELF, nil

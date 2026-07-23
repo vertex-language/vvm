@@ -12,8 +12,7 @@ import (
 )
 
 // Run is "vvm run": build for the host, execute the result immediately,
-// clean up the temp binary — nothing fancier than `go run`. Use
-// Build/BuildModule instead if you want the binary itself (`vvm build`).
+// clean up the temp binary — nothing fancier than `go run`.
 func Run(src []byte) (RunResult, error) {
 	m, err := decodeModule(src)
 	if err != nil {
@@ -59,7 +58,7 @@ func RunModule(m *vir.Module) (RunResult, error) {
 
 	if exitErr, ok := runErr.(*exec.ExitError); ok {
 		res.ExitCode = exitErr.ExitCode()
-		return res, nil // non-zero exit isn't a vvm error, just the program's own result
+		return res, nil
 	}
 	if runErr != nil {
 		return res, fmt.Errorf("vvm: run: %w", runErr)
@@ -68,10 +67,7 @@ func RunModule(m *vir.Module) (RunResult, error) {
 }
 
 // hostTarget derives a vvm.Target for the machine vvm itself is running
-// on, so Run() needs no configuration — same "just works" spirit as
-// `go run`. MinOSVersion is only relevant on Mach-O hosts; the fallback
-// here is a reasonable default, not a real system query — override by
-// calling BuildModule directly with an explicit Target if it matters.
+// on, so Run() needs no configuration.
 func hostTarget() (Target, error) {
 	var arch string
 	switch runtime.GOARCH {
