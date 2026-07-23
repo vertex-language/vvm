@@ -194,6 +194,9 @@ func (s *sel) selInst(in *vir.Instruction) error {
 	case vir.OpSelect:
 		return s.selSelect(in)
 
+	case vir.OpSMin, vir.OpSMax, vir.OpUMin, vir.OpUMax:
+		return s.selIntMinMax(in)
+
 	case vir.OpTrunc, vir.OpZext, vir.OpSext, vir.OpBitcast:
 		return s.selConvert(in)
 
@@ -420,6 +423,49 @@ func (s *sel) selSelect(in *vir.Instruction) error {
 	s.loadOperand(in.Args[0], RRDX) // cond
 	s.emit(Inst{Op: "test", D: R(RRDX), S: R(RRDX), Sz: 4})
 	s.emit(Inst{Op: "cmovcc", D: R(RRAX), S: R(RRCX), CC: CondE, Sz: w}) // cond==0 -> b
+	s.storeReg(RRAX, in.Result)
+	return nil
+}
+
+// selIntMinMax lowers smin/smax/umin/umax via cmp + cmovcc (§4 intrinsics —
+// "must compile to 1-2 CPU instructions"), the same cmp/cmovcc idiom
+// selCompare/selSelect already use. Result register starts as `a`; cmovcc
+// overwrites it with `b` exactly when `a` is NOT the answer for this op —
+// i.e. the condition is the *complement* of "a wins":
+//
+//	smin: keep a unless a >= b (signed)   -> move b in on CondGE
+//	smax: keep a unless a <= b (signed)   -> move b in on CondLE
+//	umin: keep a unless a >= b (unsigned) -> move b in on CondAE
+//	umax: keep a unless a <= b (unsigned) -> move b in on CondBE
+func (s *sel) selIntMinMax(in *vir.Instruction) error {
+	t := s.types[in.Result]
+	bits := intBits(t)
+	w := widthOf(t)
+	signed := in.Op == vir.OpSMin || in.Op == vir.OpSMax
+
+	var cc byte
+	switch in.Op {
+	case vir.OpSMin:
+		cc = CondGE
+	case vir.OpSMax:
+		cc = CondLE
+	case vir.OpUMin:
+		cc = CondAE
+	default: // OpUMax
+		cc = CondBE
+	}
+
+	s.loadOperand(in.Args[0], RRAX) // a
+	s.loadOperand(in.Args[1], RRCX) // b
+	cw := w
+	if signed && bits < 32 {
+		s.sext32(RRAX, bits)
+		s.sext32(RRCX, bits)
+		cw = 4
+	}
+	s.emit(Inst{Op: "cmp", D: R(RRAX), S: R(RRCX), Sz: cw})
+	s.emit(Inst{Op: "cmovcc", D: R(RRAX), S: R(RRCX), CC: cc, Sz: w})
+	s.maskTo(RRAX, bits)
 	s.storeReg(RRAX, in.Result)
 	return nil
 }

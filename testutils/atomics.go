@@ -20,6 +20,12 @@ import "github.com/vertex-language/vvm/ir/vir"
 // fixed to seqcst throughout since these cases are about the op's effect,
 // not about the ordering/tier legality matrix (§5.1's exclusion rules
 // would need their own dedicated cases).
+//
+// Every rmw/cmpxchg op is registered in opcode.go/opinfo.go as producing
+// a value (ruleSuffix) — the verifier rejects an unbound result name even
+// when the caller has no interest in reading it back. So each op below
+// binds a throwaway "old" result rather than "", satisfying that rule
+// without pretending to assert anything about what it holds.
 
 func init() {
 	register(testCase{
@@ -44,7 +50,7 @@ func init() {
 			return i32PrintingModule("atomic_add", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(10))
-				fb.Emit("", vir.OpAtomicAdd, vir.I32, slot, vir.IntLiteral(5), vir.OrderingOperand("seqcst"))
+				fb.Emit("old", vir.OpAtomicAdd, vir.I32, slot, vir.IntLiteral(5), vir.OrderingOperand("seqcst"))
 				return fb.Load("v", vir.I32, slot)
 			})
 		},
@@ -59,7 +65,7 @@ func init() {
 			return i32PrintingModule("atomic_sub", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(10))
-				fb.Emit("", vir.OpAtomicSub, vir.I32, slot, vir.IntLiteral(3), vir.OrderingOperand("seqcst"))
+				fb.Emit("old", vir.OpAtomicSub, vir.I32, slot, vir.IntLiteral(3), vir.OrderingOperand("seqcst"))
 				return fb.Load("v", vir.I32, slot)
 			})
 		},
@@ -74,7 +80,7 @@ func init() {
 			return i32PrintingModule("atomic_and", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(0b1100))
-				fb.Emit("", vir.OpAtomicAnd, vir.I32, slot, vir.IntLiteral(0b1010), vir.OrderingOperand("seqcst"))
+				fb.Emit("old", vir.OpAtomicAnd, vir.I32, slot, vir.IntLiteral(0b1010), vir.OrderingOperand("seqcst"))
 				return fb.Load("v", vir.I32, slot)
 			})
 		},
@@ -89,7 +95,7 @@ func init() {
 			return i32PrintingModule("atomic_or", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(0b1100))
-				fb.Emit("", vir.OpAtomicOr, vir.I32, slot, vir.IntLiteral(0b0010), vir.OrderingOperand("seqcst"))
+				fb.Emit("old", vir.OpAtomicOr, vir.I32, slot, vir.IntLiteral(0b0010), vir.OrderingOperand("seqcst"))
 				return fb.Load("v", vir.I32, slot)
 			})
 		},
@@ -104,7 +110,7 @@ func init() {
 			return i32PrintingModule("atomic_xor", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(0b1100))
-				fb.Emit("", vir.OpAtomicXor, vir.I32, slot, vir.IntLiteral(0b1010), vir.OrderingOperand("seqcst"))
+				fb.Emit("old", vir.OpAtomicXor, vir.I32, slot, vir.IntLiteral(0b1010), vir.OrderingOperand("seqcst"))
 				return fb.Load("v", vir.I32, slot)
 			})
 		},
@@ -119,7 +125,7 @@ func init() {
 			return i32PrintingModule("atomic_xchg", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(10))
-				fb.Emit("", vir.OpAtomicXchg, vir.I32, slot, vir.IntLiteral(99), vir.OrderingOperand("seqcst"))
+				fb.Emit("old", vir.OpAtomicXchg, vir.I32, slot, vir.IntLiteral(99), vir.OrderingOperand("seqcst"))
 				return fb.Load("v", vir.I32, slot)
 			})
 		},
@@ -137,6 +143,7 @@ func init() {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(10))
 				fb.EmitInstruction(vir.Instruction{
+					Result: "old",
 					Op:     vir.OpCmpxchg,
 					Suffix: vir.I32,
 					Args: []vir.Operand{
@@ -161,6 +168,7 @@ func init() {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(10))
 				fb.EmitInstruction(vir.Instruction{
+					Result: "old",
 					Op:     vir.OpCmpxchg,
 					Suffix: vir.I32,
 					Args: []vir.Operand{
