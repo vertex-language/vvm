@@ -83,7 +83,7 @@ This builds the `vvm` binary from the latest tagged release and places it in you
 **`add.vir`**:
 
 ```vir
-module add
+module main
 
 target x86_64 linux gnu
 
@@ -107,14 +107,13 @@ $ echo $?
 
 ```vir
 module main
-
 target x86_64 linux gnu
 
 global fmt array[i8, 14] = "%d + %d = %d\n\x00"
 
 link shared "c"
 extern "c":
-    fn printf(ptr, ...) i32
+    fn printf(fmt ptr, ...) i32
 end
 
 export fn main() i32 entry:
