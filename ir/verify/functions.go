@@ -8,16 +8,27 @@ import (
 )
 
 // fnCtx bundles the module-wide lookups a function body needs to resolve
-// local calls/tailcalls (§4.2) and noreturn call sites (§4.2). fns is
-// built incrementally as functions are processed, in file order, so a
-// function only ever "sees" itself (self-recursion, §2.2's sole exemption
-// from declare-before-use) and functions declared strictly earlier.
+// local calls/tailcalls (§4.2), noreturn call sites (§4.2), and
+// definite-assignment reads of module-scope names (§4.3 rules 3/5 only
+// govern locally-produced bindings; globals/consts already exist before
+// the function is ever entered, §6.2, so they're always "read-legal"
+// regardless of path). fns is built incrementally as functions are
+// processed, in file order, so a function only ever "sees" itself
+// (self-recursion, §2.2's sole exemption from declare-before-use) and
+// functions declared strictly earlier.
 type fnCtx struct {
 	fnsigs         map[string]*vir.FunctionSignature
 	fns            map[string]*vir.Function
 	externs        map[string]*vir.ExternFunction
 	localNoreturn  map[string]bool
 	externNoreturn map[string]bool
+	// moduleScope holds every name that's visible to a function body
+	// without needing a path-sensitive assignment: globals and consts.
+	// These live in the flat namespace (§2.2) and are guaranteed not to
+	// collide with a local binding, so it's always safe to treat a read
+	// of one of these names as satisfied, independent of the
+	// intra-function dataflow the Join Convention (§4.3) governs.
+	moduleScope map[string]bool
 }
 
 func checkFunctions(m *vir.Module, names *nameTable) error {
@@ -40,12 +51,21 @@ func checkFunctions(m *vir.Module, names *nameTable) error {
 		}
 	}
 
+	moduleScope := make(map[string]bool, len(m.Globals)+len(m.Constants))
+	for _, g := range m.Globals {
+		moduleScope[g.Name] = true
+	}
+	for _, c := range m.Constants {
+		moduleScope[c.Name] = true
+	}
+
 	ctx := &fnCtx{
 		fnsigs:         fnsigs,
 		fns:            make(map[string]*vir.Function),
 		externs:        externs,
 		localNoreturn:  make(map[string]bool),
 		externNoreturn: externNoreturn,
+		moduleScope:    moduleScope,
 	}
 
 	sawEntry := false

@@ -70,7 +70,14 @@ func computePredecessors(f *vir.Function, blocks []*vir.Block) map[string][]stri
 // violation detected mid-iteration is already a real one (current sets
 // are always supersets of the true fixpoint), and the final full pass
 // with no further change reflects the true fixpoint everywhere.
-func checkDefiniteAssignment(f *vir.Function, blocks []*vir.Block, byLabel map[string]*vir.Block) error {
+//
+// Module-scope names (globals, consts — ctx.moduleScope) are outside this
+// dataflow entirely: they exist before the function is ever entered
+// (§6.2), so a read of one is always legal regardless of path. They are
+// deliberately excluded from `universe`/the flow-sensitive sets and
+// instead checked as a flat allow-list alongside `assigned` in
+// checkReadsAssigned/checkTermReadsAssigned.
+func checkDefiniteAssignment(f *vir.Function, blocks []*vir.Block, byLabel map[string]*vir.Block, ctx *fnCtx) error {
 	universe := make(map[string]bool)
 	for _, p := range f.Params {
 		universe[p.Name] = true
@@ -124,14 +131,14 @@ func checkDefiniteAssignment(f *vir.Function, blocks []*vir.Block, byLabel map[s
 
 			out := cloneSet(in)
 			for _, ln := range b.Lines {
-				if err := checkReadsAssigned(ln, out); err != nil {
+				if err := checkReadsAssigned(ln, out, ctx.moduleScope); err != nil {
 					return fmt.Errorf("block %q: %w", displayLabel(b), err)
 				}
 				if ln.Result != "" {
 					out[ln.Result] = true
 				}
 			}
-			if err := checkTermReadsAssigned(b.Term, out); err != nil {
+			if err := checkTermReadsAssigned(b.Term, out, ctx.moduleScope); err != nil {
 				return fmt.Errorf("block %q: %w", displayLabel(b), err)
 			}
 			if !setsEqual(out, outSet[l]) {
@@ -146,8 +153,10 @@ func checkDefiniteAssignment(f *vir.Function, blocks []*vir.Block, byLabel map[s
 
 // checkReadsAssigned checks one body-line's value-reading operands.
 // OpField's struct/field-name idents (args 1,2) and OpCall's callee ident
-// (arg 0) are name references, not value reads, and are skipped.
-func checkReadsAssigned(line *vir.Instruction, assigned map[string]bool) error {
+// (arg 0) are name references, not value reads, and are skipped. A name
+// found in moduleScope (global/const, §6.2) is always legal to read,
+// independent of the path-sensitive `assigned` set.
+func checkReadsAssigned(line *vir.Instruction, assigned map[string]bool, moduleScope map[string]bool) error {
 	for idx, a := range line.Args {
 		if line.Op == vir.OpField && idx > 0 {
 			continue
@@ -158,22 +167,23 @@ func checkReadsAssigned(line *vir.Instruction, assigned map[string]bool) error {
 		if a.Kind != vir.OperandIdent || a.IsQualified() {
 			continue
 		}
-		if !assigned[a.Ident] {
-			return fmt.Errorf("%s reads %q before it's assigned on every path (§4.3 rules 3/5)", line.Op, a.Ident)
+		if assigned[a.Ident] || moduleScope[a.Ident] {
+			continue
 		}
+		return fmt.Errorf("%s reads %q before it's assigned on every path (§4.3 rules 3/5)", line.Op, a.Ident)
 	}
 	return nil
 }
 
-func checkTermReadsAssigned(t vir.Terminator, assigned map[string]bool) error {
+func checkTermReadsAssigned(t vir.Terminator, assigned map[string]bool, moduleScope map[string]bool) error {
 	check := func(op vir.Operand) error {
 		if op.Kind != vir.OperandIdent || op.IsQualified() {
 			return nil
 		}
-		if !assigned[op.Ident] {
-			return fmt.Errorf("terminator reads %q before it's assigned on every path (§4.3 rules 3/5)", op.Ident)
+		if assigned[op.Ident] || moduleScope[op.Ident] {
+			return nil
 		}
-		return nil
+		return fmt.Errorf("terminator reads %q before it's assigned on every path (§4.3 rules 3/5)", op.Ident)
 	}
 	switch x := t.(type) {
 	case vir.BranchIf:

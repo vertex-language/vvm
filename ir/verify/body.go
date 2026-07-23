@@ -54,7 +54,7 @@ func checkFunctionBody(f *vir.Function, ctx *fnCtx) error {
 		}
 	}
 
-	if err := checkDefiniteAssignment(f, blocks, byLabel); err != nil {
+	if err := checkDefiniteAssignment(f, blocks, byLabel, ctx); err != nil {
 		return err
 	}
 	if err := checkValistLifetimes(f, blocks, byLabel, ctx); err != nil {
