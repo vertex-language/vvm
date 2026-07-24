@@ -8,6 +8,53 @@ import (
 	encoder "github.com/vertex-language/vvm/isa/aarch64/encoder"
 )
 
+// RegFA is a caller-saved SIMD/FP register used as a scratch register for
+// floating-point operations. v13 is an allocatable, caller-saved register in AAPCS64.
+const RegFA = encoder.R13
+
+// valueFP loads a floating-point operand into the destination register.
+func (s *sel) valueFP(dst encoder.Reg, o vir.Operand, hint vir.Type) error {
+	switch o.Kind {
+	case vir.OperandIdent:
+		if o.IsQualified() {
+			return fmt.Errorf("qualified operand %s: importer.Rewrite has not run", o)
+		}
+		if _, ok := s.types[o.Ident]; ok {
+			b, err := s.bitsOf(hint)
+			if err != nil {
+				return err
+			}
+			w := encoder.W
+			if b == 64 {
+				w = encoder.X
+			}
+			s.emit(Inst{Op: "fldr", W: w, D: R(dst), M: Slot(o.Ident)})
+			return nil
+		}
+		if c, ok := s.ix.consts[o.Ident]; ok {
+			return s.valueFP(dst, c.Value, c.Type)
+		}
+		return todo("unresolved float operand %s (globals/addresses via FP not supported)", o.Ident)
+	case vir.OperandFloat:
+		// Materializing FP constants requires literal pools or a movz/movk chain into GP, then fmov
+		return todo("float literal materialization")
+	}
+	return fmt.Errorf("operand %s is not a float value", o)
+}
+
+// storeFP writes a floating-point scratch register back to a named value's slot.
+func (s *sel) storeFP(name string, r encoder.Reg, hint vir.Type) {
+	if name == "" {
+		return
+	}
+	b, _ := s.bitsOf(hint)
+	w := encoder.W
+	if b == 64 {
+		w = encoder.X
+	}
+	s.emit(Inst{Op: "fstr", W: w, D: R(r), M: Slot(name)})
+}
+
 // selCall lowers a direct or indirect call.
 //
 // Ordering matters and is the mirror of lower/x86_64's: the outgoing stack
