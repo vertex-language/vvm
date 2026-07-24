@@ -21,7 +21,8 @@ var SavedRegBytes = int64(len(CalleeSaved)) * 8
 //	[rbp+0]     saved rbp
 //	[rbp-8]     saved rbx
 //	[rbp-16..]  saved r12..r15
-//	[rbp-48..]  register save area (variadic functions only, SysV target
+//	[rbp-40]    end of saved regs
+//	[rbp-88..]  register save area (variadic functions only, SysV target
 //	            only — see the windows-variadic guard in BuildFrame below)
 //	[rbp-…]     local slots, Frame.Local bytes, one 8-byte slot per value
 type Frame struct {
@@ -119,7 +120,7 @@ func BuildFrame(l *Layout, f *vir.Function, order []string, types map[string]vir
 	// Unreachable for windows targets — the guard at the top of this
 	// function already rejected f.Variadic && l.OS == "windows".
 	if f.Variadic {
-		fr.SaveArea = -(8 + SavedRegBytes + 48)
+		fr.SaveArea = -(SavedRegBytes + 48)
 		localBytes += 48
 	}
 
@@ -134,7 +135,7 @@ func BuildFrame(l *Layout, f *vir.Function, order []string, types map[string]vir
 // Offset returns the [rbp+off] displacement of a value's local slot. Slots
 // grow downward starting just below the callee-saved (and save-area) block.
 func (fr *Frame) Offset(slot int) int32 {
-	base := -(8 + SavedRegBytes)
+	base := -SavedRegBytes
 	if fr.Variadic {
 		base -= 48
 	}
