@@ -393,7 +393,7 @@ func (s *sel) instruction(in *vir.Instruction) error {
 		return s.selOverflow(in)
 
 	case vir.OpUAddSat, vir.OpSAddSat, vir.OpUSubSat, vir.OpSSubSat:
-		return todo("saturating arithmetic")
+		return s.selSat(in)
 
 	case vir.OpShl, vir.OpLShr, vir.OpAShr:
 		return s.selShift(in)
@@ -519,6 +519,91 @@ func (s *sel) selAbs(in *vir.Instruction) error {
 	s.emit(Inst{Op: "cmp", W: w, N: R(RegA), M: Imm(0)})
 	s.emit(Inst{Op: "cneg", W: w, D: R(RegA), N: R(RegA), CC: encoder.LT})
 	s.maskTo(RegA, b)
+	s.store(in.Result, RegA)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Saturating arithmetic.
+// ---------------------------------------------------------------------------
+
+func (s *sel) selSat(in *vir.Instruction) error {
+	b, err := s.bitsOf(in.Suffix)
+	if err != nil {
+		return err
+	}
+	signed := in.Op == vir.OpSAddSat || in.Op == vir.OpSSubSat
+
+	if err := s.value(RegA, in.Args[0], in.Suffix); err != nil {
+		return err
+	}
+	if err := s.value(RegB, in.Args[1], in.Suffix); err != nil {
+		return err
+	}
+
+	// For types narrower than 64 bits, extend them to 64 bits where the operation
+	// cannot overflow, execute it there, and clamp it to the representable range.
+	if b < 64 {
+		if signed {
+			s.sextTo(RegA, b)
+			s.sextTo(RegB, b)
+		} else {
+			s.maskTo(RegA, b)
+			s.maskTo(RegB, b)
+		}
+		if in.Op == vir.OpUAddSat || in.Op == vir.OpSAddSat {
+			s.emit(Inst{Op: "add", W: encoder.X, D: R(RegA), N: R(RegA), M: R(RegB)})
+		} else {
+			s.emit(Inst{Op: "sub", W: encoder.X, D: R(RegA), N: R(RegA), M: R(RegB)})
+		}
+
+		var max, min uint64
+		if signed {
+			max = (uint64(1) << (b - 1)) - 1
+			min = ^max
+		} else {
+			max = (uint64(1) << b) - 1
+			min = 0
+		}
+
+		s.movImm(RegB, max)
+		s.emit(Inst{Op: "cmp", W: encoder.X, N: R(RegA), M: R(RegB)})
+		s.emit(Inst{Op: "csel", W: encoder.X, D: R(RegA), N: R(RegB), M: R(RegA), CC: encoder.GT})
+
+		if signed || in.Op == vir.OpUSubSat {
+			s.movImm(RegB, min)
+			s.emit(Inst{Op: "cmp", W: encoder.X, N: R(RegA), M: R(RegB)})
+			s.emit(Inst{Op: "csel", W: encoder.X, D: R(RegA), N: R(RegB), M: R(RegA), CC: encoder.LT})
+		}
+		s.maskTo(RegA, b)
+		s.store(in.Result, RegA)
+		return nil
+	}
+
+	w := widthFor(b)
+	switch in.Op {
+	case vir.OpUAddSat:
+		// Unsigned add overflow = CS. csinv yields RegA if CC, or ~ZR (UINT64_MAX) if CS.
+		s.emit(Inst{Op: "adds", W: w, D: R(RegA), N: R(RegA), M: R(RegB)})
+		s.emit(Inst{Op: "csinv", W: w, D: R(RegA), N: R(RegA), M: R(ZR), CC: encoder.CC})
+	case vir.OpUSubSat:
+		// Unsigned sub underflow = CC. csel yields RegA if CS, or ZR (0) if CC.
+		s.emit(Inst{Op: "subs", W: w, D: R(RegA), N: R(RegA), M: R(RegB)})
+		s.emit(Inst{Op: "csel", W: w, D: R(RegA), N: R(RegA), M: R(ZR), CC: encoder.CS})
+	case vir.OpSAddSat, vir.OpSSubSat:
+		op := "adds"
+		if in.Op == vir.OpSSubSat {
+			op = "subs"
+		}
+		s.emit(Inst{Op: op, W: w, D: R(RegC), N: R(RegA), M: R(RegB)})
+		// Extract the original sign of RegA: RegD = 0 if RegA >= 0, or -1 if RegA < 0.
+		s.emit(Inst{Op: "asr", W: w, D: R(RegD), N: R(RegA), M: Imm(63)})
+		// ~((1<<63)-1) == 1<<63 == INT64_MIN, which maps (RegD=0 => MaxInt, RegD=-1 => MinInt)
+		s.movImm(RegA, (uint64(1)<<63)-1)
+		s.emit(Inst{Op: "eor", W: w, D: R(RegA), N: R(RegA), M: R(RegD)})
+		// If VS (overflow), choose clamped value. Otherwise choose computed result in RegC.
+		s.emit(Inst{Op: "csel", W: w, D: R(RegA), N: R(RegA), M: R(RegC), CC: encoder.VS})
+	}
 	s.store(in.Result, RegA)
 	return nil
 }

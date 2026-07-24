@@ -59,6 +59,9 @@ func init() {
 		build: func() *vir.Module {
 			m := vir.NewModule("tailcall_direct")
 			m.SetTarget(arch, osName, abiFor())
+			if osName == "macos" {
+				m.DeclareLink(vir.LinkShared, "System")
+			}
 
 			callee := m.DeclareFunction("answer", nil, vir.I32, false)
 			callee.Return(vir.IntLiteral(55))
@@ -80,6 +83,9 @@ func init() {
 		build: func() *vir.Module {
 			m := vir.NewModule("tailcall_indirect")
 			m.SetTarget(arch, osName, abiFor())
+			if osName == "macos" {
+				m.DeclareLink(vir.LinkShared, "System")
+			}
 
 			sig := m.DeclareFunctionSignature("answer_sig", nil, false, vir.I32)
 

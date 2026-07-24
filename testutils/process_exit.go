@@ -20,6 +20,9 @@ func init() {
 		build: func() *vir.Module {
 			m := vir.NewModule("exit_zero")
 			m.SetTarget(arch, osName, abiFor())
+			if osName == "macos" {
+				m.DeclareLink(vir.LinkShared, "System")
+			}
 			fb := m.DeclareFunction("main", nil, vir.I32, true, vir.AttributeEntry)
 			fb.Return(vir.IntLiteral(0))
 			return m
@@ -32,6 +35,9 @@ func init() {
 		build: func() *vir.Module {
 			m := vir.NewModule("exit_custom")
 			m.SetTarget(arch, osName, abiFor())
+			if osName == "macos" {
+				m.DeclareLink(vir.LinkShared, "System")
+			}
 			fb := m.DeclareFunction("main", nil, vir.I32, true, vir.AttributeEntry)
 			fb.Return(vir.IntLiteral(42))
 			return m
