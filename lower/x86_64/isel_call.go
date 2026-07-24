@@ -5,6 +5,19 @@ import "github.com/vertex-language/vvm/ir/vir"
 
 var xmmArgRegs = []Reg{RXMM0, RXMM1, RXMM2, RXMM3, RXMM4, RXMM5, RXMM6, RXMM7}
 
+// maskArg applies the appropriate zero-extension or masking for an argument
+// passed to a known parameter type, satisfying the SysV/Windows ABI requirement
+// that the caller leaves the upper bits of a register clean.
+func (s *sel) maskArg(reg Reg, t vir.Type) {
+	bits := intBits(t)
+	if bits == 32 {
+		// A 32-bit move natively zero-extends into the 64-bit parent register
+		s.emit(Inst{Op: "mov", D: R(reg), S: R(reg), Sz: 4})
+	} else if bits < 32 {
+		s.maskTo(reg, bits)
+	}
+}
+
 // selCall lowers direct, imported (already rewritten), and indirect calls.
 // Arguments go into IntArgRegs / the outgoing stack area per LayoutArgs;
 // the result comes back in rax.
@@ -51,6 +64,9 @@ func (s *sel) selCall(in *vir.Instruction) error {
 				s.loadFloatOperand(a, RRAX, s.operandType(a))
 			} else {
 				s.loadOperand(a, RRAX)
+				if i < len(params) {
+					s.maskArg(RRAX, params[i].Type)
+				}
 			}
 			s.emit(Inst{Op: "mov", D: Mem(RRSP, int32(outOff)), S: R(RRAX), Sz: 8})
 		}
@@ -68,6 +84,9 @@ func (s *sel) selCall(in *vir.Instruction) error {
 				}
 			} else {
 				s.loadOperand(a, sl.Reg)
+				if i < len(params) {
+					s.maskArg(sl.Reg, params[i].Type)
+				}
 			}
 		}
 	}
@@ -138,6 +157,9 @@ func (s *sel) selTerm(t vir.Terminator) error {
 				s.emit(Inst{Op: "movq_to_xmm", D: R(RXMM0), S: R(IntRetReg), Sz: 8})
 			} else {
 				s.loadOperand(*x.Value, IntRetReg)
+				if s.f.Ret != nil {
+					s.maskArg(IntRetReg, s.f.Ret)
+				}
 			}
 		}
 		s.emit(Inst{Op: "epi_ret"})
@@ -180,6 +202,9 @@ func (s *sel) selTailCall(x vir.TailCall) error {
 					s.loadFloatOperand(a, sl.Reg, s.operandType(a))
 				} else {
 					s.loadOperand(a, sl.Reg)
+					if i < len(params) {
+						s.maskArg(sl.Reg, params[i].Type)
+					}
 				}
 			} else {
 				return todo("tailcall with stack arguments")
