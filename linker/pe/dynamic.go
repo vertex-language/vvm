@@ -2,11 +2,22 @@ package pe
 
 import "encoding/binary"
 
+// PLT/GOT slot geometry. These are exported because the per-arch PLTPatcher
+// subpackages need the exact same numbers to compute thunk and IAT addresses;
+// a local redeclaration in each subpackage is how the FirstThunk skew got in.
+//
+// PLTHeaderSize and GOTReserved are both ELF inheritances: PLT[0] is ELF's
+// resolver trampoline and the three reserved .got.plt slots are ELF's
+// _DYNAMIC / link_map / _dl_runtime_resolve entries. PE has no equivalent of
+// either — its IAT is a bare null-terminated thunk array starting exactly at
+// FirstThunk. They're kept for now because the layout and patchers are written
+// around them; if they're dropped later, these two constants go to 0 and every
+// consumer follows automatically.
 const (
-	pltHeaderSize = 16
-	pltEntrySize  = 16
-	gotEntrySize  = 8
-	gotReserved   = 3 // standard reserved .got.plt header slots
+	PLTHeaderSize = 16
+	PLTEntrySize  = 16
+	GOTEntrySize  = 8
+	GOTReserved   = 3
 )
 
 // PLTEntry pairs a shared symbol with its 0-based stub index (PLT0 not counted).
@@ -60,24 +71,32 @@ func CollectPLTSymbols(symtab *SymbolTable, objects []*Object) []PLTEntry {
 // InjectPLTSections appends placeholder .plt and .got.plt sections so they
 // receive virtual addresses during AssignLayout.
 //
+// .got.plt is sized from lay.totalGOTSlots() rather than len(syms): the IAT
+// carries one null-terminator slot per DLL in addition to the reserved header
+// slots, and computeIATLayout already assigns real slot indices past those
+// terminators. Sizing this section any other way makes the IAT data directory
+// (which spans every slot including terminators) overrun the section's own
+// virtual size.
+//
 // No .rela.plt is injected. PE resolves imports through the IAT and import
 // directory rather than ELF RELA entries; an allocatable section that
 // AssignLayout addresses but the emitter never writes would leave an uncovered
 // RVA range, which the NT image loader rejects with ERROR_BAD_EXE_FORMAT.
-func InjectPLTSections(layout *Layout, syms []PLTEntry) {
+func InjectPLTSections(layout *Layout, syms []PLTEntry, lay *IATLayout) {
 	n := len(syms)
 	plt := &MergedSection{
 		Name:  ".plt",
 		Flags: SecAlloc | SecExec,
-		Data:  make([]byte, pltHeaderSize+n*pltEntrySize),
-		Size:  uint64(pltHeaderSize + n*pltEntrySize),
+		Data:  make([]byte, PLTHeaderSize+n*PLTEntrySize),
+		Size:  uint64(PLTHeaderSize + n*PLTEntrySize),
 		Align: 16,
 	}
+	gotSlots := lay.totalGOTSlots()
 	gotPLT := &MergedSection{
 		Name:  ".got.plt",
 		Flags: SecAlloc | SecWrite,
-		Data:  make([]byte, (gotReserved+n)*gotEntrySize),
-		Size:  uint64((gotReserved + n) * gotEntrySize),
+		Data:  make([]byte, gotSlots*GOTEntrySize),
+		Size:  uint64(gotSlots * GOTEntrySize),
 		Align: 8,
 	}
 	layout.Sections = append(layout.Sections, plt, gotPLT)

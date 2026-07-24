@@ -51,8 +51,12 @@ func computeIATLayout(syms []PLTEntry) *IATLayout {
 	}
 }
 
+// totalGOTSlots is the full .got.plt slot count: the reserved header slots
+// plus, per DLL, that DLL's imports and its one null-terminator slot. This is
+// what InjectPLTSections sizes the section with, and what the IAT data
+// directory's extent must stay inside.
 func (l *IATLayout) totalGOTSlots() int {
-	total := gotReserved
+	total := GOTReserved
 	for _, dll := range l.DLLOrder {
 		total += l.DLLCount[dll] + 1
 	}
@@ -120,7 +124,7 @@ func computeIdataGeom(symtab *SymbolTable, pltSyms []string, lay *IATLayout) ida
 
 	iltSize := 0
 	for _, dll := range g.dllOrder {
-		iltSize += (lay.DLLCount[dll] + 1) * 8
+		iltSize += (lay.DLLCount[dll] + 1) * GOTEntrySize
 	}
 	g.hnOff = g.iltOff + iltSize
 
@@ -155,8 +159,16 @@ func computeIdataGeom(symtab *SymbolTable, pltSyms []string, lay *IATLayout) ida
 // fillImports writes the import directory, ILT, hint/name table and DLL-name
 // area into the already-placed .idata section, and mirrors the name RVAs into
 // the .got.plt IAT slots so the table is valid before the loader binds it.
-// idataRVA is .idata's RVA; iatBaseRVA is the RVA of the first non-reserved
-// .got.plt slot.
+//
+// idataRVA is .idata's RVA. iatBaseRVA is the RVA of the FIRST NON-RESERVED
+// .got.plt slot — that is, gotSecRVA + GOTReserved*GOTEntrySize, not the
+// section base. Each descriptor's FirstThunk is written as
+// iatBaseRVA + dllStart*GOTEntrySize, and that is the only address the loader
+// uses to decide where to store resolved import addresses. It must name the
+// exact same slots the PLT thunks jump through and the mirroring loop below
+// writes to; passing the section base here makes the loader bind into the
+// reserved header slots while the thunks keep reading unbound ones, which
+// faults on the first call into any imported function.
 func fillImports(idata, got []byte, idataRVA, iatBaseRVA uint32, g idataGeom) (importDirSize, iatSize uint32) {
 	descPtr := 0
 	iltCursor := g.iltOff
@@ -167,21 +179,21 @@ func fillImports(idata, got []byte, idataRVA, iatBaseRVA uint32, g idataGeom) (i
 		binary.LittleEndian.PutUint32(idata[descPtr+4:], 0)                          // TimeDateStamp
 		binary.LittleEndian.PutUint32(idata[descPtr+8:], 0xFFFFFFFF)                 // ForwarderChain
 		binary.LittleEndian.PutUint32(idata[descPtr+12:], idataRVA+uint32(g.dllNOff+g.dllNameOff[dll]))
-		binary.LittleEndian.PutUint32(idata[descPtr+16:], iatBaseRVA+uint32(g.dllStart[dll])*8) // FirstThunk (IAT)
+		binary.LittleEndian.PutUint32(idata[descPtr+16:], iatBaseRVA+uint32(g.dllStart[dll]*GOTEntrySize)) // FirstThunk (IAT)
 		descPtr += sizeImportDesc
 
 		iatSlot := g.dllStart[dll]
 		for j := range syms {
 			hnRVA := uint64(idataRVA + uint32(g.hnOff+syms[j].hnOff))
 			binary.LittleEndian.PutUint64(idata[iltCursor:], hnRVA)
-			if gOff := (gotReserved + iatSlot) * 8; gOff+8 <= len(got) {
+			if gOff := (GOTReserved + iatSlot) * GOTEntrySize; gOff+GOTEntrySize <= len(got) {
 				binary.LittleEndian.PutUint64(got[gOff:], hnRVA)
 			}
-			iltCursor += 8
+			iltCursor += GOTEntrySize
 			iatSlot++
 		}
 		binary.LittleEndian.PutUint64(idata[iltCursor:], 0) // ILT terminator
-		iltCursor += 8
+		iltCursor += GOTEntrySize
 	}
 
 	for _, dll := range g.dllOrder {
@@ -195,7 +207,7 @@ func fillImports(idata, got []byte, idataRVA, iatBaseRVA uint32, g idataGeom) (i
 
 	copy(idata[g.dllNOff:], g.dllNameArea)
 
-	return uint32(g.importTableSize), uint32((g.nSyms + len(g.dllOrder)) * 8)
+	return uint32(g.importTableSize), uint32((g.nSyms + len(g.dllOrder)) * GOTEntrySize)
 }
 
 // ── Base relocations ───────────────────────────────────────────────────────

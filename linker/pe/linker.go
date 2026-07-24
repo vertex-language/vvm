@@ -113,9 +113,9 @@ func (l *Linker) Link() ([]byte, error) {
 		return nil, fmt.Errorf("no codegen backend registered for %s", l.target)
 	}
 
-	// 1. walkSharedDeps 
+	// 1. walkSharedDeps
 	// Skipped here as it requires filesystem traversal outside package scope; relies on explicit AddDynamicLibrary calls for now.
-	
+
 	// 2. SymbolTable.Ingest
 	if err := l.symtab.Ingest(l.objects, l.archives, l.shared); err != nil {
 		return nil, err
@@ -133,24 +133,27 @@ func (l *Linker) Link() ([]byte, error) {
 	// 5. GC (Dead-section elimination)
 	GC(layout, l.symtab, l.objects, l.outputType, l.entry)
 
-	// 6. [If PLT] InjectPLTSections, computeIATLayout, computeIdataGeom, inject .idata
+	// 6. [If PLT] computeIATLayout, InjectPLTSections, computeIdataGeom, inject .idata
 	var iatLayout *IATLayout
 	var iGeom idataGeom
 	var idataSec *MergedSection
 	hasPLT := len(pltSyms) > 0
 
 	if hasPLT {
-		InjectPLTSections(layout, pltSyms)
+		// The slot layout is computed first: InjectPLTSections needs its
+		// totalGOTSlots() to size .got.plt, since the IAT carries a
+		// null-terminator slot per DLL beyond the imports themselves.
 		iatLayout = computeIATLayout(pltSyms)
+		InjectPLTSections(layout, pltSyms, iatLayout)
 
 		var pltNames []string
 		for _, s := range pltSyms {
 			pltNames = append(pltNames, s.Name)
 		}
-		
+
 		iGeom = computeIdataGeom(l.symtab, pltNames, iatLayout)
-		
-		idataFlags := SecAlloc | SecWrite 
+
+		idataFlags := SecAlloc | SecWrite
 		idataSec = layout.AppendAllocSection(".idata", make([]byte, iGeom.size()), idataFlags, 4)
 	}
 
@@ -172,7 +175,7 @@ func (l *Linker) Link() ([]byte, error) {
 		if setter, ok := pp.(IATLayoutSetter); ok {
 			setter.SetIATLayout(iatLayout)
 		}
-		
+
 		if err := PatchPLT(pp, layout, pltSyms); err != nil {
 			return nil, err
 		}
@@ -180,13 +183,19 @@ func (l *Linker) Link() ([]byte, error) {
 		gotSec, _ := layout.SectionByName(".got.plt")
 		idataRVA := toRVA(idataSec.VAddr, baseVA)
 		gotRVA := toRVA(gotSec.VAddr, baseVA)
-		
-		dirSz, iatSz := fillImports(idataSec.Data, gotSec.Data, idataRVA, gotRVA, iGeom)
-		
+
+		// The IAT proper begins past .got.plt's reserved header slots. Every
+		// consumer of this address — each descriptor's FirstThunk, the IAT
+		// data directory, and the PLT thunks' indirect jump targets — must
+		// agree on it, so it's computed once here and passed down.
+		iatRVA := gotRVA + uint32(GOTReserved*GOTEntrySize)
+
+		dirSz, iatSz := fillImports(idataSec.Data, gotSec.Data, idataRVA, iatRVA, iGeom)
+
 		imports = &EmitImports{
 			ImportDirRVA:  idataRVA,
 			ImportDirSize: dirSz,
-			IATRVA:        gotRVA + uint32(gotReserved*8),
+			IATRVA:        iatRVA,
 			IATSize:       iatSz,
 		}
 	}
