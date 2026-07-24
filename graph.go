@@ -112,6 +112,12 @@ func BuildModuleGraph(modules []*vir.Module, rootModuleName string, t Target) ([
 	if err != nil {
 		return nil, fmt.Errorf("vvm: link: %w", err)
 	}
+
+	out, err = signMachOExecutable(root, t, out)
+	if err != nil {
+		return nil, err
+	}
+
 	return out, nil
 }
 

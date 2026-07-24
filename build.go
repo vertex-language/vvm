@@ -86,5 +86,11 @@ func BuildModule(m *vir.Module, t Target) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("vvm: link: %w", err)
 	}
+
+	out, err = signMachOExecutable(m, t, out)
+	if err != nil {
+		return nil, err
+	}
+
 	return out, nil
 }
