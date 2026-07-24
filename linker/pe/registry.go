@@ -64,3 +64,13 @@ func lookupSearchDirs(abi ABI) []string {
 	}
 	return f()
 }
+
+// SearchDirs returns the registered DLL search directories for abi, or nil
+// if none are registered. Exported so vvm's own link-dependency resolver
+// (linkdeps.go's resolvePELinkDependencies) can locate real system DLLs on
+// disk — this package validates a `link shared` declaration against a real
+// parsed export directory (see shared.go's parseDLL), so it needs a real
+// file path to read, not just a name.
+func SearchDirs(abi ABI) []string {
+	return lookupSearchDirs(abi)
+}

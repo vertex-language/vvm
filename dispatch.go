@@ -275,7 +275,12 @@ func newLinker(modules []*vir.Module, t Target, entryPoint string) (linkerBacken
 			// had a zero entry point.
 			l.SetEntryPoint(entryPoint)
 		}
-		if err := rejectUnresolvableLinkDependencies("pe", modules); err != nil {
+		// resolvePELinkDependencies (linkdeps.go) reads real DLL bytes off
+		// disk via linker/pe.SearchDirs(t.ABI) and calls AddDynamicLibrary
+		// against them — parseDLL has no "pass nil for a stub" path the
+		// way Mach-O's AddDynamicLibrary(name, nil) does, so this only
+		// resolves on a host that actually has the target DLLs available.
+		if err := resolvePELinkDependencies(l, modules, t); err != nil {
 			return nil, err
 		}
 		return l, nil

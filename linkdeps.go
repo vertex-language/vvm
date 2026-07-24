@@ -3,10 +3,13 @@ package vvm
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/vertex-language/vvm/ir/vir"
 	linkelf "github.com/vertex-language/vvm/linker/elf"
 	linkmacho "github.com/vertex-language/vvm/linker/macho"
+	linkpe "github.com/vertex-language/vvm/linker/pe"
 )
 
 // resolveELFLinkDependencies walks every module's own m.Links (§7.4) and
@@ -163,6 +166,82 @@ func resolveMachOLinkDependencies(l *linkmacho.Linker, modules []*vir.Module, t 
 	return nil
 }
 
+// resolvePELinkDependencies is linkdeps.go's third resolver, alongside
+// resolveELFLinkDependencies and resolveMachOLinkDependencies. Unlike
+// those two, linker/pe's AddDynamicLibrary has no "pass nil for a stub"
+// path — parseDLL genuinely reads a real PE32+ export directory (see
+// linker/pe/shared.go) — so this resolver locates and reads the actual
+// .dll off disk, sourced from whichever directories the target's ABI
+// registered via linker/pe's own RegisterSearchDirs (see linker/pe/x64's
+// register.go). This mirrors mingw/cygwin ld's own documented "link
+// directly against the DLL, no import library" mode, not a workaround —
+// see linkdeps.go's own commit history/discussion for that precedent.
+//
+// This only resolves on a machine that actually has the target DLLs
+// available (i.e. building for windows on windows, or with a manually
+// populated search dir) — there is no Go-style "just write the import
+// name, resolve at load time" path implemented here yet, so cross-
+// compiling x86_64-windows-msvc from a non-Windows host will fail here
+// with a clear "not found" error rather than silently produce a binary
+// with a broken import table.
+func resolvePELinkDependencies(l *linkpe.Linker, modules []*vir.Module, t Target) error {
+	format := vir.FormatOf(t.OS)
+	seenDLL := map[string]bool{}
+	dirs := linkpe.SearchDirs(t.ABI)
+
+	for _, m := range modules {
+		for _, link := range m.Links {
+			switch link.Kind {
+			case vir.LinkShared:
+				file, err := vir.DeriveLinkFile(link, format)
+				if err != nil {
+					return fmt.Errorf("vvm: link shared %q: %w", link.Name, err)
+				}
+				if seenDLL[file] {
+					continue
+				}
+				data, path, err := findAndReadDLL(file, dirs)
+				if err != nil {
+					return fmt.Errorf(
+						"vvm: link shared %q: %w (searched: %v)", link.Name, err, dirs)
+				}
+				if err := l.AddDynamicLibrary(file, data); err != nil {
+					return fmt.Errorf("vvm: link shared %q (%s): %w", link.Name, path, err)
+				}
+				seenDLL[file] = true
+
+			case vir.LinkStatic:
+				// linker/pe.ParseArchive reads plain GNU/SysV ar containers
+				// (archive.go) — a real MSVC import library (.lib) adds
+				// short-format import-descriptor members on top of that,
+				// which this package's archive parser doesn't special-case.
+				// Fail loudly rather than silently mis-link, same stance
+				// resolveMachOLinkDependencies takes for its own
+				// unresolvable case.
+				return fmt.Errorf(
+					"vvm: link static %q: PE static-archive resolution isn't "+
+						"verified against real import-library (.lib) internals yet — "+
+						"link it manually via linker/pe directly, or remove the "+
+						"`link` declaration", link.Name)
+
+			case vir.LinkFramework:
+				return fmt.Errorf("vvm: link framework %q: framework dependencies are not valid for a PE target", link.Name)
+			}
+		}
+	}
+	return nil
+}
+
+func findAndReadDLL(name string, dirs []string) (data []byte, path string, err error) {
+	for _, dir := range dirs {
+		p := filepath.Join(dir, name)
+		if b, err := os.ReadFile(p); err == nil {
+			return b, p, nil
+		}
+	}
+	return nil, "", fmt.Errorf("%q not found in any registered search directory", name)
+}
+
 // hasAnyLinks reports whether any module in the set declares a §7.4 link
 // dependency at all, and names the first one found for the error message.
 func hasAnyLinks(modules []*vir.Module) (name string, found bool) {
@@ -174,12 +253,9 @@ func hasAnyLinks(modules []*vir.Module) (name string, found bool) {
 	return "", false
 }
 
-// rejectUnresolvableLinkDependencies is used by the PE path, which has no
-// real §7.4 dependency resolver wired up yet in this package (nothing
-// here calls linker/pe's AddDynamicLibrary from m.Links today). Failing
-// loudly here means a `link` declaration can never silently vanish from
-// the output — the previous behavior was to say nothing and produce a
-// binary quietly missing the dependency.
+// rejectUnresolvableLinkDependencies is kept for any other format that may
+// later need the same "fail loudly, no resolver yet" stance PE used to
+// take before resolvePELinkDependencies was added above.
 func rejectUnresolvableLinkDependencies(format string, modules []*vir.Module) error {
 	if name, found := hasAnyLinks(modules); found {
 		return fmt.Errorf(
