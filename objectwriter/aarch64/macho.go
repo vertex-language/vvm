@@ -1,18 +1,30 @@
 // objectwriter/aarch64/macho.go
 //
 // Bridges object/aarch64 to objectfile/macho (macho.TargetDarwinARM64).
-// Same Call26/Jump26 approximation as elf.go — see there. object/aarch64's
-// RelocKind has no MOVZ/MOVK-style entries (see elf.go), so there is
-// nothing to map here.
+// Same Call26/Jump26 approximation as elf.go — see there.
 //
-// Unlike x86_64/macho.go, ADRP/ADD-style absolute addressing (the case
-// lower/aarch64 actually uses for globals) is fully supported here via
-// RelocADRPage21/RelocAddOff12 — those two just aren't reachable from
-// object.RelocKind's current set, which only has Call26/Jump26/Abs64 (plus
-// the PC-relative branch/adr/lo12 kinds handled elsewhere in object/aarch64).
-// If lower/aarch64 starts emitting ADRP+ADD relocs that need distinct
-// handling here rather than folding into Abs64, object/aarch64 needs those
-// RelocKinds added first — this file will pick them up trivially once it does.
+// ADRP/ADD-style absolute addressing (the case lower/aarch64 actually
+// uses for every global reference, per object.go's own doc comment) is
+// fully supported here via RelocADRPage21/RelocAddOff12. Mach-O gives
+// every lo12 reference — ADD-immediate and every scaled LDR/STR width
+// alike — a single ARM64_RELOC_PAGEOFF12 code, unlike AAELF64's separate
+// R_AARCH64_LDSTxx_ABS_LO12_NC-per-width scheme: the linker reads the
+// scale directly out of the instruction bits it's patching (see
+// objectfile/macho/write.go's relocDesc table and its arm64PageReloc
+// handling), so object.RelocAddAbsLo12Nc and all four
+// object.RelocLdStNAbsLo12Nc kinds map onto the same macho.RelocAddOff12
+// here.
+//
+// RelocCondBr19/RelocTstBr14 (B.cond/CBZ/CBNZ/TBZ/TBNZ) and
+// RelocAdrPrelLo21 (bare ADR, not ADRP) are deliberately left unmapped —
+// Mach-O's ARM64 relocation table (objectfile/macho/constants.go) has no
+// codes for them at all. In practice this is fine: those fixups only
+// ever target intra-function labels lower/aarch64 resolves directly, not
+// external symbols requiring a real relocation entry — the same gap
+// exists in elf.go, which doesn't map them either. If lower/aarch64 ever
+// starts emitting one of these against an external symbol, it'll surface
+// here as "unmapped reloc kind" rather than silently mis-patching, per
+// this repo's fail-loudly stance.
 package aarch64
 
 import (
@@ -101,6 +113,17 @@ func relocKindMachO(k object.RelocKind) (macho.RelocKind, error) {
 	switch k {
 	case object.RelocCall26, object.RelocJump26:
 		return macho.RelocPCRel26, nil // single BRANCH26 code covers both B and BL
+
+	case object.RelocAdrPrelPgHi21:
+		return macho.RelocADRPage21, nil // ADRP page-relative hi21
+
+	case object.RelocAddAbsLo12Nc,
+		object.RelocLdSt8AbsLo12Nc,
+		object.RelocLdSt16AbsLo12Nc,
+		object.RelocLdSt32AbsLo12Nc,
+		object.RelocLdSt64AbsLo12Nc:
+		return macho.RelocAddOff12, nil // see file doc comment: one PAGEOFF12 for every width
+
 	case object.RelocAbs64:
 		return macho.RelocAbs64, nil
 	}
