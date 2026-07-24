@@ -237,7 +237,7 @@ func newLinker(modules []*vir.Module, t Target, entryPoint string) (linkerBacken
 		} else {
 			l.SetEntryPoint(entryPoint)
 		}
-		if err := rejectUnresolvableLinkDependencies("macho", modules); err != nil {
+		if err := resolveMachOLinkDependencies(l, modules, t); err != nil {
 			return nil, err
 		}
 		return l, nil

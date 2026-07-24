@@ -77,14 +77,25 @@ func resolveEntryPoint(m *vir.Module, t Target) (symbol string, stub *crt.Stub, 
 	return s.Symbol, &s, nil
 }
 
-// linksLibC reports whether m declares the conventional libc dependency
-// (§7.4's own worked example: `link shared "c"`) — this decides how the
-// crt stub must terminate the process: a module that has routed output
-// through libc's buffered stdio needs libc's own exit() to flush those
-// buffers, where a bare SYS_exit would silently drop them.
+// linksLibC reports whether m declares the conventional runtime-library
+// dependency that a crt stub needs in order to exit() through it rather
+// than issuing a bare syscall — §7.4's own worked example uses libc's
+// short name "c" (glibc/musl-style targets), but macOS ships no
+// standalone libc.dylib at all: every libc symbol (including exit) lives
+// in libSystem instead, conventionally named "System" in a `link shared`
+// declaration (see linkdeps.go's resolveMachOLinkDependencies, which
+// special-cases the same name when resolving the actual dylib). Both
+// names are recognized here for the same underlying question — "does
+// this module have a real C runtime available to route process exit
+// through" — even though they name different libraries on different
+// platforms.
 func linksLibC(m *vir.Module) bool {
 	for _, l := range m.Links {
-		if l.Kind == vir.LinkShared && l.Name == "c" {
+		if l.Kind != vir.LinkShared {
+			continue
+		}
+		switch l.Name {
+		case "c", "System":
 			return true
 		}
 	}
