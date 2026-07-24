@@ -32,7 +32,20 @@ func RunModule(m *vir.Module) (RunResult, error) {
 		return RunResult{}, err
 	}
 
-	f, err := os.CreateTemp("", "vvm-run-*")
+	// tempExecPattern picks the CreateTemp pattern's suffix. Windows (and
+	// UEFI) identify an executable by file extension — os/exec's
+	// underlying CreateProcess call won't launch a file with no
+	// recognized suffix at all, even when its bytes are a perfectly
+	// valid PE image, so the temp file needs ".exe" here or exec.Command
+	// below fails with "executable file not found in %PATH%". ELF and
+	// Mach-O carry no such requirement; the +x bit set via os.Chmod below
+	// is all either of those needs.
+	pattern := "vvm-run-*"
+	if t.isHostedProcessOS() && (t.OS == "windows" || t.OS == "uefi") {
+		pattern = "vvm-run-*.exe"
+	}
+
+	f, err := os.CreateTemp("", pattern)
 	if err != nil {
 		return RunResult{}, fmt.Errorf("vvm: run: %w", err)
 	}
