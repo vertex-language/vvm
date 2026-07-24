@@ -16,36 +16,46 @@ func init() {
 // field layout — same as x86_64_linux_stub.go, one arch/os cell at a
 // time.
 //
-// This stub's shape is deliberately different from x86_64_linux_stub.go,
-// not just a byte-for-byte port of it. x86_64-linux's raw syscall
-// fallback exists because Linux's syscall ABI is stable, documented, and
-// something a bare, libc-free process is entitled to use. macOS offers
-// no equivalent: the Mach `svc 0x80` trap works today, but it is not a
-// documented, stable process-entry contract the way Linux's `syscall`
-// instruction is — Apple's own toolchains never emit an unlinked-against-
-// libSystem executable this way. So unlike the Linux stub, this one has
-// no bare-syscall branch at all: BuildArgs.NeedsLibC == false is a hard
-// error here, not a fallback path.
+// This stub calls _main and _exit *indirectly* — adrp/add to materialize
+// each symbol's address into a register, then blr through it — rather
+// than with a direct `bl`. That's deliberate, not stylistic: a direct
+// `bl _main`/`bl _exit` here was observed corrupting the target
+// instruction's own opcode bits at link time (verified via `otool -tV`
+// against a real linked binary — the patched low-26-bit branch offset
+// came out numerically correct, but the fixed top-6 BL opcode bits came
+// out zeroed, producing an illegal instruction / SIGILL at runtime).
+// That only reproduces on this stub's *direct*, non-PLT branch path —
+// `bl printf` from ordinary lowered code goes through PLT-stub injection
+// instead and disassembles correctly — so the adrp+add+blr sequence
+// below is a working, independently-verified substitute (the identical
+// adrp/add pair a global reference like `fmt` already uses correctly),
+// not a guess. If linker/macho/arm64's direct-branch BRANCH26 patcher is
+// fixed later, this can revert to two plain `bl`s — tracked as a known
+// workaround, not a permanent design choice.
 //
-// It's also simpler than the Linux stub for a different reason: on
-// arm64 macOS, dyld's own bootstrap (__dyld_start, per Apple's
-// dyldStartup.s) already parses the kernel's raw process-entry stack and
-// hands the resolved argc/argv/envp to this object's entry symbol
-// *in registers* — x0=argc, x1=argv, x2=envp — matching where a
-// recognized main() shape already expects them (AAPCS64 arg0/arg1/arg2).
-// x86_64-linux's stub has to read `sp` itself and stage those registers
-// by hand because nothing upstream of it already did that work; here,
-// nothing upstream needs undoing. This has not been verified against a
-// physical arm64 macOS target — flagged the same way linker/macho's own
-// README tracks its unverified xros/xrsimulator PLT coverage — but it
-// follows directly from the (arch, os) split this repo already draws:
-// libSystem symbols resolve as ordinary undefined externals either way,
-// so getting this wrong would surface as a crash before `main` runs, not
-// a silent miscompile.
+// Unlike x86_64_linux_stub.go, this has no bare-syscall branch at all:
+// macOS offers no documented, stable process-entry syscall contract the
+// way Linux's syscall instruction does, so BuildArgs.NeedsLibC == false
+// is a hard error here rather than a fallback path.
 //
-//	bl _main    ; ARM64_RELOC_BRANCH26, argc/argv/envp already in x0/x1/x2
-//	bl _exit    ; main's return value is already in x0/w0, exit's arg0 slot
-//	brk #0      ; defined trap, in case exit somehow returns
+// It's also simpler than the Linux stub in argument staging: on arm64
+// macOS, dyld's own bootstrap (__dyld_start, per Apple's dyldStartup.s)
+// already parses the kernel's raw process-entry stack and hands the
+// resolved argc/argv/envp to this object's entry symbol *in registers*
+// — x0=argc, x1=argv, x2=envp — exactly where AAPCS64 already expects a
+// function's first three arguments, so there is nothing to stage. This
+// register-convention claim has not been independently verified against
+// a physical target the same way the branch-corruption workaround above
+// was; flagged the same way linker/macho's own README tracks its
+// unverified xros/xrsimulator PLT coverage.
+//
+//	adrp x9, _main   ; ARM64_RELOC_PAGE21
+//	add  x9, x9, _main  ; ARM64_RELOC_PAGEOFF12  (argc/argv/envp already in x0/x1/x2)
+//	blr  x9
+//	adrp x9, _exit   ; ARM64_RELOC_PAGE21        (main's return value is already in x0/w0)
+//	add  x9, x9, _exit  ; ARM64_RELOC_PAGEOFF12
+//	blr  x9
+//	brk  #0          ; defined trap, in case exit somehow returns
 func buildAarch64Macos(args BuildArgs) (Stub, error) {
 	if args.Format != FormatMachO {
 		return Stub{}, fmt.Errorf("crt/aarch64-macos: only macho output is supported, got %s", args.Format)
@@ -61,10 +71,10 @@ func buildAarch64Macos(args BuildArgs) (Stub, error) {
 	switch args.Signature {
 	case SignatureBare, SignatureArgcArgv, SignatureArgcArgvEnvp:
 		// No register staging needed for any of the three: dyld already
-		// places argc/argv/envp in x0/x1/x2 (see doc comment above), which
-		// is exactly where AAPCS64 expects a function's first three
-		// arguments — a signature that only wants fewer of them simply
-		// leaves the extra incoming registers unread.
+		// places argc/argv/envp in x0/x1/x2, which is exactly where
+		// AAPCS64 expects a function's first three arguments — a
+		// signature that only wants fewer of them simply leaves the
+		// extra incoming registers unread.
 	default:
 		return Stub{}, fmt.Errorf("crt/aarch64-macos: unrecognized signature %d", args.Signature)
 	}
@@ -73,35 +83,31 @@ func buildAarch64Macos(args BuildArgs) (Stub, error) {
 	var relocs []macho.Reloc
 	emit := func(b ...byte) { code = append(code, b...) }
 
-	// bl _main                     94 00 00 00  (imm26=0; the real branch
-	//                               offset is computed by the *linker*'s
-	//                               ARM64_RELOC_BRANCH26 patcher at link
-	//                               time, not written here — see object.go's
-	//                               "ARM64-family instruction relocations
-	//                               encode nothing useful in the instruction
-	//                               word" note. Addend stays 0.)
-	emit(0x94, 0x00, 0x00, 0x00)
-	relocs = append(relocs, macho.Reloc{
-		Offset: uint32(len(code) - 4),
-		Symbol: args.UserMain,
-		Kind:   macho.RelocPCRel26,
-		Addend: 0,
-	})
+	callIndirect := func(sym string) {
+		// adrp x9, sym                 09 00 00 90
+		emit(0x09, 0x00, 0x00, 0x90)
+		relocs = append(relocs, macho.Reloc{
+			Offset: uint32(len(code) - 4),
+			Symbol: sym,
+			Kind:   macho.RelocADRPage21,
+			Addend: 0,
+		})
+		// add  x9, x9, :lo12:sym        29 01 00 91
+		emit(0x29, 0x01, 0x00, 0x91)
+		relocs = append(relocs, macho.Reloc{
+			Offset: uint32(len(code) - 4),
+			Symbol: sym,
+			Kind:   macho.RelocAddOff12,
+			Addend: 0,
+		})
+		// blr  x9                      20 01 3F D6
+		emit(0x20, 0x01, 0x3F, 0xD6)
+	}
 
-	// bl _exit                     94 00 00 00  (main's return value is
-	//                               already sitting in x0/w0 — the exact
-	//                               register exit's own first argument
-	//                               needs — so there is nothing to move
-	//                               between the two calls.)
-	emit(0x94, 0x00, 0x00, 0x00)
-	relocs = append(relocs, macho.Reloc{
-		Offset: uint32(len(code) - 4),
-		Symbol: "exit",
-		Kind:   macho.RelocPCRel26,
-		Addend: 0,
-	})
+	callIndirect(args.UserMain)
+	callIndirect("exit")
 
-	// brk #0                       00 00 20 D4
+	// brk #0                          00 00 20 D4
 	emit(0x00, 0x00, 0x20, 0xD4)
 
 	f := macho.NewFile(macho.TargetDarwinARM64)
