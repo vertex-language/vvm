@@ -3,7 +3,6 @@ package aarch64
 
 import (
 	"fmt"
-	"math"
 	"math/bits"
 
 	"github.com/vertex-language/vvm/ir/vir"
@@ -22,10 +21,6 @@ const (
 	RegD    = encoder.R12 // spare
 	RegAddr = encoder.R16 // IP0: addresses, large-frame arithmetic, call targets
 	RegAux  = encoder.R17 // IP1: second address
-
-	RegFA   = encoder.R16 // Float scratch (alias to IP0: used only in independent sequences)
-	RegFB   = encoder.R17 // Float scratch (alias to IP1)
-	RegFC   = encoder.R18 // Float spare scratch
 )
 
 type sel struct {
@@ -59,10 +54,8 @@ func (s *sel) bitsOf(t vir.Type) (int, error) {
 		return x.Bits, nil
 	case vir.PtrType, vir.ValistType:
 		return 64, nil
-	case vir.FloatType:
-		return x.Bits, nil
 	}
-	return 0, todo("%s has no integer/float width", t)
+	return 0, todo("%s has no integer width", t)
 }
 
 // widthFor picks the sf bit. A 32-bit operation writes zeroes into bits
@@ -247,18 +240,7 @@ func (s *sel) value(dst encoder.Reg, o vir.Operand, hint vir.Type) error {
 		s.movImm(dst, 0)
 		return nil
 	case vir.OperandFloat:
-		b := 64
-		if hint != nil {
-			b, _ = s.bitsOf(hint)
-		}
-		var v uint64
-		if b == 32 {
-			v = uint64(math.Float32bits(float32(o.Float)))
-		} else {
-			v = math.Float64bits(o.Float)
-		}
-		s.movImm(dst, v)
-		return nil
+		return todo("float literal")
 	case vir.OperandIdent:
 		if o.IsQualified() {
 			return fmt.Errorf("qualified operand %s: importer.Rewrite has not run", o)
@@ -281,34 +263,6 @@ func (s *sel) value(dst encoder.Reg, o vir.Operand, hint vir.Type) error {
 		return fmt.Errorf("unresolved operand %s", o.Ident)
 	}
 	return fmt.Errorf("operand %s is not a value", o)
-}
-
-func (s *sel) isFloatSlot(name string) bool {
-	return vir.IsFloat(s.types[name])
-}
-
-// valueFP loads an operand directly into a floating-point (SIMD) register.
-func (s *sel) valueFP(dst encoder.Reg, o vir.Operand, hint vir.Type) error {
-	if o.Kind == vir.OperandIdent && s.isFloatSlot(o.Ident) {
-		b, _ := s.bitsOf(hint)
-		w := encoder.W
-		if b == 64 {
-			w = encoder.X
-		}
-		s.emit(Inst{Op: "fldr", W: w, D: R(dst), M: Slot(o.Ident)})
-		return nil
-	}
-	// Fallback: Materialize bit pattern in GP register and FMOV to FP.
-	if err := s.value(RegA, o, hint); err != nil {
-		return err
-	}
-	b, _ := s.bitsOf(hint)
-	w := encoder.W
-	if b == 64 {
-		w = encoder.X
-	}
-	s.emit(Inst{Op: "fmov_g2f", W: w, D: R(dst), N: R(RegA)})
-	return nil
 }
 
 // constInt materializes an integer literal already truncated to its type's
@@ -334,19 +288,6 @@ func (s *sel) store(name string, r encoder.Reg) {
 	s.emit(Inst{Op: "str", D: R(r), M: Slot(name)})
 }
 
-// storeFP writes an FP scratch register back to a named value's slot.
-func (s *sel) storeFP(name string, r encoder.Reg, hint vir.Type) {
-	if name == "" {
-		return
-	}
-	b, _ := s.bitsOf(hint)
-	w := encoder.W
-	if b == 64 {
-		w = encoder.X
-	}
-	s.emit(Inst{Op: "fstr", W: w, D: R(r), M: Slot(name)})
-}
-
 // binary is the shape almost every two-operand instruction takes: load, run
 // the op at the value's width, restore the invariant, store.
 func (s *sel) binary(in *vir.Instruction, op string) error {
@@ -364,27 +305,6 @@ func (s *sel) binary(in *vir.Instruction, op string) error {
 	s.emit(Inst{Op: op, W: w, D: R(RegA), N: R(RegA), M: R(RegB)})
 	s.maskTo(RegA, b)
 	s.store(in.Result, RegA)
-	return nil
-}
-
-// binaryFP handles floating-point binary operations natively.
-func (s *sel) binaryFP(in *vir.Instruction, op string) error {
-	b, err := s.bitsOf(in.Suffix)
-	if err != nil {
-		return err
-	}
-	w := encoder.W
-	if b == 64 {
-		w = encoder.X
-	}
-	if err := s.valueFP(RegFA, in.Args[0], in.Suffix); err != nil {
-		return err
-	}
-	if err := s.valueFP(RegFB, in.Args[1], in.Suffix); err != nil {
-		return err
-	}
-	s.emit(Inst{Op: op, W: w, D: R(RegFA), N: R(RegFA), M: R(RegFB)})
-	s.storeFP(in.Result, RegFA, in.Suffix)
 	return nil
 }
 
@@ -443,19 +363,10 @@ func (s *sel) instruction(in *vir.Instruction) error {
 		return nil // no debug info yet
 
 	case vir.OpAdd:
-		if vir.IsFloat(in.Suffix) {
-			return s.binaryFP(in, "fadd")
-		}
 		return s.binary(in, "add")
 	case vir.OpSub:
-		if vir.IsFloat(in.Suffix) {
-			return s.binaryFP(in, "fsub")
-		}
 		return s.binary(in, "sub")
 	case vir.OpMul:
-		if vir.IsFloat(in.Suffix) {
-			return s.binaryFP(in, "fmul")
-		}
 		return s.binary(in, "mul")
 	case vir.OpAnd:
 		return s.binary(in, "and")
@@ -494,36 +405,24 @@ func (s *sel) instruction(in *vir.Instruction) error {
 	case vir.OpCttz:
 		return s.selCttz(in)
 	case vir.OpPopcnt:
-		return s.selPopcnt(in)
+		// A64's population count is CNT, a SIMD instruction on a V register.
+		// There is no GP form and the encoder has no FP/SIMD at all.
+		return todo("popcnt needs the SIMD cnt instruction")
 	case vir.OpBitrev:
 		return s.selBitrev(in)
 	case vir.OpBSwap:
 		return s.selBswap(in)
 
 	case vir.OpEq, vir.OpNe, vir.OpSlt, vir.OpSgt, vir.OpSle, vir.OpSge,
-		vir.OpUlt, vir.OpUgt, vir.OpUle, vir.OpUge,
-		vir.OpLt, vir.OpGt, vir.OpLe, vir.OpGe:
+		vir.OpUlt, vir.OpUgt, vir.OpUle, vir.OpUge:
 		return s.selCompare(in)
+	case vir.OpLt, vir.OpGt, vir.OpLe, vir.OpGe:
+		return todo("float comparison")
 
 	case vir.OpSMin, vir.OpSMax, vir.OpUMin, vir.OpUMax:
 		return s.selMinMax(in)
-
-	case vir.OpMin:
-		return s.binaryFP(in, "fmin")
-	case vir.OpMax:
-		return s.binaryFP(in, "fmax")
-	case vir.OpSqrt:
-		b, _ := s.bitsOf(in.Suffix)
-		w := encoder.W
-		if b == 64 {
-			w = encoder.X
-		}
-		if err := s.valueFP(RegFA, in.Args[0], in.Suffix); err != nil {
-			return err
-		}
-		s.emit(Inst{Op: "fsqrt", W: w, D: R(RegFA), N: R(RegFA)})
-		s.storeFP(in.Result, RegFA, in.Suffix)
-		return nil
+	case vir.OpMin, vir.OpMax:
+		return todo("float min/max")
 
 	case vir.OpSelect:
 		return s.selSelect(in)
@@ -541,13 +440,17 @@ func (s *sel) instruction(in *vir.Instruction) error {
 	case vir.OpMemcopy, vir.OpMemmove, vir.OpMemset:
 		return s.selBulk(in)
 
-	case vir.OpAtomicLoad, vir.OpAtomicStore, vir.OpAtomicAdd, vir.OpAtomicSub,
-		vir.OpAtomicAnd, vir.OpAtomicOr, vir.OpAtomicXor, vir.OpAtomicXchg,
-		vir.OpCmpxchg, vir.OpFence:
-		// See the encoder-dependency note in the README: isa/aarch64/encoder's
-		// switch has no ldxr/stxr/ldar/stlr/dmb, so there is nothing correct
-		// to emit. A non-atomic sequence would be silently wrong.
-		return todo("%s needs ldxr/stxr/ldar/stlr/dmb in the encoder", in.Op)
+	case vir.OpAtomicLoad:
+		return s.selAtomicLoad(in)
+	case vir.OpAtomicStore:
+		return s.selAtomicStore(in)
+	case vir.OpAtomicAdd, vir.OpAtomicSub, vir.OpAtomicAnd, vir.OpAtomicOr, vir.OpAtomicXor, vir.OpAtomicXchg:
+		return s.selAtomicRMW(in)
+	case vir.OpCmpxchg:
+		return s.selCmpxchg(in)
+	case vir.OpFence:
+		s.emit(Inst{Op: "dmb"})
+		return nil
 
 	case vir.OpTrunc:
 		return s.selTrunc(in)
@@ -557,75 +460,11 @@ func (s *sel) instruction(in *vir.Instruction) error {
 		return s.selSext(in)
 	case vir.OpBitcast:
 		return s.selBitcast(in)
+	case vir.OpFdemote, vir.OpFpromote, vir.OpSfromint, vir.OpUfromint,
+		vir.OpStoint, vir.OpUtoint, vir.OpStointSat, vir.OpUtointSat:
+		return todo("float conversion %s", in.Op)
 
-	case vir.OpSfromint, vir.OpUfromint:
-		if err := s.value(RegA, in.Args[0], nil); err != nil {
-			return err
-		}
-		op := "scvtf"
-		if in.Op == vir.OpUfromint {
-			op = "ucvtf"
-		}
-		srcB, _ := s.bitsOf(s.typeOfOperand(in.Args[0], vir.I64))
-		dstB, _ := s.bitsOf(in.Suffix)
-		srcW := encoder.W
-		if srcB == 64 {
-			srcW = encoder.X
-		}
-		dstW := encoder.W
-		if dstB == 64 {
-			dstW = encoder.X
-		}
-		dstTyp := int64(0)
-		if dstW == encoder.X {
-			dstTyp = 1
-		}
-		s.emit(Inst{Op: op, W: srcW, D: R(RegFA), N: R(RegA), Imm: dstTyp})
-		s.storeFP(in.Result, RegFA, in.Suffix)
-		return nil
-
-	case vir.OpStoint, vir.OpUtoint, vir.OpStointSat, vir.OpUtointSat:
-		srcType := s.typeOfOperand(in.Args[0], vir.F64)
-		srcB, _ := s.bitsOf(srcType)
-		dstB, _ := s.bitsOf(in.Suffix)
-		srcW := encoder.W
-		if srcB == 64 {
-			srcW = encoder.X
-		}
-		dstW := encoder.W
-		if dstB == 64 {
-			dstW = encoder.X
-		}
-		if err := s.valueFP(RegFA, in.Args[0], srcType); err != nil {
-			return err
-		}
-		op := "fcvtzs"
-		if in.Op == vir.OpUtoint || in.Op == vir.OpUtointSat {
-			op = "fcvtzu"
-		}
-		srcTyp := int64(0)
-		if srcW == encoder.X {
-			srcTyp = 1
-		}
-		s.emit(Inst{Op: op, W: dstW, D: R(RegA), N: R(RegFA), Imm: srcTyp})
-		s.maskTo(RegA, dstB)
-		s.store(in.Result, RegA)
-		return nil
-
-	case vir.OpFpromote, vir.OpFdemote:
-		srcType := s.typeOfOperand(in.Args[0], vir.F32)
-		if err := s.valueFP(RegFA, in.Args[0], srcType); err != nil {
-			return err
-		}
-		op := "fcvt_s2d"
-		if in.Op == vir.OpFdemote {
-			op = "fcvt_d2s"
-		}
-		s.emit(Inst{Op: op, D: R(RegFA), N: R(RegFA)})
-		s.storeFP(in.Result, RegFA, in.Suffix)
-		return nil
-
-	case vir.OpFma, vir.OpCopysign, vir.OpFloor, vir.OpCeil,
+	case vir.OpSqrt, vir.OpFma, vir.OpCopysign, vir.OpFloor, vir.OpCeil,
 		vir.OpTruncF, vir.OpNearest:
 		return todo("float intrinsic %s", in.Op)
 
@@ -768,6 +607,147 @@ func (s *sel) selSat(in *vir.Instruction) error {
 		s.emit(Inst{Op: "eor", W: w, D: R(RegA), N: R(RegA), M: R(RegD)})
 		// If VS (overflow), choose clamped value. Otherwise choose computed result in RegC.
 		s.emit(Inst{Op: "csel", W: w, D: R(RegA), N: R(RegA), M: R(RegC), CC: encoder.VS})
+	}
+	s.store(in.Result, RegA)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Atomics.
+// ---------------------------------------------------------------------------
+
+func (s *sel) selAtomicLoad(in *vir.Instruction) error {
+	if err := s.value(RegAddr, in.Args[0], vir.Ptr); err != nil {
+		return err
+	}
+	b, err := s.bitsOf(in.Suffix)
+	if err != nil {
+		return err
+	}
+	op := "ldar"
+	if b <= 8 {
+		op = "ldarb"
+	} else if b <= 16 {
+		op = "ldarh"
+	}
+	s.emit(Inst{Op: op, W: widthFor(b), D: R(RegA), M: Mem(RegAddr, 0)})
+	if b == 1 {
+		s.maskTo(RegA, 1)
+	}
+	s.store(in.Result, RegA)
+	return nil
+}
+
+func (s *sel) selAtomicStore(in *vir.Instruction) error {
+	if err := s.value(RegAddr, in.Args[0], vir.Ptr); err != nil {
+		return err
+	}
+	if err := s.value(RegA, in.Args[1], in.Suffix); err != nil {
+		return err
+	}
+	b, err := s.bitsOf(in.Suffix)
+	if err != nil {
+		return err
+	}
+	op := "stlr"
+	if b <= 8 {
+		op = "stlrb"
+	} else if b <= 16 {
+		op = "stlrh"
+	}
+	s.emit(Inst{Op: op, W: widthFor(b), D: R(RegA), M: Mem(RegAddr, 0)})
+	return nil
+}
+
+func (s *sel) selAtomicRMW(in *vir.Instruction) error {
+	if err := s.value(RegAddr, in.Args[0], vir.Ptr); err != nil {
+		return err
+	}
+	if err := s.value(RegB, in.Args[1], in.Suffix); err != nil {
+		return err
+	}
+	b, err := s.bitsOf(in.Suffix)
+	if err != nil {
+		return err
+	}
+	w := widthFor(b)
+
+	ldop, stop := "ldxr", "stxr"
+	if b <= 8 {
+		ldop, stop = "ldxrb", "stxrb"
+	} else if b <= 16 {
+		ldop, stop = "ldxrh", "stxrh"
+	}
+
+	loop := s.label()
+	s.mark(loop)
+	s.emit(Inst{Op: ldop, W: w, D: R(RegA), M: Mem(RegAddr, 0)})
+
+	var aluOp string
+	switch in.Op {
+	case vir.OpAtomicAdd:
+		aluOp = "add"
+	case vir.OpAtomicSub:
+		aluOp = "sub"
+	case vir.OpAtomicAnd:
+		aluOp = "and"
+	case vir.OpAtomicOr:
+		aluOp = "orr"
+	case vir.OpAtomicXor:
+		aluOp = "eor"
+	case vir.OpAtomicXchg:
+		s.emit(Inst{Op: stop, W: w, D: R(RegB), A: R(RegC), M: Mem(RegAddr, 0)})
+		s.emit(Inst{Op: "cbnz", W: encoder.W, D: R(RegC), Lbl: loop})
+		if b == 1 {
+			s.maskTo(RegA, 1)
+		}
+		s.store(in.Result, RegA)
+		return nil
+	}
+
+	s.emit(Inst{Op: aluOp, W: w, D: R(RegD), N: R(RegA), M: R(RegB)})
+	s.emit(Inst{Op: stop, W: w, D: R(RegD), A: R(RegC), M: Mem(RegAddr, 0)})
+	s.emit(Inst{Op: "cbnz", W: encoder.W, D: R(RegC), Lbl: loop})
+	if b == 1 {
+		s.maskTo(RegA, 1)
+	}
+	s.store(in.Result, RegA)
+	return nil
+}
+
+func (s *sel) selCmpxchg(in *vir.Instruction) error {
+	if err := s.value(RegAddr, in.Args[0], vir.Ptr); err != nil {
+		return err
+	}
+	if err := s.value(RegB, in.Args[1], in.Suffix); err != nil {
+		return err
+	} // expected
+	if err := s.value(RegAux, in.Args[2], in.Suffix); err != nil {
+		return err
+	} // desired
+	b, err := s.bitsOf(in.Suffix)
+	if err != nil {
+		return err
+	}
+	w := widthFor(b)
+
+	ldop, stop := "ldxr", "stxr"
+	if b <= 8 {
+		ldop, stop = "ldxrb", "stxrb"
+	} else if b <= 16 {
+		ldop, stop = "ldxrh", "stxrh"
+	}
+
+	loop, done := s.label(), s.label()
+	s.mark(loop)
+	s.emit(Inst{Op: ldop, W: w, D: R(RegA), M: Mem(RegAddr, 0)})
+	s.emit(Inst{Op: "cmp", W: w, N: R(RegA), M: R(RegB)})
+	s.emit(Inst{Op: "b.cond", CC: encoder.NE, Lbl: done})
+	s.emit(Inst{Op: stop, W: w, D: R(RegAux), A: R(RegC), M: Mem(RegAddr, 0)})
+	s.emit(Inst{Op: "cbnz", W: encoder.W, D: R(RegC), Lbl: loop})
+	s.mark(done)
+	if b == 1 {
+		s.maskTo(RegA, 1)
 	}
 	s.store(in.Result, RegA)
 	return nil
@@ -1151,92 +1131,12 @@ func (s *sel) selBswap(in *vir.Instruction) error {
 	return nil
 }
 
-// selPopcnt synthesizes the popcnt algorithm entirely natively in GP registers 
-// to avoid relying on standard FP paths since A64 lacks a GP-native `cnt`.
-func (s *sel) selPopcnt(in *vir.Instruction) error {
-	b, err := s.bitsOf(in.Suffix)
-	if err != nil {
-		return err
-	}
-	if err := s.value(RegA, in.Args[0], in.Suffix); err != nil {
-		return err
-	}
-	w := widthFor(b)
-
-	// x -= (x >> 1) & 0x5555555555555555
-	s.emit(Inst{Op: "lsr", W: w, D: R(RegB), N: R(RegA), M: Imm(1)})
-	s.movImm(RegC, 0x5555555555555555)
-	s.emit(Inst{Op: "and", W: w, D: R(RegB), N: R(RegB), M: R(RegC)})
-	s.emit(Inst{Op: "sub", W: w, D: R(RegA), N: R(RegA), M: R(RegB)})
-
-	// x = (x & 0x3333333333333333) + ((x >> 2) & 0x3333333333333333)
-	s.movImm(RegC, 0x3333333333333333)
-	s.emit(Inst{Op: "and", W: w, D: R(RegB), N: R(RegA), M: R(RegC)})
-	s.emit(Inst{Op: "lsr", W: w, D: R(RegA), N: R(RegA), M: Imm(2)})
-	s.emit(Inst{Op: "and", W: w, D: R(RegA), N: R(RegA), M: R(RegC)})
-	s.emit(Inst{Op: "add", W: w, D: R(RegA), N: R(RegA), M: R(RegB)})
-
-	// x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0f
-	s.emit(Inst{Op: "lsr", W: w, D: R(RegB), N: R(RegA), M: Imm(4)})
-	s.emit(Inst{Op: "add", W: w, D: R(RegA), N: R(RegA), M: R(RegB)})
-	s.movImm(RegC, 0x0f0f0f0f0f0f0f0f)
-	s.emit(Inst{Op: "and", W: w, D: R(RegA), N: R(RegA), M: R(RegC)})
-
-	// x = (x * 0x0101010101010101) >> 56
-	mult := uint64(0x0101010101010101)
-	shift := int64(56)
-	if b <= 32 {
-		mult = 0x01010101
-		shift = 24
-	}
-	s.movImm(RegC, mult)
-	s.emit(Inst{Op: "mul", W: w, D: R(RegA), N: R(RegA), M: R(RegC)})
-	s.emit(Inst{Op: "lsr", W: w, D: R(RegA), N: R(RegA), M: Imm(shift)})
-
-	s.maskTo(RegA, b)
-	s.store(in.Result, RegA)
-	return nil
-}
-
 // ---------------------------------------------------------------------------
 // Comparisons and selection.
 // ---------------------------------------------------------------------------
 
 func (s *sel) selCompare(in *vir.Instruction) error {
 	t := in.Suffix
-	if vir.IsFloat(t) {
-		b, _ := s.bitsOf(t)
-		w := encoder.W
-		if b == 64 {
-			w = encoder.X
-		}
-		if err := s.valueFP(RegFA, in.Args[0], t); err != nil {
-			return err
-		}
-		if err := s.valueFP(RegFB, in.Args[1], t); err != nil {
-			return err
-		}
-		s.emit(Inst{Op: "fcmp", W: w, N: R(RegFA), M: R(RegFB)})
-		var cc encoder.Cond
-		switch in.Op {
-		case vir.OpEq:
-			cc = encoder.EQ
-		case vir.OpNe:
-			cc = encoder.NE
-		case vir.OpLt:
-			cc = encoder.MI
-		case vir.OpGt:
-			cc = encoder.GT
-		case vir.OpLe:
-			cc = encoder.LS
-		case vir.OpGe:
-			cc = encoder.GE
-		}
-		s.emit(Inst{Op: "cset", D: R(RegA), CC: cc})
-		s.store(in.Result, RegA)
-		return nil
-	}
-
 	b := 64
 	if !vir.IsPtr(t) {
 		n, err := s.bitsOf(t)

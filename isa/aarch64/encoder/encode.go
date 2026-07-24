@@ -247,6 +247,47 @@ func (e *enc) one(in *Inst) error {
 	case "ldp", "stp":
 		return e.loadStorePair(in)
 
+	case "ldxr", "ldxrb", "ldxrh", "ldar", "ldarb", "ldarh",
+		"stxr", "stxrb", "stxrh", "stlr", "stlrb", "stlrh":
+		sz := uint32(2 + in.W.sf())
+		baseOp := in.Op
+		if in.Op[len(in.Op)-1] == 'b' {
+			sz = 0
+			baseOp = in.Op[:len(in.Op)-1]
+		} else if in.Op[len(in.Op)-1] == 'h' {
+			sz = 1
+			baseOp = in.Op[:len(in.Op)-1]
+		}
+		rt, err := rZR(in.D, "transfer")
+		if err != nil {
+			return err
+		}
+		rn, err := baseField(in.M)
+		if err != nil {
+			return err
+		}
+		var head uint32
+		switch baseOp {
+		case "ldxr":
+			head = 0x085F7C00
+		case "stxr":
+			rs, err := rZR(in.A, "status")
+			if err != nil {
+				return err
+			}
+			head = 0x08007C00 | rs<<16
+		case "ldar":
+			head = 0x08DFFC00
+		case "stlr":
+			head = 0x089FFC00
+		}
+		e.word(sz<<30 | head | rn<<5 | rt)
+		return nil
+
+	case "dmb":
+		e.word(0xD5033BBF) // dmb ish
+		return nil
+
 	case "adr", "adrp":
 		return e.adr(in)
 
@@ -946,7 +987,7 @@ func (e *enc) loadStore(in *Inst) error {
 	if err != nil {
 		return err
 	}
-	
+
 	vBit := uint32(0)
 	if isFloat {
 		vBit = 1 << 26
