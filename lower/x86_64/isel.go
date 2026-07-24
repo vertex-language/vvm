@@ -13,7 +13,7 @@ func errBadModule(format string, a ...any) error { return fmt.Errorf(format, a..
 // lowerFunc runs type fixation, frame layout, then per-block instruction
 // selection, and finally prologue/epilogue + encoding (encode.go).
 func lowerFunc(m *vir.Module, ix *index, f *vir.Function) (Func, error) {
-	l := newLayout(ix)
+	l := newLayout(ix, m.Target.OS)
 
 	types, order, err := typeFunc(l, f)
 	if err != nil {

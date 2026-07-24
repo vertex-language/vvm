@@ -65,7 +65,19 @@ func (s *sel) selCall(in *vir.Instruction) error {
 			}
 		}
 	}
-	if variadic {
+	if variadic && s.os != "windows" {
+		// AL/RAX = number of vector registers used is a SysV-only signal
+		// (needed because varargs printf-family functions there use it to
+		// know whether to bother reading %xmm0-7). The Windows convention
+		// has no equivalent register-count hint at all; emitting one is
+		// harmless in the sense that it doesn't corrupt anything the
+		// callee reads, but it's meaningless there, so skip it rather
+		// than emit a misleading instruction. (In practice this is also
+		// currently unreachable for Windows: BuildFrame in frame.go
+		// already rejects a variadic function on a windows target before
+		// lowering gets this far — this guard covers the call *site*
+		// calling an externally-declared variadic function, which isn't
+		// blocked the same way.)
 		s.emit(Inst{Op: "mov", D: R(RRAX), S: Imm(int64(xmmCount)), Sz: 8})
 	}
 
@@ -171,13 +183,18 @@ func (s *sel) selTailCall(x vir.TailCall) error {
 		return nil
 	}
 	// Indirect tailcall via fnsig; first arg is the function pointer.
+	// regs is OS-aware (callconv.go's intArgRegs) so this matches whatever
+	// convention s.l.PlanCall used for every other call in this function —
+	// previously this branch hardcoded the SysV IntArgRegs list directly,
+	// which disagreed with a Windows target's four-register convention.
 	s.loadOperand(x.Args[0], RR11)
+	regs := intArgRegs(s.os)
 	for i, a := range x.Args[1:] {
-		if i < len(IntArgRegs) {
+		if i < len(regs) {
 			if vir.IsFloat(s.operandType(a)) {
-				s.loadFloatOperand(a, IntArgRegs[i], s.operandType(a))
+				s.loadFloatOperand(a, regs[i], s.operandType(a))
 			} else {
-				s.loadOperand(a, IntArgRegs[i])
+				s.loadOperand(a, regs[i])
 			}
 		} else {
 			return todo("indirect tailcall with stack arguments")

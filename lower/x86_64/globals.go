@@ -13,7 +13,7 @@ import (
 // relocated pointer (`addr ident`) becomes a full-width abs64 relocation —
 // the only 64-bit-wide relocation a data section needs here.
 func lowerGlobal(m *vir.Module, g *vir.Global) (Global, error) {
-	l := newLayout(newIndex(m))
+	l := newLayout(newIndex(m), m.Target.OS)
 	size, err := l.Size(g.Type)
 	if err != nil {
 		return Global{}, err

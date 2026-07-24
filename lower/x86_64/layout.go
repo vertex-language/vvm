@@ -7,11 +7,16 @@ import (
 	"github.com/vertex-language/vvm/ir/vir"
 )
 
-// Layout sizes and aligns types under the x86-64 System V psABI. Unlike the
-// IA-32 backend there is NO 4-byte alignment cap: i64/f64/ptr are 8-byte
-// aligned, and a struct's alignment is its largest field's.
+// Layout sizes and aligns types under the target's ABI. Sizing/alignment
+// rules (this file) are identical between System V AMD64 and Microsoft
+// x64 — both use LP64-style 8-byte pointers/i64/f64 with no 4-byte
+// alignment cap — so OS only matters to the argument-placement logic in
+// callconv.go, not to anything below. There is NO 4-byte alignment cap
+// the way the IA-32 backend has: i64/f64/ptr are 8-byte aligned, and a
+// struct's alignment is its largest field's, on both target OSes.
 type Layout struct {
 	ix    *index
+	OS    string // "linux", "windows", "macos", ... — drives callconv.go only
 	cache map[string]structInfo // memoized per struct name; doubles as cycle guard
 	busy  map[string]bool
 }
@@ -22,8 +27,8 @@ type structInfo struct {
 	offsets []int64 // one per field, in declaration order
 }
 
-func newLayout(ix *index) *Layout {
-	return &Layout{ix: ix, cache: map[string]structInfo{}, busy: map[string]bool{}}
+func newLayout(ix *index, os string) *Layout {
+	return &Layout{ix: ix, OS: os, cache: map[string]structInfo{}, busy: map[string]bool{}}
 }
 
 func (l *Layout) Size(t vir.Type) (int64, error) {
