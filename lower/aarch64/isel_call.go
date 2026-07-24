@@ -72,7 +72,10 @@ func (s *sel) selCall(in *vir.Instruction) error {
 				return err
 			}
 			b, _ := s.bitsOf(descs[i].Type)
-			w := encoder.W; if b == 64 { w = encoder.X }
+			w := encoder.W
+			if b == 64 {
+				w = encoder.X
+			}
 			s.emit(Inst{Op: "fstr", W: w, D: R(RegFA), M: Mem(encoder.SPr, int64(slot.Off))})
 		} else {
 			if err := s.value(RegA, args[i], descs[i].Type); err != nil {

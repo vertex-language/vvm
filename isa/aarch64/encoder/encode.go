@@ -241,7 +241,7 @@ func (e *enc) one(in *Inst) error {
 		return e.dataProc3(in)
 
 	case "ldr", "str", "ldrb", "strb", "ldrh", "strh",
-		"ldrsb", "ldrsh", "ldrsw":
+		"ldrsb", "ldrsh", "ldrsw", "fldr", "fstr":
 		return e.loadStore(in)
 
 	case "ldp", "stp":
@@ -282,7 +282,103 @@ func (e *enc) one(in *Inst) error {
 		if in.Op == "brk" {
 			base = 0xD4200000
 		}
-		e.word(base | uint32(in.Imm)<<5|bit(in.Op == "svc"))
+		e.word(base | uint32(in.Imm)<<5 | bit(in.Op == "svc"))
+		return nil
+
+	case "fadd", "fsub", "fmul", "fdiv", "fmin", "fmax":
+		rd, _ := rZR(in.D, "destination")
+		rn, _ := rZR(in.N, "first source")
+		rm, _ := rZR(in.M, "second source")
+		opc := uint32(0)
+		switch in.Op {
+		case "fmul":
+			opc = 0x0
+		case "fdiv":
+			opc = 0x1
+		case "fadd":
+			opc = 0x2
+		case "fsub":
+			opc = 0x3
+		case "fmin":
+			opc = 0x4
+		case "fmax":
+			opc = 0x5
+		}
+		typ := uint32(0)
+		if in.W == X {
+			typ = 1
+		}
+		e.word(0x1E200800 | typ<<22 | rm<<16 | opc<<12 | rn<<5 | rd)
+		return nil
+
+	case "fcmp":
+		rn, _ := rZR(in.N, "first source")
+		rm, _ := rZR(in.M, "second source")
+		typ := uint32(0)
+		if in.W == X {
+			typ = 1
+		}
+		e.word(0x1E202000 | typ<<22 | rm<<16 | rn<<5)
+		return nil
+
+	case "fsqrt":
+		rd, _ := rZR(in.D, "destination")
+		rn, _ := rZR(in.N, "source")
+		typ := uint32(0)
+		if in.W == X {
+			typ = 1
+		}
+		e.word(0x1E21C000 | typ<<22 | rn<<5 | rd)
+		return nil
+
+	case "fmov_g2f":
+		sf := in.W.sf()
+		rd, _ := rZR(in.D, "destination")
+		rn, _ := rZR(in.N, "source")
+		e.word(0x1E270000 | sf<<31 | rn<<5 | rd)
+		return nil
+
+	case "fmov_f2g":
+		sf := in.W.sf()
+		rd, _ := rZR(in.D, "destination")
+		rn, _ := rZR(in.N, "source")
+		e.word(0x1E260000 | sf<<31 | rn<<5 | rd)
+		return nil
+
+	case "scvtf", "ucvtf":
+		sf := in.W.sf()
+		typ := uint32(in.Imm) & 1
+		rd, _ := rZR(in.D, "destination")
+		rn, _ := rZR(in.N, "source")
+		opc := uint32(2)
+		if in.Op == "ucvtf" {
+			opc = 3
+		}
+		e.word(0x1E200000 | sf<<31 | typ<<22 | opc<<16 | rn<<5 | rd)
+		return nil
+
+	case "fcvtzs", "fcvtzu":
+		sf := in.W.sf()
+		typ := uint32(in.Imm) & 1
+		rd, _ := rZR(in.D, "destination")
+		rn, _ := rZR(in.N, "source")
+		opc := uint32(0)
+		if in.Op == "fcvtzu" {
+			opc = 1
+		}
+		e.word(0x1E380000 | sf<<31 | typ<<22 | opc<<16 | rn<<5 | rd)
+		return nil
+
+	case "fcvt_s2d":
+		rd, _ := rZR(in.D, "destination")
+		rn, _ := rZR(in.N, "source")
+		e.word(0x1E22C000 | rn<<5 | rd)
+		return nil
+
+	case "fcvt_d2s":
+		rd, _ := rZR(in.D, "destination")
+		rn, _ := rZR(in.N, "source")
+		e.word(0x1E624000 | rn<<5 | rd)
 		return nil
 
 	case "nop":
@@ -825,7 +921,16 @@ func lo12FixupFor(size uint32) FixupKind {
 }
 
 func (e *enc) loadStore(in *Inst) error {
-	sh, err := shapeOf(in.Op, in.W)
+	isFloat := in.Op == "fldr" || in.Op == "fstr"
+	baseOp := in.Op
+	if isFloat {
+		if in.Op == "fldr" {
+			baseOp = "ldr"
+		} else {
+			baseOp = "str"
+		}
+	}
+	sh, err := shapeOf(baseOp, in.W)
 	if err != nil {
 		return err
 	}
@@ -841,7 +946,12 @@ func (e *enc) loadStore(in *Inst) error {
 	if err != nil {
 		return err
 	}
-	head := sh.size<<30 | sh.opc<<22 | rn<<5 | rt
+	
+	vBit := uint32(0)
+	if isFloat {
+		vBit = 1 << 26
+	}
+	head := sh.size<<30 | vBit | sh.opc<<22 | rn<<5 | rt
 
 	// Register offset: size 111000 opc 1 Rm option S 10 Rn Rt.
 	if m.Index != RNone {
