@@ -585,11 +585,11 @@ func (s *sel) selSat(in *vir.Instruction) error {
 	case vir.OpUAddSat:
 		// Unsigned add overflow = CS. csinv yields RegA if CC, or ~ZR (UINT64_MAX) if CS.
 		s.emit(Inst{Op: "adds", W: w, D: R(RegA), N: R(RegA), M: R(RegB)})
-		s.emit(Inst{Op: "csinv", W: w, D: R(RegA), N: R(RegA), M: R(ZR), CC: encoder.CC})
+		s.emit(Inst{Op: "csinv", W: w, D: R(RegA), N: R(RegA), M: R(encoder.ZR), CC: encoder.CC})
 	case vir.OpUSubSat:
 		// Unsigned sub underflow = CC. csel yields RegA if CS, or ZR (0) if CC.
 		s.emit(Inst{Op: "subs", W: w, D: R(RegA), N: R(RegA), M: R(RegB)})
-		s.emit(Inst{Op: "csel", W: w, D: R(RegA), N: R(RegA), M: R(ZR), CC: encoder.CS})
+		s.emit(Inst{Op: "csel", W: w, D: R(RegA), N: R(RegA), M: R(encoder.ZR), CC: encoder.CS})
 	case vir.OpSAddSat, vir.OpSSubSat:
 		op := "adds"
 		if in.Op == vir.OpSSubSat {
@@ -950,7 +950,7 @@ func (s *sel) selBitrev(in *vir.Instruction) error {
 	if w == encoder.X {
 		hostBits = 64
 	}
-	s.emit(Inst{Op: "rbit", W: w, D: R(RegA), N: R(RegA)})
+	s.emit(Inst{Op: "rbit", W: w, D: R(RegA), N: R(RegA), M: R(RegA)})
 	if hostBits != b {
 		s.emit(Inst{Op: "lsr", W: w, D: R(RegA), N: R(RegA), M: Imm(int64(hostBits - b))})
 	}
