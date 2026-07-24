@@ -31,10 +31,16 @@ func (s *sel) selCall(in *vir.Instruction) error {
 	// args, so a value read from a slot into rdi isn't overwritten early.
 	for i, a := range args {
 		sl := plan.Slots[i]
+		
+		outOff := sl.StackOff
+		if s.os == "windows" {
+			outOff += windowsShadowSpace
+		}
+		
 		if sl.Class == classMemory {
 			// byval struct argument (MEMORY-class copy)
 			s.loadOperand(a, RRSI)
-			s.emit(Inst{Op: "lea", D: R(RRDI), S: Mem(RRSP, int32(sl.StackOff))})
+			s.emit(Inst{Op: "lea", D: R(RRDI), S: Mem(RRSP, int32(outOff))})
 			s.emit(Inst{Op: "mov", D: R(RRCX), S: Imm(sl.Bytes), Sz: 8})
 			s.emit(Inst{Op: "cld"})
 			s.emit(Inst{Op: "rep_movsb"})
@@ -46,7 +52,7 @@ func (s *sel) selCall(in *vir.Instruction) error {
 			} else {
 				s.loadOperand(a, RRAX)
 			}
-			s.emit(Inst{Op: "mov", D: Mem(RRSP, int32(sl.StackOff)), S: R(RRAX), Sz: 8})
+			s.emit(Inst{Op: "mov", D: Mem(RRSP, int32(outOff)), S: R(RRAX), Sz: 8})
 		}
 	}
 

@@ -175,17 +175,16 @@ func (l *Layout) LayoutArgs(params []vir.Param, nArgs int) (ArgPlan, error) {
 // PlanCall lays out one call's outgoing arguments and returns the plan plus
 // the stack reservation a caller should `sub rsp, n` before the call and
 // `add rsp, n` after, leaving rsp's alignment unchanged. Under the Windows
-// convention this is clamped up to windowsShadowSpace even when
-// plan.StackBytes is 0 — a ≤4-argument, all-register Windows call still
-// must reserve the 32-byte shadow space; SysV has no such minimum.
+// convention this includes the 32-byte shadow space below any stack arguments.
 func (l *Layout) PlanCall(params []vir.Param, nArgs int) (ArgPlan, int64, error) {
 	plan, err := l.LayoutArgs(params, nArgs)
 	if err != nil {
 		return plan, 0, err
 	}
-	reserve := roundUp(plan.StackBytes, StackAlign)
-	if l.OS == "windows" && reserve < windowsShadowSpace {
-		reserve = windowsShadowSpace
+	reserve := plan.StackBytes
+	if l.OS == "windows" {
+		reserve += windowsShadowSpace
 	}
+	reserve = roundUp(reserve, StackAlign)
 	return plan, reserve, nil
 }
