@@ -14,12 +14,10 @@ import "github.com/vertex-language/vvm/ir/vir"
 
 func init() {
 	register(testCase{
-		name:       "const_used_as_operand",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(arch, osName string) *vir.Module {
+		name: "const_used_as_operand",
+		build: func() *vir.Module {
 			m := vir.NewModule("const_operand")
-			m.SetTarget(arch, osName, abiFor(osName))
+			m.SetTarget(arch, osName, abiFor())
 			m.DeclareConstant("Five", vir.I32, vir.IntLiteral(5))
 			m.DeclareLink(vir.LinkShared, "c")
 
@@ -40,12 +38,10 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "global_store_load_roundtrip",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(arch, osName string) *vir.Module {
+		name: "global_store_load_roundtrip",
+		build: func() *vir.Module {
 			m := vir.NewModule("global_roundtrip")
-			m.SetTarget(arch, osName, abiFor(osName))
+			m.SetTarget(arch, osName, abiFor())
 			counter := m.DeclareGlobal("counter", vir.I32, vir.InitLiteral{Value: vir.IntLiteral(0)})
 			m.DeclareLink(vir.LinkShared, "c")
 
@@ -75,12 +71,10 @@ func init() {
 	// distinct from global_store_load_roundtrip, which only reads back a
 	// value this test's own function wrote.
 	register(testCase{
-		name:       "global_zero_init_reads_as_zero",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(arch, osName string) *vir.Module {
+		name: "global_zero_init_reads_as_zero",
+		build: func() *vir.Module {
 			m := vir.NewModule("global_zero_init")
-			m.SetTarget(arch, osName, abiFor(osName))
+			m.SetTarget(arch, osName, abiFor())
 			g := m.DeclareGlobal("zeroed", vir.I32, vir.InitZero{})
 			m.DeclareLink(vir.LinkShared, "c")
 
@@ -105,12 +99,10 @@ func init() {
 	// point at an earlier global, dereferenced through that relocation
 	// rather than through the pointee's own name.
 	register(testCase{
-		name:       "global_addr_of_another_global",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(arch, osName string) *vir.Module {
+		name: "global_addr_of_another_global",
+		build: func() *vir.Module {
 			m := vir.NewModule("global_addr_of")
-			m.SetTarget(arch, osName, abiFor(osName))
+			m.SetTarget(arch, osName, abiFor())
 			pointee := m.DeclareGlobal("pointee", vir.I32, vir.InitLiteral{Value: vir.IntLiteral(55)})
 			ptrG := m.DeclareGlobal("ptr_to_pointee", vir.Ptr, vir.InitAddressOf{Name: pointee.Name})
 			m.DeclareLink(vir.LinkShared, "c")
@@ -137,12 +129,10 @@ func init() {
 	// confirm each element landed at its own offset rather than all
 	// collapsing to the first.
 	register(testCase{
-		name:       "global_aggregate_init_array",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(arch, osName string) *vir.Module {
+		name: "global_aggregate_init_array",
+		build: func() *vir.Module {
 			m := vir.NewModule("global_aggregate_init")
-			m.SetTarget(arch, osName, abiFor(osName))
+			m.SetTarget(arch, osName, abiFor())
 			arr := m.DeclareGlobal("arr", vir.ArrayType{Elem: vir.I32, Len: 3}, vir.InitAggregate{
 				Elems: []vir.ConstInit{
 					vir.InitLiteral{Value: vir.IntLiteral(10)},

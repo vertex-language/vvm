@@ -29,11 +29,9 @@ import "github.com/vertex-language/vvm/ir/vir"
 
 func init() {
 	register(testCase{
-		name:       "atomic_store_load_roundtrip",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("atomic_roundtrip", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "atomic_store_load_roundtrip",
+		build: func() *vir.Module {
+			return i32PrintingModule("atomic_roundtrip", func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Emit("", vir.OpAtomicStore, vir.I32, slot, vir.IntLiteral(456), vir.OrderingOperand("seqcst"))
 				return fb.Emit("v", vir.OpAtomicLoad, vir.I32, slot, vir.OrderingOperand("seqcst"))
@@ -43,11 +41,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "atomic_add_updates_memory",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("atomic_add", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "atomic_add_updates_memory",
+		build: func() *vir.Module {
+			return i32PrintingModule("atomic_add", func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(10))
 				fb.Emit("old", vir.OpAtomicAdd, vir.I32, slot, vir.IntLiteral(5), vir.OrderingOperand("seqcst"))
@@ -58,11 +54,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "atomic_sub_updates_memory",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("atomic_sub", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "atomic_sub_updates_memory",
+		build: func() *vir.Module {
+			return i32PrintingModule("atomic_sub", func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(10))
 				fb.Emit("old", vir.OpAtomicSub, vir.I32, slot, vir.IntLiteral(3), vir.OrderingOperand("seqcst"))
@@ -73,11 +67,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "atomic_and_updates_memory",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("atomic_and", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "atomic_and_updates_memory",
+		build: func() *vir.Module {
+			return i32PrintingModule("atomic_and", func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(0b1100))
 				fb.Emit("old", vir.OpAtomicAnd, vir.I32, slot, vir.IntLiteral(0b1010), vir.OrderingOperand("seqcst"))
@@ -88,11 +80,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "atomic_or_updates_memory",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("atomic_or", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "atomic_or_updates_memory",
+		build: func() *vir.Module {
+			return i32PrintingModule("atomic_or", func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(0b1100))
 				fb.Emit("old", vir.OpAtomicOr, vir.I32, slot, vir.IntLiteral(0b0010), vir.OrderingOperand("seqcst"))
@@ -103,11 +93,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "atomic_xor_updates_memory",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("atomic_xor", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "atomic_xor_updates_memory",
+		build: func() *vir.Module {
+			return i32PrintingModule("atomic_xor", func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(0b1100))
 				fb.Emit("old", vir.OpAtomicXor, vir.I32, slot, vir.IntLiteral(0b1010), vir.OrderingOperand("seqcst"))
@@ -118,11 +106,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "atomic_xchg_updates_memory",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("atomic_xchg", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "atomic_xchg_updates_memory",
+		build: func() *vir.Module {
+			return i32PrintingModule("atomic_xchg", func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(10))
 				fb.Emit("old", vir.OpAtomicXchg, vir.I32, slot, vir.IntLiteral(99), vir.OrderingOperand("seqcst"))
@@ -135,11 +121,9 @@ func init() {
 	// cmpxchg success: expected matches what's in memory, so the swap to
 	// desired actually happens.
 	register(testCase{
-		name:       "cmpxchg_success_swaps_memory",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("cmpxchg_success", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "cmpxchg_success_swaps_memory",
+		build: func() *vir.Module {
+			return i32PrintingModule("cmpxchg_success", func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(10))
 				fb.EmitInstruction(vir.Instruction{
@@ -160,11 +144,9 @@ func init() {
 	// cmpxchg failure: expected does NOT match what's in memory, so the
 	// swap is skipped and the original value survives untouched.
 	register(testCase{
-		name:       "cmpxchg_failure_leaves_memory_unchanged",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("cmpxchg_failure", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "cmpxchg_failure_leaves_memory_unchanged",
+		build: func() *vir.Module {
+			return i32PrintingModule("cmpxchg_failure", func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, slot, vir.IntLiteral(10))
 				fb.EmitInstruction(vir.Instruction{
@@ -186,11 +168,9 @@ func init() {
 	// this only confirms it's legal to emit between two atomic ops without
 	// disrupting the sequence around it.
 	register(testCase{
-		name:       "atomic_fence_does_not_disrupt_sequence",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("atomic_fence", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "atomic_fence_does_not_disrupt_sequence",
+		build: func() *vir.Module {
+			return i32PrintingModule("atomic_fence", func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0)
 				fb.Emit("", vir.OpAtomicStore, vir.I32, slot, vir.IntLiteral(5), vir.OrderingOperand("seqcst"))
 				fb.Emit("", vir.OpFence, nil, vir.OrderingOperand("seqcst"))

@@ -12,11 +12,9 @@ import "github.com/vertex-language/vvm/ir/vir"
 
 func init() {
 	register(testCase{
-		name:       "alloca_store_load_roundtrip",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("alloca_roundtrip", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "alloca_store_load_roundtrip",
+		build: func() *vir.Module {
+			return i32PrintingModule("alloca_roundtrip", func(fb *vir.FunctionBuilder) vir.Operand {
 				slot := fb.Alloca("slot", vir.IntLiteral(4), 0) // 4 bytes for one i32
 				fb.Store(vir.I32, slot, vir.IntLiteral(456))
 				return fb.Load("v", vir.I32, slot)
@@ -29,11 +27,9 @@ func init() {
 	// p + i*sizeof(T) for two different indices and confirms the one
 	// actually read back is the one that was stored there, not index 0.
 	register(testCase{
-		name:       "array_index_store_load",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("array_index", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "array_index_store_load",
+		build: func() *vir.Module {
+			return i32PrintingModule("array_index", func(fb *vir.FunctionBuilder) vir.Operand {
 				base := fb.Alloca("base", vir.IntLiteral(16), 0) // array[i32, 4]: 4 * 4 bytes
 				p0 := fb.IndexPointer("p0", base, vir.I32, vir.IntLiteral(0))
 				p2 := fb.IndexPointer("p2", base, vir.I32, vir.IntLiteral(2))
@@ -50,12 +46,10 @@ func init() {
 	// own field.ptr, then load one field back to confirm the offset
 	// computation landed on the right member, not always field zero.
 	register(testCase{
-		name:       "struct_field_store_load",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(arch, osName string) *vir.Module {
+		name: "struct_field_store_load",
+		build: func() *vir.Module {
 			m := vir.NewModule("struct_field")
-			m.SetTarget(arch, osName, abiFor(osName))
+			m.SetTarget(arch, osName, abiFor())
 			m.DeclareStruct("Point", vir.Field{Name: "x", Type: vir.I32}, vir.Field{Name: "y", Type: vir.I32})
 			m.DeclareLink(vir.LinkShared, "c")
 
@@ -81,11 +75,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "memory_memcopy_roundtrip",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("memory_memcopy", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "memory_memcopy_roundtrip",
+		build: func() *vir.Module {
+			return i32PrintingModule("memory_memcopy", func(fb *vir.FunctionBuilder) vir.Operand {
 				src := fb.Alloca("src", vir.IntLiteral(4), 0)
 				dst := fb.Alloca("dst", vir.IntLiteral(4), 0)
 				fb.Store(vir.I32, src, vir.IntLiteral(999))
@@ -97,11 +89,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "memory_memset_fills_byte",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("memory_memset", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "memory_memset_fills_byte",
+		build: func() *vir.Module {
+			return i32PrintingModule("memory_memset", func(fb *vir.FunctionBuilder) vir.Operand {
 				dst := fb.Alloca("dst", vir.IntLiteral(4), 0)
 				fb.Emit("", vir.OpMemset, nil, dst, vir.IntLiteral(7), vir.IntLiteral(4))
 				return fb.Load("v", vir.I32, dst) // 0x07070707
@@ -120,11 +110,9 @@ func init() {
 	// 2 — this case reads back element 0 to confirm the shift landed
 	// correctly rather than corrupting through the overlap.
 	register(testCase{
-		name:       "memory_memmove_overlapping_shift",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("memory_memmove", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "memory_memmove_overlapping_shift",
+		build: func() *vir.Module {
+			return i32PrintingModule("memory_memmove", func(fb *vir.FunctionBuilder) vir.Operand {
 				base := fb.Alloca("base", vir.IntLiteral(16), 0) // array[i32, 4]
 				p0 := fb.IndexPointer("p0", base, vir.I32, vir.IntLiteral(0))
 				p1 := fb.IndexPointer("p1", base, vir.I32, vir.IntLiteral(1))

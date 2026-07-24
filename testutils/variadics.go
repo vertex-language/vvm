@@ -3,13 +3,10 @@ package main
 
 import "github.com/vertex-language/vvm/ir/vir"
 
-// va_start / va_arg / va_end (ir.md §4.4). Previously untested despite
-// builder.go having dedicated VaStart/VaArg/VaEnd methods and §4.4 devoting
-// a whole subsection to the mechanism (self-referential fnsig token,
-// linear-use constraint, the "no other way to name variadic arguments"
-// rule). These cases exercise the ordinary path: a variadic function that
-// sums its trailing i32 arguments, called with both a non-empty and an 
-// empty (count=0) argument list.
+// va_start / va_arg / va_end (ir.md §4.4). These cases exercise the
+// ordinary path: a variadic function that sums its trailing i32
+// arguments, called with both a non-empty and an empty (count=0)
+// argument list.
 //
 // Deliberately not covered here: tailcall-into-variadic-with-live-valist
 // rejection, va_arg over-read (UB), and re-va_start-without-va_end
@@ -19,12 +16,10 @@ import "github.com/vertex-language/vvm/ir/vir"
 
 func init() {
 	register(testCase{
-		name:       "variadic_sum_i32_args",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(arch, osName string) *vir.Module {
+		name: "variadic_sum_i32_args",
+		build: func() *vir.Module {
 			m := vir.NewModule("variadic_sum")
-			m.SetTarget(arch, osName, abiFor(osName))
+			m.SetTarget(arch, osName, abiFor())
 			m.DeclareLink(vir.LinkShared, "c")
 
 			data := append([]byte("%d"), 0)
@@ -52,7 +47,7 @@ func init() {
 			arg1 := sumFn.VaArg("arg1", vir.I32, vir.Ident("va"))
 			cur1 := sumFn.Load("cur1", vir.I32, sumPtr)
 			sumFn.Store(vir.I32, sumPtr, sumFn.Add("add1", vir.I32, cur1, arg1))
-			
+
 			cond2 := sumFn.Emit("cond2", vir.OpSgt, vir.I32, vir.Ident("count"), vir.IntLiteral(1))
 			sumFn.BranchIf(cond2, "read2", "done")
 
@@ -87,12 +82,10 @@ func init() {
 
 	// count=0: the trivial path where the reads never execute at all
 	register(testCase{
-		name:       "variadic_sum_zero_args",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(arch, osName string) *vir.Module {
+		name: "variadic_sum_zero_args",
+		build: func() *vir.Module {
 			m := vir.NewModule("variadic_sum_zero")
-			m.SetTarget(arch, osName, abiFor(osName))
+			m.SetTarget(arch, osName, abiFor())
 			m.DeclareLink(vir.LinkShared, "c")
 
 			data := append([]byte("%d"), 0)
@@ -117,7 +110,7 @@ func init() {
 			arg1 := sumFn.VaArg("arg1", vir.I32, vir.Ident("va"))
 			cur1 := sumFn.Load("cur1", vir.I32, sumPtr)
 			sumFn.Store(vir.I32, sumPtr, sumFn.Add("add1", vir.I32, cur1, arg1))
-			
+
 			cond2 := sumFn.Emit("cond2", vir.OpSgt, vir.I32, vir.Ident("count"), vir.IntLiteral(1))
 			sumFn.BranchIf(cond2, "read2", "done")
 

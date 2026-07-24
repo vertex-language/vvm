@@ -11,11 +11,9 @@ import "github.com/vertex-language/vvm/ir/vir"
 
 func init() {
 	register(testCase{
-		name:       "br_unconditional",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("br_unconditional", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "br_unconditional",
+		build: func() *vir.Module {
+			return i32PrintingModule("br_unconditional", func(fb *vir.FunctionBuilder) vir.Operand {
 				v := identity(fb, "v", vir.I32, vir.IntLiteral(7))
 				fb.Branch("cont")
 				fb.Label("cont")
@@ -26,11 +24,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "br_if_true_takes_then",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("br_if_true", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "br_if_true_takes_then",
+		build: func() *vir.Module {
+			return i32PrintingModule("br_if_true", func(fb *vir.FunctionBuilder) vir.Operand {
 				fb.BranchIf(vir.BoolLiteral(true), "then", "else")
 
 				fb.Label("then")
@@ -49,11 +45,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "br_if_false_takes_else",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("br_if_false", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "br_if_false_takes_else",
+		build: func() *vir.Module {
+			return i32PrintingModule("br_if_false", func(fb *vir.FunctionBuilder) vir.Operand {
 				fb.BranchIf(vir.BoolLiteral(false), "then", "else")
 
 				fb.Label("then")
@@ -72,11 +66,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "switch_matches_case",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("switch_match", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "switch_matches_case",
+		build: func() *vir.Module {
+			return i32PrintingModule("switch_match", func(fb *vir.FunctionBuilder) vir.Operand {
 				x := identity(fb, "x", vir.I32, vir.IntLiteral(2))
 				fb.Switch(x, "default",
 					vir.SwitchCase{Value: 1, Label: "case1"},
@@ -103,11 +95,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "switch_falls_to_default",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("switch_default", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "switch_falls_to_default",
+		build: func() *vir.Module {
+			return i32PrintingModule("switch_default", func(fb *vir.FunctionBuilder) vir.Operand {
 				x := identity(fb, "x", vir.I32, vir.IntLiteral(99))
 				fb.Switch(x, "default",
 					vir.SwitchCase{Value: 1, Label: "case1"},
@@ -134,11 +124,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "select_true_branch",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("select_true", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "select_true_branch",
+		build: func() *vir.Module {
+			return i32PrintingModule("select_true", func(fb *vir.FunctionBuilder) vir.Operand {
 				cond := fb.Emit("cond", vir.OpSlt, vir.I32, vir.IntLiteral(3), vir.IntLiteral(5))
 				return fb.Emit("v", vir.OpSelect, vir.I32, cond, vir.IntLiteral(10), vir.IntLiteral(20))
 			})
@@ -147,11 +135,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "select_false_branch",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("select_false", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "select_false_branch",
+		build: func() *vir.Module {
+			return i32PrintingModule("select_false", func(fb *vir.FunctionBuilder) vir.Operand {
 				cond := fb.Emit("cond", vir.OpSgt, vir.I32, vir.IntLiteral(3), vir.IntLiteral(5))
 				return fb.Emit("v", vir.OpSelect, vir.I32, cond, vir.IntLiteral(10), vir.IntLiteral(20))
 			})
@@ -160,11 +146,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "loop_sum_1_to_5",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("loop_sum", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "loop_sum_1_to_5",
+		build: func() *vir.Module {
+			return i32PrintingModule("loop_sum", func(fb *vir.FunctionBuilder) vir.Operand {
 				identity(fb, "i", vir.I32, vir.IntLiteral(1))
 				identity(fb, "sum", vir.I32, vir.IntLiteral(0))
 				fb.Branch("loop")

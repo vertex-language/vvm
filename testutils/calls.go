@@ -15,12 +15,10 @@ func init() {
 	// mutual recursion between two fns, which needs the global-slot
 	// workaround described there.
 	register(testCase{
-		name:       "call_recursion_factorial",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(arch, osName string) *vir.Module {
+		name: "call_recursion_factorial",
+		build: func() *vir.Module {
 			m := vir.NewModule("recursion_factorial")
-			m.SetTarget(arch, osName, abiFor(osName))
+			m.SetTarget(arch, osName, abiFor())
 			m.DeclareLink(vir.LinkShared, "c")
 
 			data := append([]byte("%d"), 0)
@@ -52,17 +50,15 @@ func init() {
 		wantValue: val(120), // 5!
 	})
 
-	// No libc — same raw-syscall exit path as process_exit.go — because
-	// the fact under test is the tailcall terminator itself. "main" never
-	// returns its own value; control transfers to "answer", whose return
-	// becomes the process's exit code (§5 tailcall, §9.29).
+	// No libc — same raw-syscall/crt-stub exit path as process_exit.go —
+	// because the fact under test is the tailcall terminator itself.
+	// "main" never returns its own value; control transfers to "answer",
+	// whose return becomes the process's exit code (§5 tailcall, §9.29).
 	register(testCase{
-		name:       "call_tailcall_direct",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
+		name: "call_tailcall_direct",
+		build: func() *vir.Module {
 			m := vir.NewModule("tailcall_direct")
-			m.SetTarget(a, o, abiFor(o))
+			m.SetTarget(arch, osName, abiFor())
 
 			callee := m.DeclareFunction("answer", nil, vir.I32, false)
 			callee.Return(vir.IntLiteral(55))
@@ -80,12 +76,10 @@ func init() {
 	// A bare fn name in operand position already yields its address as
 	// ptr, so no separate global slot is needed to get the pointer.
 	register(testCase{
-		name:       "call_tailcall_indirect",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
+		name: "call_tailcall_indirect",
+		build: func() *vir.Module {
 			m := vir.NewModule("tailcall_indirect")
-			m.SetTarget(a, o, abiFor(o)) // FIX: Add the missing target declaration
+			m.SetTarget(arch, osName, abiFor())
 
 			sig := m.DeclareFunctionSignature("answer_sig", nil, false, vir.I32)
 
@@ -104,12 +98,10 @@ func init() {
 	// object; an sret[Point] param names the destination for a by-value
 	// struct return (which is why the fn itself must return void).
 	register(testCase{
-		name:       "call_byval_and_sret",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(arch, osName string) *vir.Module {
+		name: "call_byval_and_sret",
+		build: func() *vir.Module {
 			m := vir.NewModule("byval_sret")
-			m.SetTarget(arch, osName, abiFor(osName))
+			m.SetTarget(arch, osName, abiFor())
 			m.DeclareStruct("Point", vir.Field{Name: "x", Type: vir.I32}, vir.Field{Name: "y", Type: vir.I32})
 			m.DeclareLink(vir.LinkShared, "c")
 

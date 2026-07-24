@@ -9,11 +9,9 @@ import "github.com/vertex-language/vvm/ir/vir"
 
 func init() {
 	register(testCase{
-		name:       "bitwise_and",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_and", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_and",
+		build: func() *vir.Module {
+			return i32PrintingModule("bitwise_and", func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpAnd, vir.I32, vir.IntLiteral(0b1100), vir.IntLiteral(0b1010))
 			})
 		},
@@ -21,11 +19,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "bitwise_or",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_or", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_or",
+		build: func() *vir.Module {
+			return i32PrintingModule("bitwise_or", func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpOr, vir.I32, vir.IntLiteral(0b1100), vir.IntLiteral(0b0010))
 			})
 		},
@@ -33,11 +29,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "bitwise_xor",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_xor", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_xor",
+		build: func() *vir.Module {
+			return i32PrintingModule("bitwise_xor", func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpXor, vir.I32, vir.IntLiteral(0b1100), vir.IntLiteral(0b1010))
 			})
 		},
@@ -45,11 +39,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "bitwise_not",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_not", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_not",
+		build: func() *vir.Module {
+			return i32PrintingModule("bitwise_not", func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpNot, vir.I32, vir.IntLiteral(0))
 			})
 		},
@@ -59,11 +51,9 @@ func init() {
 	// Shift counts are masked mod operand width (§4): shifting an i32 by
 	// 33 behaves identically to shifting by 1.
 	register(testCase{
-		name:       "bitwise_shl_masks_count",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_shl_mask", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_shl_masks_count",
+		build: func() *vir.Module {
+			return i32PrintingModule("bitwise_shl_mask", func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpShl, vir.I32, vir.IntLiteral(1), vir.IntLiteral(33))
 			})
 		},
@@ -74,11 +64,9 @@ func init() {
 	// from "shift by width" below (both reduce to the same masked count,
 	// but this pins the identity case on its own).
 	register(testCase{
-		name:       "bitwise_shl_by_zero_is_noop",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_shl_zero", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_shl_by_zero_is_noop",
+		build: func() *vir.Module {
+			return i32PrintingModule("bitwise_shl_zero", func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpShl, vir.I32, vir.IntLiteral(1234), vir.IntLiteral(0))
 			})
 		},
@@ -88,11 +76,9 @@ func init() {
 	// Shifting an i32 by exactly its own bit width (32) masks to a count of
 	// 0 — the high boundary that "shift by 33" (masks to 1) doesn't cover.
 	register(testCase{
-		name:       "bitwise_shl_by_width_masks_to_zero",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_shl_width", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_shl_by_width_masks_to_zero",
+		build: func() *vir.Module {
+			return i32PrintingModule("bitwise_shl_width", func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpShl, vir.I32, vir.IntLiteral(1), vir.IntLiteral(32))
 			})
 		},
@@ -100,11 +86,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "bitwise_lshr_zero_fills",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_lshr", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_lshr_zero_fills",
+		build: func() *vir.Module {
+			return i32PrintingModule("bitwise_lshr", func(fb *vir.FunctionBuilder) vir.Operand {
 				// 0xFFFFFFF8 (-8) >> 1 logical = 0x7FFFFFFC
 				return fb.Emit("v", vir.OpLShr, vir.I32, vir.IntLiteral(-8), vir.IntLiteral(1))
 			})
@@ -113,11 +97,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "bitwise_ashr_sign_extends",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_ashr", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_ashr_sign_extends",
+		build: func() *vir.Module {
+			return i32PrintingModule("bitwise_ashr", func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpAShr, vir.I32, vir.IntLiteral(-8), vir.IntLiteral(1))
 			})
 		},
@@ -125,11 +107,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "bitwise_rotl",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_rotl", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_rotl",
+		build: func() *vir.Module {
+			return i32PrintingModule("bitwise_rotl", func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpRotl, vir.I32, vir.IntLiteral(1), vir.IntLiteral(1))
 			})
 		},
@@ -137,11 +117,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "bitwise_rotr",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_rotr", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_rotr",
+		build: func() *vir.Module {
+			return i32PrintingModule("bitwise_rotr", func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpRotr, vir.I32, vir.IntLiteral(1), vir.IntLiteral(1))
 			})
 		},
@@ -149,11 +127,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "bitwise_ctlz",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_ctlz", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_ctlz",
+		build: func() *vir.Module {
+			return i32PrintingModule("bitwise_ctlz", func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpCtlz, vir.I32, vir.IntLiteral(1)) // 0x00000001
 			})
 		},
@@ -161,11 +137,9 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "bitwise_cttz",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			return i32PrintingModule("bitwise_cttz", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_cttz",
+		build: func() *vir.Module {
+			return i32PrintingModule("bitwise_cttz", func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpCttz, vir.I32, vir.IntLiteral(8)) // 0b1000
 			})
 		},
@@ -173,15 +147,13 @@ func init() {
 	})
 
 	register(testCase{
-		name:       "bitwise_popcnt",
-		hostArches: []string{"x86_64"},
-		hostOSes:   []string{"linux"},
-		build: func(a, o string) *vir.Module {
-			m := i32PrintingModule("bitwise_popcnt", a, o, func(fb *vir.FunctionBuilder) vir.Operand {
+		name: "bitwise_popcnt",
+		build: func() *vir.Module {
+			m := i32PrintingModule("bitwise_popcnt", func(fb *vir.FunctionBuilder) vir.Operand {
 				return fb.Emit("v", vir.OpPopcnt, vir.I32, vir.IntLiteral(0b1011))
 			})
 			// Override default target to include the required tier
-			m.SetTarget(a, o, abiFor(o), "popcnt")
+			m.SetTarget(arch, osName, abiFor(), "popcnt")
 			return m
 		},
 		wantValue: val(3),
