@@ -67,15 +67,28 @@ func (s *sel) selCall(in *vir.Instruction) error {
 		if slot.Class != ClassStack {
 			continue
 		}
-		if err := s.value(RegA, args[i], descs[i].Type); err != nil {
-			return err
+		if vir.IsFloat(descs[i].Type) {
+			if err := s.valueFP(RegFA, args[i], descs[i].Type); err != nil {
+				return err
+			}
+			b, _ := s.bitsOf(descs[i].Type)
+			w := encoder.W; if b == 64 { w = encoder.X }
+			s.emit(Inst{Op: "fstr", W: w, D: R(RegFA), M: Mem(encoder.SPr, int64(slot.Off))})
+		} else {
+			if err := s.value(RegA, args[i], descs[i].Type); err != nil {
+				return err
+			}
+			s.emit(Inst{Op: "str", D: R(RegA), M: Mem(encoder.SPr, int64(slot.Off))})
 		}
-		s.emit(Inst{Op: "str", D: R(RegA), M: Mem(encoder.SPr, int64(slot.Off))})
 	}
 	for i, slot := range plan.Slots {
 		switch slot.Class {
 		case ClassReg, ClassIndirect:
 			if err := s.value(slot.Reg, args[i], descs[i].Type); err != nil {
+				return err
+			}
+		case ClassFPReg:
+			if err := s.valueFP(slot.Reg, args[i], descs[i].Type); err != nil {
 				return err
 			}
 		}
@@ -91,7 +104,11 @@ func (s *sel) selCall(in *vir.Instruction) error {
 		s.addImm(encoder.SPr, encoder.SPr, int64(plan.Reserve), true, true)
 	}
 	if in.Result != "" {
-		s.store(in.Result, IntRetReg)
+		if vir.IsFloat(in.Suffix) {
+			s.storeFP(in.Result, FPRetReg, in.Suffix)
+		} else {
+			s.store(in.Result, IntRetReg)
+		}
 	}
 	return nil
 }
@@ -148,8 +165,14 @@ func (s *sel) terminator(t vir.Terminator) error {
 	case vir.Return:
 		if x.Value != nil {
 			t := s.typeOfOperand(*x.Value, s.fn.Ret)
-			if err := s.value(IntRetReg, *x.Value, t); err != nil {
-				return err
+			if vir.IsFloat(t) {
+				if err := s.valueFP(FPRetReg, *x.Value, t); err != nil {
+					return err
+				}
+			} else {
+				if err := s.value(IntRetReg, *x.Value, t); err != nil {
+					return err
+				}
 			}
 		}
 		s.emit(Inst{Op: "epi_ret"})
@@ -250,6 +273,10 @@ func (s *sel) selTailCall(x vir.TailCall) error {
 		switch slot.Class {
 		case ClassReg, ClassIndirect:
 			if err := s.value(slot.Reg, args[i], descs[i].Type); err != nil {
+				return err
+			}
+		case ClassFPReg:
+			if err := s.valueFP(slot.Reg, args[i], descs[i].Type); err != nil {
 				return err
 			}
 		}

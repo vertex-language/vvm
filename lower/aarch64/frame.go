@@ -80,7 +80,7 @@ func checkValueType(t vir.Type) error {
 	case vir.PtrType, vir.ValistType:
 		return nil
 	case vir.FloatType:
-		return todo("%s values need an FP/SIMD path", t)
+		return nil // Floats supported via FP/SIMD
 	case vir.VecType:
 		return todo("%s values need an FP/SIMD path", t)
 	}

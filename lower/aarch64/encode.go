@@ -91,6 +91,12 @@ func prologue(fr *Frame) []Inst {
 				continue
 			}
 			out = append(out, Inst{Op: "str", D: R(slot.Reg), M: Slot(name)})
+		case ClassFPReg:
+			name := fr.paramName(i)
+			if name == "" {
+				continue
+			}
+			out = append(out, Inst{Op: "fstr", W: encoder.X, D: R(slot.Reg), M: Slot(name)})
 		}
 	}
 	return out

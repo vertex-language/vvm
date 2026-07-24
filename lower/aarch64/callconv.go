@@ -19,6 +19,9 @@ const (
 
 	// NumIntArgRegs is the eight-register integer argument window.
 	NumIntArgRegs = 8
+
+	// NumFPArgRegs is the eight-register FP argument window.
+	NumFPArgRegs = 8
 )
 
 // IntArgRegs is the integer/pointer argument window, in declaration order.
@@ -27,9 +30,18 @@ var IntArgRegs = [NumIntArgRegs]encoder.Reg{
 	encoder.R4, encoder.R5, encoder.R6, encoder.R7,
 }
 
+// FPArgRegs is the float/SIMD argument window, in declaration order.
+var FPArgRegs = [NumFPArgRegs]encoder.Reg{
+	encoder.R0, encoder.R1, encoder.R2, encoder.R3,
+	encoder.R4, encoder.R5, encoder.R6, encoder.R7,
+}
+
 const (
 	// IntRetReg carries a scalar/pointer result back.
 	IntRetReg = encoder.R0
+
+	// FPRetReg carries a float result back.
+	FPRetReg = encoder.R0
 
 	// IndirectResultReg is x8, AAPCS64's dedicated indirect-result register:
 	// an sret[S] pointer travels there and consumes no argument register.
@@ -41,6 +53,7 @@ type ArgClass byte
 
 const (
 	ClassReg      ArgClass = iota // in Reg
+	ClassFPReg                    // in an FP/SIMD Reg
 	ClassStack                    // at Off in the argument area
 	ClassIndirect                 // the sret pointer, in x8
 )
@@ -68,6 +81,7 @@ type ArgLayout struct {
 	Slots      []ArgSlot
 	StackBytes uint32 // unrounded footprint of the stack-passed arguments
 	GPUsed     int    // integer argument registers consumed
+	FPUsed     int    // FP argument registers consumed
 }
 
 // LayoutArgs is the single, shared argument-placement rule, used by PlanCall
@@ -111,9 +125,18 @@ func LayoutArgs(l *Layout, args []ArgDesc, stackVarargs bool) (ArgLayout, error)
 			}
 			return out, todo("byval[%s] (%d bytes) needs a caller-allocated copy passed indirectly", a.ByVal, sz)
 
-		case vir.IsFloat(a.Type) || vir.IsVec(a.Type):
-			// The SIMD&FP argument registers (v0-v7) are unreachable: the
-			// encoder has no FP/SIMD forms at all.
+		case vir.IsFloat(a.Type):
+			toStack := !a.Named && stackVarargs
+			if !toStack && out.FPUsed < NumFPArgRegs {
+				out.Slots[i] = ArgSlot{Class: ClassFPReg, Reg: FPArgRegs[out.FPUsed], Bytes: ArgWordBytes}
+				out.FPUsed++
+				continue
+			}
+			out.Slots[i] = ArgSlot{Class: ClassStack, Off: out.StackBytes, Bytes: ArgWordBytes}
+			out.StackBytes += ArgWordBytes
+			continue
+
+		case vir.IsVec(a.Type):
 			return out, todo("%s argument needs the SIMD&FP register class", a.Type)
 		}
 
