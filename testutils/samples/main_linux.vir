@@ -1,0 +1,16 @@
+module main
+target x86_64 linux gnu
+
+global fmt array[i8, 14] = "%d + %d = %d\n\x00"
+
+link shared "c"
+add.vir
+extern "c":
+    fn printf(fmt ptr, ...) i32
+end
+
+export fn main() i32 entry:
+    sum = add.i32 7, 35
+    r = call printf, fmt, 7, 35, sum
+    return 0
+end

@@ -1,0 +1,17 @@
+module main
+target x86_64 windows msvc
+
+global msg array[i8, 12] = "7 + 35 = 42\n"
+
+link shared "kernel32"
+extern "kernel32":
+    fn GetStdHandle(nStdHandle i32) ptr
+    fn WriteConsoleA(hConsoleOutput ptr, lpBuffer ptr, nNumberOfCharsToWrite i32, lpNumberOfCharsWritten ptr, lpReserved ptr) i32
+end
+
+export fn main() i32 entry:
+    written = alloca.ptr 4
+    hstdout = call GetStdHandle, -11
+    ok = call WriteConsoleA, hstdout, msg, 12, written, null
+    return 0
+end
