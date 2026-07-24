@@ -174,8 +174,7 @@ func resolveMachOLinkDependencies(l *linkmacho.Linker, modules []*vir.Module, t 
 // .dll off disk, sourced from whichever directories the target's ABI
 // registered via linker/pe's own RegisterSearchDirs (see linker/pe/x64's
 // register.go). This mirrors mingw/cygwin ld's own documented "link
-// directly against the DLL, no import library" mode, not a workaround —
-// see linkdeps.go's own commit history/discussion for that precedent.
+// directly against the DLL, no import library" mode, not a workaround.
 //
 // This only resolves on a machine that actually has the target DLLs
 // available (i.e. building for windows on windows, or with a manually
@@ -187,7 +186,7 @@ func resolveMachOLinkDependencies(l *linkmacho.Linker, modules []*vir.Module, t 
 func resolvePELinkDependencies(l *linkpe.Linker, modules []*vir.Module, t Target) error {
 	format := vir.FormatOf(t.OS)
 	seenDLL := map[string]bool{}
-	dirs := linkpe.SearchDirs(t.ABI)
+	dirs := linkpe.SearchDirs(peABI(t))
 
 	for _, m := range modules {
 		for _, link := range m.Links {
@@ -230,6 +229,22 @@ func resolvePELinkDependencies(l *linkpe.Linker, modules []*vir.Module, t Target
 		}
 	}
 	return nil
+}
+
+// peABI converts vvm.Target's own string ABI ("msvc", "gnu", or "") into
+// linker/pe's ABI enum. vvm.Target and linker/pe.Target deliberately don't
+// share a type here (§10.3/"no shared types across format boundaries" —
+// see target.go and linker/pe/README.md), so every call site that crosses
+// that boundary does its own small conversion; dispatch.go's newLinker
+// does the equivalent triple-string round-trip for the rest of pe.Target.
+// An empty ABI defaults to msvc, matching dispatch.go's own default.
+func peABI(t Target) linkpe.ABI {
+	switch t.ABI {
+	case "gnu":
+		return linkpe.ABIGNU
+	default:
+		return linkpe.ABIMSVC
+	}
 }
 
 func findAndReadDLL(name string, dirs []string) (data []byte, path string, err error) {
