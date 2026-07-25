@@ -126,7 +126,17 @@ func checkLiteralOperand(op vir.Operand, t vir.Type) error {
 }
 
 // checkGlobals validates §2.1 global-decls / §6.2.
-func checkGlobals(m *vir.Module, names *nameTable) error {
+//
+// fnNames is every function name declared anywhere in the module,
+// collected by the caller (verify.go) before this runs — even though
+// `fn` defs always sit textually after `global`s in the fixed §2.1
+// section order, so at parse time none of them have "happened" yet from
+// checkGlobals's own point of view. That's fine here specifically
+// because a function's `addr` reference is a real linker relocation
+// resolved from a symbol table, not a value that depends on lexical
+// declaration order the way checkConstInit's own seenGlobals ordering
+// check (below) genuinely does.
+func checkGlobals(m *vir.Module, names *nameTable, fnNames map[string]bool) error {
 	tc := structTypeCtx(m)
 	seenGlobals := make(map[string]bool, len(m.Globals))
 	for _, g := range m.Globals {
@@ -139,7 +149,7 @@ func checkGlobals(m *vir.Module, names *nameTable) error {
 		if g.Align < 0 {
 			return fmt.Errorf("global %q: align must be >= 0", g.Name)
 		}
-		if err := checkConstInit(g.Init, g.Type, g.TLS, seenGlobals); err != nil {
+		if err := checkConstInit(g.Init, g.Type, g.TLS, seenGlobals, fnNames); err != nil {
 			return fmt.Errorf("global %q: %w", g.Name, err)
 		}
 		if err := names.declare("global", g.Name); err != nil {
@@ -151,11 +161,18 @@ func checkGlobals(m *vir.Module, names *nameTable) error {
 }
 
 // checkConstInit validates a const-init tree against its declared type
-// (§6.2). addr may only name a global declared strictly earlier in this
-// same Globals list — fn/extern groups always sit later in the fixed
-// section order (§2.1), so they can never be "earlier" no matter how the
-// comment in README §6.2 reads generically.
-func checkConstInit(init vir.ConstInit, t vir.Type, tls bool, seenGlobals map[string]bool) error {
+// (§6.2). addr may name either an earlier global in this same Globals
+// list (declare-before-use, §2.2 — a real ordering requirement, since two
+// globals' relative storage/initialization order is source-order-
+// dependent) or any function declared in this module, regardless of where
+// in the file it's declared (README §6.2: "relocated pointers to earlier
+// functions or globals" — the "earlier" qualifier is unenforceable
+// literally for functions given §2.1's fixed section order always puts
+// every fn after every global; functions get the same forward-reference
+// exemption §2.2 already grants self-recursion, since the address is
+// resolved as an ordinary relocation against the function's own
+// object-file symbol).
+func checkConstInit(init vir.ConstInit, t vir.Type, tls bool, seenGlobals, fnNames map[string]bool) error {
 	switch x := init.(type) {
 	case vir.InitZero:
 		return nil
@@ -168,10 +185,10 @@ func checkConstInit(init vir.ConstInit, t vir.Type, tls bool, seenGlobals map[st
 		if !vir.IsPtr(t) {
 			return fmt.Errorf("addr initializer only legal for ptr-typed globals, got %s", t)
 		}
-		if !seenGlobals[x.Name] {
-			return fmt.Errorf("addr %q: must name an earlier global (§2.2 declare-before-use)", x.Name)
+		if seenGlobals[x.Name] || fnNames[x.Name] {
+			return nil
 		}
-		return nil
+		return fmt.Errorf("addr %q: must name an earlier global or a function declared in this module (§2.2, §6.2)", x.Name)
 	case vir.InitAggregate:
 		switch agg := t.(type) {
 		case vir.ArrayType:
@@ -179,7 +196,7 @@ func checkConstInit(init vir.ConstInit, t vir.Type, tls bool, seenGlobals map[st
 				return fmt.Errorf("aggregate initializer has %d elements, array type wants %d", len(x.Elems), agg.Len)
 			}
 			for i, e := range x.Elems {
-				if err := checkConstInit(e, agg.Elem, tls, seenGlobals); err != nil {
+				if err := checkConstInit(e, agg.Elem, tls, seenGlobals, fnNames); err != nil {
 					return fmt.Errorf("element %d: %w", i, err)
 				}
 			}

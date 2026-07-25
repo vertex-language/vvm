@@ -33,7 +33,19 @@ func Verify(m *vir.Module) error {
 	if err := checkConstants(m, names); err != nil {
 		return err
 	}
-	if err := checkGlobals(m, names); err != nil {
+
+	// Collected up front, ahead of checkGlobals, specifically so a
+	// global's `addr` initializer can name a function (§6.2) even though
+	// §2.1's fixed section order means checkFunctions itself hasn't run
+	// yet at this point — see checkGlobals/checkConstInit's own doc
+	// comments in declarations.go for why that's sound despite the
+	// module's functions not being "checked" yet.
+	fnNames := make(map[string]bool, len(m.Functions))
+	for _, f := range m.Functions {
+		fnNames[f.Name] = true
+	}
+
+	if err := checkGlobals(m, names, fnNames); err != nil {
 		return err
 	}
 	if err := checkLinks(m); err != nil {
