@@ -1,0 +1,121 @@
+module cuda_windows
+namespace "builtins/gpu/cuda"
+
+target x86_64 windows msvc
+
+// ── Driver-API call shapes, for the indirect calls below ──────────────────
+// These mirror the real cuInit/cuModuleLoadData/cuModuleGetFunction/
+// cuLaunchKernel signatures. Resolved dynamically, so each is invoked via
+// call.<fnsig> through a GetProcAddress result, never a direct `call`.
+fnsig cu_init_fn(i32) i32
+fnsig cu_module_load_data_fn(ptr, ptr) i32
+fnsig cu_module_get_function_fn(ptr, ptr, ptr) i32
+fnsig cu_launch_kernel_fn(ptr, i32, i32, i32, i32, i32, i32, i32, ptr, ptr, ptr) i32
+
+// ── Status codes ────────────────────────────────────────────────────────
+// 0 and positive: passed through verbatim from the CUDA driver (CUresult).
+// Negative: this shim's own soft-dependency failures, before any driver
+// call was even attempted.
+const CUDA_SUCCESS i32 = 0
+const ERR_NO_DRIVER i32 = -1
+const ERR_SYMBOL_NOT_FOUND i32 = -2
+
+// ── Constant C-strings for LoadLibraryA / GetProcAddress ───────────────
+global str_nvcuda_dll array[i8, 11] = "nvcuda.dll\x00"
+global str_cuInit array[i8, 7] = "cuInit\x00"
+global str_cuModuleLoadData array[i8, 17] = "cuModuleLoadData\x00"
+global str_cuModuleGetFunction array[i8, 20] = "cuModuleGetFunction\x00"
+global str_cuLaunchKernel array[i8, 15] = "cuLaunchKernel\x00"
+
+// Placeholder PTX payload. In the real pipeline this global is produced by
+// gpu/lower/ptx (gpu.md §4-5) and spliced back into the module by `accel`
+// before cpu/lower ever runs — shown inline here so this file stands alone.
+global ptx_add_kernel array[i8, 87] =
+    ".version 7.0\n.target sm_50\n.address_size 64\n\n.visible .entry add_kernel(\n)\n{\n  ret;\n}\n\x00"
+global str_kernel_name array[i8, 11] = "add_kernel\x00"
+
+// ── kernel32 is a real OS component: always present, safe to statically
+// link, same as main_windows.vir's GetStdHandle/WriteFile. ────────────────
+link shared "kernel32"
+extern "kernel32":
+    fn LoadLibraryA(lpLibFileName ptr) ptr
+    fn GetProcAddress(hModule ptr, lpProcName ptr) ptr
+    fn FreeLibrary(hLibModule ptr) i32
+end
+
+// out_hcuda: caller-owned slot that receives the loaded module handle, so
+// it can later be passed to cuda_shutdown. Returns a CUresult on success/
+// driver-side failure, or one of the ERR_* consts if the soft dependency
+// itself couldn't be satisfied.
+export fn cuda_run_kernel(kernel_params ptr, gx i32, gy i32, gz i32,
+                           bx i32, by i32, bz i32, shared_bytes i32,
+                           out_hcuda ptr) i32:
+    hcuda = call LoadLibraryA, str_nvcuda_dll
+    driver_missing = eq.ptr hcuda, null
+    br_if driver_missing, no_driver, resolve_cuinit
+
+resolve_cuinit:
+    cuinit_ptr = call GetProcAddress, hcuda, str_cuInit
+    m1 = eq.ptr cuinit_ptr, null
+    br_if m1, no_symbol, resolve_load_data
+
+resolve_load_data:
+    load_data_ptr = call GetProcAddress, hcuda, str_cuModuleLoadData
+    m2 = eq.ptr load_data_ptr, null
+    br_if m2, no_symbol, resolve_get_function
+
+resolve_get_function:
+    get_func_ptr = call GetProcAddress, hcuda, str_cuModuleGetFunction
+    m3 = eq.ptr get_func_ptr, null
+    br_if m3, no_symbol, resolve_launch
+
+resolve_launch:
+    launch_ptr = call GetProcAddress, hcuda, str_cuLaunchKernel
+    m4 = eq.ptr launch_ptr, null
+    br_if m4, no_symbol, do_init
+
+do_init:
+    init_rc = call.cu_init_fn cuinit_ptr, 0
+    init_ok = eq.i32 init_rc, CUDA_SUCCESS
+    br_if init_ok, do_load_module, init_error
+
+init_error:
+    return init_rc
+
+do_load_module:
+    module_slot = alloca.ptr 8
+    load_rc = call.cu_module_load_data_fn load_data_ptr, module_slot, ptx_add_kernel
+    load_ok = eq.i32 load_rc, CUDA_SUCCESS
+    br_if load_ok, do_get_function, load_error
+
+load_error:
+    return load_rc
+
+do_get_function:
+    func_slot = alloca.ptr 8
+    cuda_module = load.ptr module_slot
+    get_rc = call.cu_module_get_function_fn get_func_ptr, func_slot, cuda_module, str_kernel_name
+    get_ok = eq.i32 get_rc, CUDA_SUCCESS
+    br_if get_ok, do_launch, get_error
+
+get_error:
+    return get_rc
+
+do_launch:
+    cuda_func = load.ptr func_slot
+    launch_rc = call.cu_launch_kernel_fn launch_ptr, cuda_func,
+        gx, gy, gz, bx, by, bz, shared_bytes, null, kernel_params, null
+    store.ptr out_hcuda, hcuda
+    return launch_rc
+
+no_driver:
+    return ERR_NO_DRIVER
+
+no_symbol:
+    return ERR_SYMBOL_NOT_FOUND
+end
+
+export fn cuda_shutdown(hcuda ptr) i32:
+    rc = call FreeLibrary, hcuda
+    return rc
+end

@@ -1,0 +1,46 @@
+module console
+namespace "builtins"
+target x86_64 linux gnu
+
+const STDOUT i32 = 1
+const STDERR i32 = 2
+
+global nl array[i8, 1] = "\n"
+
+link shared "c"
+
+extern "c":
+    fn libc_write(fd i32, buf ptr, len i64) i64
+end
+
+// -- internal: NUL-terminated length; pure IR, byte-identical on every target --
+
+fn str_len(s ptr) i64:
+    len = add.i64 0, 0
+    br loop
+loop:
+    p = index.ptr s, i8, len
+    c = load.i8 p
+    is_end = eq.i8 c, 0
+    br_if is_end, done, next
+next:
+    len = add.i64 len, 1
+    br loop
+done:
+    return len
+end
+
+// -- public API --
+
+export fn write(buf ptr, len i64) i64:
+    n = call libc_write, STDOUT, buf, len
+    return n
+end
+
+export fn writeline(s ptr) i64:
+    len = call str_len, s
+    n1 = call write, s, len
+    n2 = call write, nl, 1
+    total = add.i64 n1, n2
+    return total
+end

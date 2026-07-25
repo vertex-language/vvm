@@ -1,0 +1,23 @@
+module memory
+namespace "builtins"
+target aarch64 macos
+
+// "System", not "libSystem.B.dylib" — linkdeps.go's resolveMachOLinkDependencies
+// special-cases this exact short name, and entrypoint.go's linksLibC recognizes
+// it as "a real C runtime is available."
+link shared "System"
+
+extern "System":
+    fn libc_malloc(size i64) ptr
+    fn libc_free(p ptr) void
+end
+
+export fn allocate(size i64) ptr:
+    p = call libc_malloc, size
+    return p
+end
+
+export fn free(p ptr) void:
+    call libc_free, p
+    return
+end

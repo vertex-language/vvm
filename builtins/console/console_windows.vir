@@ -1,0 +1,65 @@
+module console
+namespace "builtins"
+target x86_64 windows msvc
+
+const STD_OUTPUT_HANDLE i32 = -11
+const STD_ERROR_HANDLE  i32 = -12
+
+global nl array[i8, 1] = "\n"
+
+link shared "kernel32"
+
+extern "kernel32":
+    fn GetStdHandle(nStdHandle i32) ptr
+    fn WriteFile(hFile ptr, lpBuffer ptr, nNumberOfBytesToWrite i32,
+                 lpNumberOfBytesWritten ptr, lpOverlapped ptr) i32
+end
+
+// -- internal: NUL-terminated length; pure IR, byte-identical on every target --
+
+fn str_len(s ptr) i64:
+    len = add.i64 0, 0
+    br loop
+loop:
+    p = index.ptr s, i8, len
+    c = load.i8 p
+    is_end = eq.i8 c, 0
+    br_if is_end, done, next
+next:
+    len = add.i64 len, 1
+    br loop
+done:
+    return len
+end
+
+// -- internal: write to a std handle; returns bytes written, 0 on failure --
+
+fn write_handle(h ptr, buf ptr, len i64) i64:
+    written = alloca.ptr 4, align 4
+    len32 = trunc.i32 len
+    ok = call WriteFile, h, buf, len32, written, null
+    failed = eq.i32 ok, 0
+    br_if failed, fail, ok_path
+fail:
+    return 0
+ok_path:
+    n32 = load.i32 written
+    n = zext.i64 n32
+    return n
+end
+
+// -- public API --
+
+export fn write(buf ptr, len i64) i64:
+    h = call GetStdHandle, STD_OUTPUT_HANDLE
+    n = call write_handle, h, buf, len
+    return n
+end
+
+export fn writeline(s ptr) i64:
+    len = call str_len, s
+    n1 = call write, s, len
+    n2 = call write, nl, 1
+    total = add.i64 n1, n2
+    return total
+end

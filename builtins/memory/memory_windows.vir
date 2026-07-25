@@ -1,0 +1,23 @@
+module memory
+namespace "builtins"
+target x86_64 windows msvc
+
+link shared "kernel32"
+
+extern "kernel32":
+    fn GetProcessHeap() ptr
+    fn HeapAlloc(hHeap ptr, dwFlags i32, dwBytes i64) ptr
+    fn HeapFree(hHeap ptr, dwFlags i32, lpMem ptr) i32
+end
+
+export fn allocate(size i64) ptr:
+    heap = call GetProcessHeap
+    p = call HeapAlloc, heap, 0, size
+    return p
+end
+
+export fn free(p ptr) void:
+    heap = call GetProcessHeap
+    ok = call HeapFree, heap, 0, p
+    return
+end
