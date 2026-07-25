@@ -40,11 +40,14 @@ func (s *sel) selCall(in *vir.Instruction) error {
 	if reserve > 0 {
 		s.emit(Inst{Op: "sub", D: R(RRSP), S: Imm(reserve), Sz: 8})
 	}
-	// Stack args first (they don't clobber arg registers), then register
-	// args, so a value read from a slot into rdi isn't overwritten early.
+	
+	// 1. Process stack arguments first (so they don't clobber arg registers)
 	for i, a := range args {
 		sl := plan.Slots[i]
-		
+		if sl.InReg {
+			continue
+		}
+
 		outOff := sl.StackOff
 		if s.os == "windows" {
 			outOff += windowsShadowSpace
@@ -59,28 +62,50 @@ func (s *sel) selCall(in *vir.Instruction) error {
 			s.emit(Inst{Op: "rep_movsb"})
 			continue
 		}
-		if !sl.InReg {
-			if vir.IsFloat(s.operandType(a)) {
-				s.loadFloatOperand(a, RRAX, s.operandType(a))
-			} else {
-				s.loadOperand(a, RRAX)
-				if i < len(params) {
-					s.maskArg(RRAX, params[i].Type)
-				}
+		
+		if vir.IsFloat(s.operandType(a)) {
+			s.loadFloatOperand(a, RRAX, s.operandType(a))
+		} else {
+			s.loadOperand(a, RRAX)
+			if i < len(params) {
+				s.maskArg(RRAX, params[i].Type)
 			}
-			s.emit(Inst{Op: "mov", D: Mem(RRSP, int32(outOff)), S: R(RRAX), Sz: 8})
 		}
+		// Guarantee the value actually reaches the stack memory allocation
+		s.emit(Inst{Op: "mov", D: Mem(RRSP, int32(outOff)), S: R(RRAX), Sz: 8})
 	}
 
-	xmmCount := 0
+	// 2. Process register arguments
+	xmmSysVCount := 0
 	for i, a := range args {
-		if sl := plan.Slots[i]; sl.InReg {
-			if vir.IsFloat(s.operandType(a)) {
-				// C ABI: variadic calls expect floating point values mirrored into XMM registers
+		sl := plan.Slots[i]
+		if !sl.InReg {
+			continue
+		}
+
+		isFloat := vir.IsFloat(s.operandType(a))
+
+		if s.os == "windows" {
+			// Windows x64 ABI uses strictly positional mapping
+			if isFloat {
+				// The Windows ABI requires floats to be mirrored in integer registers for unprototyped calls
 				s.loadFloatOperand(a, sl.Reg, s.operandType(a))
-				if xmmCount < len(xmmArgRegs) {
-					s.emit(Inst{Op: "movq_to_xmm", D: R(xmmArgRegs[xmmCount]), S: R(sl.Reg), Sz: 8})
-					xmmCount++
+				if i < len(xmmArgRegs) {
+					s.emit(Inst{Op: "movq_to_xmm", D: R(xmmArgRegs[i]), S: R(sl.Reg), Sz: 8})
+				}
+			} else {
+				s.loadOperand(a, sl.Reg)
+				if i < len(params) {
+					s.maskArg(sl.Reg, params[i].Type)
+				}
+			}
+		} else {
+			// System V ABI packs floats sequentially into XMM registers
+			if isFloat {
+				s.loadFloatOperand(a, sl.Reg, s.operandType(a))
+				if xmmSysVCount < len(xmmArgRegs) {
+					s.emit(Inst{Op: "movq_to_xmm", D: R(xmmArgRegs[xmmSysVCount]), S: R(sl.Reg), Sz: 8})
+					xmmSysVCount++
 				}
 			} else {
 				s.loadOperand(a, sl.Reg)
@@ -90,22 +115,12 @@ func (s *sel) selCall(in *vir.Instruction) error {
 			}
 		}
 	}
+
 	if variadic && s.os != "windows" {
-		// AL/RAX = number of vector registers used is a SysV-only signal
-		// (needed because varargs printf-family functions there use it to
-		// know whether to bother reading %xmm0-7). The Windows convention
-		// has no equivalent register-count hint at all; emitting one is
-		// harmless in the sense that it doesn't corrupt anything the
-		// callee reads, but it's meaningless there, so skip it rather
-		// than emit a misleading instruction. (In practice this is also
-		// currently unreachable for Windows: BuildFrame in frame.go
-		// already rejects a variadic function on a windows target before
-		// lowering gets this far — this guard covers the call *site*
-		// calling an externally-declared variadic function, which isn't
-		// blocked the same way.)
-		s.emit(Inst{Op: "mov", D: R(RRAX), S: Imm(int64(xmmCount)), Sz: 8})
+		s.emit(Inst{Op: "mov", D: R(RRAX), S: Imm(int64(xmmSysVCount)), Sz: 8})
 	}
 
+	// 3. Dispatch the call
 	if callee.Kind == vir.OperandIdent && callee.Qualifier == "" && s.isDirect(callee.Ident) {
 		s.emit(Inst{Op: "call_sym", Sym: callee.Ident})
 	} else {
@@ -113,6 +128,7 @@ func (s *sel) selCall(in *vir.Instruction) error {
 		s.emit(Inst{Op: "call_r", S: R(RR11)})
 	}
 
+	// 4. Cleanup and return
 	if reserve > 0 {
 		s.emit(Inst{Op: "add", D: R(RRSP), S: Imm(reserve), Sz: 8})
 	}
@@ -182,8 +198,10 @@ func (s *sel) selTerm(t vir.Terminator) error {
 func (s *sel) selTailCall(x vir.TailCall) error {
 	if x.Callee != "" {
 		var params []vir.Param
-		if p, _, ok := s.ix.calleeParams(x.Callee); ok {
+		variadic := false
+		if p, v, ok := s.ix.calleeParams(x.Callee); ok {
 			params = p
+			variadic = v
 		}
 		plan, _, err := s.l.PlanCall(params, len(x.Args))
 		if err != nil {
@@ -194,38 +212,76 @@ func (s *sel) selTailCall(x vir.TailCall) error {
 				return errBadModule("byval argument on a tailcall path")
 			}
 		}
-		// Load register args (indirect stack-arg restaging omitted here;
-		// register-only tailcalls are the common case).
+		
+		xmmSysVCount := 0
 		for i, a := range x.Args {
 			if sl := plan.Slots[i]; sl.InReg {
-				if vir.IsFloat(s.operandType(a)) {
-					s.loadFloatOperand(a, sl.Reg, s.operandType(a))
+				isFloat := vir.IsFloat(s.operandType(a))
+				if s.os == "windows" {
+					if isFloat {
+						s.loadFloatOperand(a, sl.Reg, s.operandType(a))
+						if i < len(xmmArgRegs) {
+							s.emit(Inst{Op: "movq_to_xmm", D: R(xmmArgRegs[i]), S: R(sl.Reg), Sz: 8})
+						}
+					} else {
+						s.loadOperand(a, sl.Reg)
+						if i < len(params) {
+							s.maskArg(sl.Reg, params[i].Type)
+						}
+					}
 				} else {
-					s.loadOperand(a, sl.Reg)
-					if i < len(params) {
-						s.maskArg(sl.Reg, params[i].Type)
+					if isFloat {
+						s.loadFloatOperand(a, sl.Reg, s.operandType(a))
+						if xmmSysVCount < len(xmmArgRegs) {
+							s.emit(Inst{Op: "movq_to_xmm", D: R(xmmArgRegs[xmmSysVCount]), S: R(sl.Reg), Sz: 8})
+							xmmSysVCount++
+						}
+					} else {
+						s.loadOperand(a, sl.Reg)
+						if i < len(params) {
+							s.maskArg(sl.Reg, params[i].Type)
+						}
 					}
 				}
 			} else {
 				return todo("tailcall with stack arguments")
 			}
 		}
+		
+		if variadic && s.os != "windows" {
+			s.emit(Inst{Op: "mov", D: R(RRAX), S: Imm(int64(xmmSysVCount)), Sz: 8})
+		}
+		
 		s.emit(Inst{Op: "epi_jmp_sym", Sym: x.Callee})
 		return nil
 	}
+	
 	// Indirect tailcall via fnsig; first arg is the function pointer.
-	// regs is OS-aware (callconv.go's intArgRegs) so this matches whatever
-	// convention s.l.PlanCall used for every other call in this function —
-	// previously this branch hardcoded the SysV IntArgRegs list directly,
-	// which disagreed with a Windows target's four-register convention.
 	s.loadOperand(x.Args[0], RR11)
 	regs := intArgRegs(s.os)
+	xmmSysVCount := 0
 	for i, a := range x.Args[1:] {
 		if i < len(regs) {
-			if vir.IsFloat(s.operandType(a)) {
-				s.loadFloatOperand(a, regs[i], s.operandType(a))
+			isFloat := vir.IsFloat(s.operandType(a))
+			if s.os == "windows" {
+				if isFloat {
+					s.loadFloatOperand(a, regs[i], s.operandType(a))
+					if i < len(xmmArgRegs) {
+						s.emit(Inst{Op: "movq_to_xmm", D: R(xmmArgRegs[i]), S: R(regs[i]), Sz: 8})
+					}
+				} else {
+					s.loadOperand(a, regs[i])
+				}
 			} else {
-				s.loadOperand(a, regs[i])
+				if isFloat {
+					s.loadFloatOperand(a, regs[i], s.operandType(a))
+					if xmmSysVCount < len(xmmArgRegs) {
+						s.emit(Inst{Op: "movq_to_xmm", D: R(xmmArgRegs[xmmSysVCount]), S: R(regs[i]), Sz: 8})
+						xmmSysVCount++
+					}
+				} else {
+					s.loadOperand(a, regs[i])
+				}
 			}
 		} else {
 			return todo("indirect tailcall with stack arguments")
