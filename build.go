@@ -40,6 +40,11 @@ func BuildModule(m *vir.Module, t Target) ([]byte, error) {
 		return nil, fmt.Errorf("vvm: verify: %w", err)
 	}
 
+	// A namespaced module must emit the same mangled symbols (§6.3) any
+	// future importer of it will expect, whether or not *this* build is
+	// itself multi-module — see mangle_exports.go.
+	applyExportMangling(m)
+
 	// Entry-point resolution never mutates m (see entrypoint.go) — a
 	// synthesized process-entry stub, when one is needed, is built
 	// separately as its own object (crt.Stub) and linked in alongside

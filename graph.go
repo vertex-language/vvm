@@ -37,12 +37,14 @@ func BuildGraph(srcs [][]byte, rootModuleName string, t Target) ([]byte, error) 
 //	set.Rewrite()              — erase cross-module refs: const -> inline
 //	                              literal; fn/global -> real mangled
 //	                              symbol; struct/fnsig -> unchanged
+//	applyExportMangling(m) per module — make each namespaced module's own
+//	                              declarations emit under that same
+//	                              mangled symbol (see mangle_exports.go;
+//	                              this is vvm's own step, not importer's —
+//	                              lower/<arch> is import-agnostic and only
+//	                              ever emits Function.Name/Global.Name
+//	                              verbatim as the real ABI symbol)
 //	lower/<arch>, unchanged from here on
-//
-// importer's Flow ends with "unchanged from here on" — no additional
-// rewrite pass exists or is needed; Rewrite already leaves every module
-// in exactly the shape toObjectBytes knows how to consume, the same as
-// the single-module path.
 //
 // rootModuleName selects which module's `entry`-attributed fn (if any)
 // resolveEntryPoint should look at; every module in the set still gets
@@ -72,6 +74,14 @@ func BuildModuleGraph(modules []*vir.Module, rootModuleName string, t Target) ([
 	}
 	if err := set.Rewrite(); err != nil {
 		return nil, fmt.Errorf("vvm: %w", err)
+	}
+
+	// Must run after Rewrite: Rewrite resolves each cross-module callee
+	// by matching the caller's short qualifier against the target
+	// module's *original* Function.Name — renaming that first would
+	// break the lookup (see mangle_exports.go's doc comment).
+	for _, m := range modules {
+		applyExportMangling(m)
 	}
 
 	root := findModule(modules, rootModuleName)
