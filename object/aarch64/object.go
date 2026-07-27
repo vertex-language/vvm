@@ -21,7 +21,7 @@
 // No objectfile import; the types are this package's own.
 package object
 
-import aarch64 "github.com/vertex-language/vvm/lower/aarch64"
+import aarch64 "github.com/vertex-language/vvm/cpu/lower/aarch64"
 
 type SectionKind int
 

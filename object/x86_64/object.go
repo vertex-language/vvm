@@ -13,8 +13,8 @@
 package object
 
 import (
-	"github.com/vertex-language/vvm/isa/x86_64/encoder"
-	x86_64 "github.com/vertex-language/vvm/lower/x86_64"
+	"github.com/vertex-language/vvm/cpu/isa/x86_64/encoder"
+	x86_64 "github.com/vertex-language/vvm/cpu/lower/x86_64"
 )
 
 type SectionKind int

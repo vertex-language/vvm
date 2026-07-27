@@ -11,10 +11,10 @@ import (
 	objx86 "github.com/vertex-language/vvm/object/x86"
 	objx86_64 "github.com/vertex-language/vvm/object/x86_64"
 
-	loweraarch64 "github.com/vertex-language/vvm/lower/aarch64"
-	lowerarm "github.com/vertex-language/vvm/lower/arm"
-	lowerx86 "github.com/vertex-language/vvm/lower/x86"
-	lowerx86_64 "github.com/vertex-language/vvm/lower/x86_64"
+	loweraarch64 "github.com/vertex-language/vvm/cpu/lower/aarch64"
+	lowerarm "github.com/vertex-language/vvm/cpu/lower/arm"
+	lowerx86 "github.com/vertex-language/vvm/cpu/lower/x86"
+	lowerx86_64 "github.com/vertex-language/vvm/cpu/lower/x86_64"
 
 	objwaarch64 "github.com/vertex-language/vvm/objectwriter/aarch64"
 	objwarm "github.com/vertex-language/vvm/objectwriter/arm"

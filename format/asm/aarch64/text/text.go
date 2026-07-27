@@ -16,7 +16,7 @@ import (
 	"fmt"
 	"strings"
 
-	lowera64 "github.com/vertex-language/vvm/lower/aarch64"
+	lowera64 "github.com/vertex-language/vvm/cpu/lower/aarch64"
 )
 
 // Encode renders p as a listing: one section per global, one per

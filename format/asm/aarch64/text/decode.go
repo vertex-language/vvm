@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	isaa64 "github.com/vertex-language/vvm/isa/aarch64"
-	lowera64 "github.com/vertex-language/vvm/lower/aarch64"
+	isaa64 "github.com/vertex-language/vvm/cpu/isa/aarch64"
+	lowera64 "github.com/vertex-language/vvm/cpu/lower/aarch64"
 )
 
 // decodeInst decodes one instruction word at byte offset off. fx, if

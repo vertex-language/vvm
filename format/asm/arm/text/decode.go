@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	isaarm "github.com/vertex-language/vvm/isa/arm"
-	lowerarm "github.com/vertex-language/vvm/lower/arm"
+	isaarm "github.com/vertex-language/vvm/cpu/isa/arm"
+	lowerarm "github.com/vertex-language/vvm/cpu/lower/arm"
 )
 
 // decodeInst decodes one instruction word at byte offset off. fx, if

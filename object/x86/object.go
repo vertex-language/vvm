@@ -10,7 +10,7 @@
 // IA-32 is exactly the R_386_PC32 / R_386_32 shape (S+A-P and S+A).
 package object
 
-import x86 "github.com/vertex-language/vvm/lower/x86"
+import x86 "github.com/vertex-language/vvm/cpu/lower/x86"
 
 type SectionKind int
 

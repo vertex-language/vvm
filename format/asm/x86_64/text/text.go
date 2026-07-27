@@ -16,8 +16,8 @@ import (
 	"fmt"
 	"strings"
 
-	enc "github.com/vertex-language/vvm/isa/x86_64/encoder"
-	lowerx64 "github.com/vertex-language/vvm/lower/x86_64"
+	enc "github.com/vertex-language/vvm/cpu/isa/x86_64/encoder"
+	lowerx64 "github.com/vertex-language/vvm/cpu/lower/x86_64"
 )
 
 // Encode renders p as a debug assembly listing: every function's machine

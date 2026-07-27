@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	isax64 "github.com/vertex-language/vvm/isa/x86_64"
-	enc "github.com/vertex-language/vvm/isa/x86_64/encoder"
+	isax64 "github.com/vertex-language/vvm/cpu/isa/x86_64"
+	enc "github.com/vertex-language/vvm/cpu/isa/x86_64/encoder"
 )
 
 // decoder walks one function's machine code left to right. fixups is keyed

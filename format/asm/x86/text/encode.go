@@ -23,8 +23,8 @@ import (
 	"sort"
 	"strings"
 
-	isax86 "github.com/vertex-language/vvm/isa/x86"
-	x86 "github.com/vertex-language/vvm/lower/x86"
+	isax86 "github.com/vertex-language/vvm/cpu/isa/x86"
+	x86 "github.com/vertex-language/vvm/cpu/lower/x86"
 )
 
 // Encode produces the debug listing for a lowered program.

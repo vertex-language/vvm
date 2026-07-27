@@ -16,7 +16,7 @@ import (
 	"fmt"
 	"strings"
 
-	lowerarm "github.com/vertex-language/vvm/lower/arm"
+	lowerarm "github.com/vertex-language/vvm/cpu/lower/arm"
 )
 
 // Encode renders p as a listing: one section per global, one per

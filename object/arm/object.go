@@ -17,7 +17,7 @@
 // vir.Module.Target.Arch) rather than reading it off the program.
 package object
 
-import arm "github.com/vertex-language/vvm/lower/arm"
+import arm "github.com/vertex-language/vvm/cpu/lower/arm"
 
 type SectionKind int
 
