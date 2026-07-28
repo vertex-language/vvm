@@ -1,32 +1,63 @@
 package msl
 
-// Stmt is the interface implemented by all statement nodes.
+// Stmt is implemented by every statement node.
 type Stmt interface{ isStmt() }
 
-// DeclStmt declares a local variable, optionally in an address space
-// (threadgroup locals) and optionally initialized. Array types place
-// their length at the declarator site.
-type DeclStmt struct {
-	Space   AddressSpace // "" for plain locals
+// AssignOp is an assignment operator, spelled as it prints.
+type AssignOp string
+
+// Assignment operators.
+const (
+	Set       AssignOp = "="
+	SetAdd    AssignOp = "+="
+	SetSub    AssignOp = "-="
+	SetMul    AssignOp = "*="
+	SetDiv    AssignOp = "/="
+	SetRem    AssignOp = "%="
+	SetBitAnd AssignOp = "&="
+	SetBitOr  AssignOp = "|="
+	SetBitXor AssignOp = "^="
+	SetShl    AssignOp = "<<="
+	SetShr    AssignOp = ">>="
+)
+
+// IncOp is ++ or --.
+type IncOp string
+
+// Increment operators.
+const (
+	Inc IncOp = "++"
+	Dec IncOp = "--"
+)
+
+// VarDecl declares a variable. It is both a Decl and a Stmt because MSL makes
+// no distinction: a module-scope `constant float kPi = 3.14;` and a local
+// `threadgroup float tile[256];` are the same production at different scopes.
+// Function constants are VarDecls in the constant space carrying a
+// [[function_constant(n)]] attribute.
+type VarDecl struct {
+	Space   AddressSpace // NoSpace for plain locals
 	Type    Type
 	Name    string
-	Init    Expr // nil for no initializer
+	Init    Expr // zero for no initializer
+	Attrs   []Attr
 	Comment string
 }
 
-func (*DeclStmt) isStmt() {}
+func (*VarDecl) isStmt() {}
+func (*VarDecl) isDecl() {}
 
-// AssignStmt is dst OP src; where Op is "=", "+=", "-=", etc.
-type AssignStmt struct {
-	Op      string
+// Assign is Dst Op Src.
+type Assign struct {
+	Op      AssignOp
 	Dst     Expr
 	Src     Expr
 	Comment string
 }
 
-func (*AssignStmt) isStmt() {}
+func (*Assign) isStmt() {}
 
-// ExprStmt is an expression evaluated for effect.
+// ExprStmt evaluates an expression for effect.
 type ExprStmt struct {
 	X       Expr
 	Comment string
@@ -34,83 +65,152 @@ type ExprStmt struct {
 
 func (*ExprStmt) isStmt() {}
 
-// ReturnStmt is return; or return x;.
-type ReturnStmt struct {
-	X       Expr // nil for bare return
+// Return is `return;` or `return x;`.
+type Return struct {
+	X       Expr // zero for a bare return
 	Comment string
 }
 
-func (*ReturnStmt) isStmt() {}
+func (*Return) isStmt() {}
 
-// IfStmt is a structured conditional with optional else block.
-type IfStmt struct {
-	Cond Expr
-	Then []Stmt
-	Else []Stmt // nil for no else
+// IncDec is ++x or --x, used mostly as a for-loop post clause.
+type IncDec struct {
+	Op IncOp
+	X  Expr
 }
 
-func (*IfStmt) isStmt() {}
+func (*IncDec) isStmt() {}
 
-// ForStmt is for (init; cond; post) { body }. Init and Post print in
-// inline (semicolon-free) form; either may be nil.
-type ForStmt struct {
+// If is a conditional. Els is nil when there is no else branch; an else-if
+// chain is an Els block holding a single *If, which is exactly how it prints.
+type If struct {
+	Cond Expr
+	Then *Block
+	Els  *Block
+}
+
+func (*If) isStmt() {}
+
+// Else attaches an else branch and returns the receiver for chaining.
+func (s *If) Else(fn func(*Block)) *If {
+	s.Els = newBlock(fn)
+	return s
+}
+
+// ElseIf attaches an `else if` branch and returns the nested *If so further
+// branches can be chained onto it.
+func (s *If) ElseIf(cond Expr, fn func(*Block)) *If {
+	inner := &If{Cond: cond, Then: newBlock(fn)}
+	s.Els = &Block{stmts: []Stmt{inner}}
+	return inner
+}
+
+// For is for (Init; Cond; Post) { Body }. Any clause may be nil or zero.
+type For struct {
 	Init Stmt
 	Cond Expr
 	Post Stmt
-	Body []Stmt
+	Body *Block
 }
 
-func (*ForStmt) isStmt() {}
+func (*For) isStmt() {}
 
-// WhileStmt is while (cond) { body }.
-type WhileStmt struct {
+// While is while (Cond) { Body }.
+type While struct {
 	Cond Expr
-	Body []Stmt
+	Body *Block
 }
 
-func (*WhileStmt) isStmt() {}
+func (*While) isStmt() {}
 
-// BreakStmt is break;.
-type BreakStmt struct{}
+// DoWhile is do { Body } while (Cond);.
+type DoWhile struct {
+	Body *Block
+	Cond Expr
+}
 
-func (*BreakStmt) isStmt() {}
+func (*DoWhile) isStmt() {}
 
-// ContinueStmt is continue;.
-type ContinueStmt struct{}
+// Case is one arm of a Switch. Vals holds the case labels; Fall omits the
+// implicit trailing break.
+type Case struct {
+	Vals []Expr
+	Body *Block
+	Fall bool
+}
 
-func (*ContinueStmt) isStmt() {}
+// Switch is switch (Tag) { ... }. Def is nil when there is no default arm.
+type Switch struct {
+	Tag   Expr
+	Cases []*Case
+	Def   *Block
+}
 
-// IncStmt is ++x (used primarily as a for-loop post statement).
-type IncStmt struct{ X Expr }
+func (*Switch) isStmt() {}
 
-func (*IncStmt) isStmt() {}
+// Case appends an arm and returns the Switch for chaining.
+func (s *Switch) Case(vals []Expr, fn func(*Block)) *Switch {
+	s.Cases = append(s.Cases, &Case{Vals: vals, Body: newBlock(fn)})
+	return s
+}
 
-// CommentStmt is a standalone // comment line.
-type CommentStmt struct{ Text string }
+// Fallthrough appends an arm that omits the implicit break.
+func (s *Switch) Fallthrough(vals []Expr, fn func(*Block)) *Switch {
+	s.Cases = append(s.Cases, &Case{Vals: vals, Body: newBlock(fn), Fall: true})
+	return s
+}
 
-func (*CommentStmt) isStmt() {}
+// Default attaches the default arm and returns the Switch.
+func (s *Switch) Default(fn func(*Block)) *Switch {
+	s.Def = newBlock(fn)
+	return s
+}
 
-// BlankStmt is an empty line.
-type BlankStmt struct{}
+// Break is break;.
+type Break struct{}
 
-func (*BlankStmt) isStmt() {}
+func (*Break) isStmt() {}
 
-// RawStmt is verbatim source text. It participates in scoping and
-// indentation; multi-line text is indented line by line.
+// Continue is continue;.
+type Continue struct{}
+
+func (*Continue) isStmt() {}
+
+// Scope is a bare nested block, used to bound the lifetime of locals.
+type Scope struct{ Body *Block }
+
+func (*Scope) isStmt() {}
+
+// Comment is a standalone // line.
+type Comment struct{ Text string }
+
+func (*Comment) isStmt() {}
+
+// Blank is an empty line.
+type Blank struct{}
+
+func (*Blank) isStmt() {}
+
+// RawStmt is verbatim source text. It participates in scoping and indentation;
+// multi-line text is indented line by line. This is the escape hatch for
+// stdlib surface with no typed constructor.
 type RawStmt struct{ Text string }
 
 func (*RawStmt) isStmt() {}
 
-// Inc builds an ++x statement for use as a for-loop post statement.
-func Inc(x any) Stmt { return &IncStmt{X: asExpr(x)} }
-
-// AssignS builds a dst = src statement for use as a for-loop init or
-// post statement.
-func AssignS(dst, src any) Stmt {
-	return &AssignStmt{Op: "=", Dst: asExpr(dst), Src: asExpr(src)}
+// PPIf is a statement-level preprocessor conditional. Cond is the raw
+// condition text, e.g. "__METAL_VERSION__ >= 400". Preprocessor lines print at
+// column zero regardless of nesting depth.
+type PPIf struct {
+	Cond string
+	Then *Block
+	Els  *Block
 }
 
-// DeclS builds a typed declaration statement for use as a for-loop init.
-func DeclS(t Type, name string, init any) Stmt {
-	return &DeclStmt{Type: t, Name: name, Init: asExpr(init)}
+func (*PPIf) isStmt() {}
+
+// Else attaches an #else branch.
+func (s *PPIf) Else(fn func(*Block)) *PPIf {
+	s.Els = newBlock(fn)
+	return s
 }

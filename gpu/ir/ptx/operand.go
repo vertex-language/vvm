@@ -4,144 +4,126 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 )
 
-// Operand is anything that can appear in an instruction operand position.
-type Operand interface{ Text() string }
+// Operand is anything that can occupy an instruction operand position. The
+// interface is closed: only this package can implement it.
+type Operand interface {
+	Text() string
+	operand()
+}
 
-// Imm is an integer immediate.
+// Addressable is an operand that can be the base of a memory operand.
+type Addressable interface {
+	Operand
+	addressable()
+}
+
+// Imm is a signed integer immediate.
 type Imm int64
 
 func (i Imm) Text() string { return strconv.FormatInt(int64(i), 10) }
+func (Imm) operand()       {}
 
-// FImm is a floating-point immediate, printed in the canonical PTX hex
-// form (0f... / 0d...) only via FHex; FImm prints decimal.
-type FImm float64
+// UImm is an unsigned integer immediate. It prints with the U suffix so
+// values above the .s64 range are not reinterpreted as negative.
+type UImm uint64
 
-func (f FImm) Text() string { return formatFloat(float64(f)) }
+func (u UImm) Text() string { return strconv.FormatUint(uint64(u), 10) + "U" }
+func (UImm) operand()       {}
 
-// FHex32 prints a float32 immediate as the exact-bits 0fXXXXXXXX form.
-type FHex32 float32
+// F32Imm is a single-precision immediate. It always prints in the exact-bits
+// 0fXXXXXXXX form, so no value, including NaN and the infinities, can be
+// rendered as invalid or lossy PTX.
+type F32Imm float32
 
-func (f FHex32) Text() string { return fmt.Sprintf("0f%08X", math.Float32bits(float32(f))) }
+func (f F32Imm) Text() string {
+	return fmt.Sprintf("0f%08X", math.Float32bits(float32(f)))
+}
+func (F32Imm) operand() {}
 
-// FHex64 prints a float64 immediate as the exact-bits 0dXXXXXXXXXXXXXXXX form.
-type FHex64 float64
+// F64Imm is a double-precision immediate in the exact-bits 0dX... form.
+type F64Imm float64
 
-func (f FHex64) Text() string { return fmt.Sprintf("0d%016X", math.Float64bits(float64(f))) }
+func (f F64Imm) Text() string {
+	return fmt.Sprintf("0d%016X", math.Float64bits(float64(f)))
+}
+func (F64Imm) operand() {}
 
-// Sym is a bare symbol reference (label or variable name).
+// Sym is a bare symbol reference. Prefer the typed handles returned by
+// Module.Var, Callable.Param, Body.Label and Module.Add; Sym exists for
+// symbols this package does not model.
 type Sym string
 
 func (s Sym) Text() string { return string(s) }
+func (Sym) operand()       {}
+func (Sym) addressable()   {}
 
-// SpecialReg is a predefined %-register.
-type SpecialReg string
-
-func (s SpecialReg) Text() string { return string(s) }
-
-// AddrRef is a memory operand: [base], [base+off], or [symbol].
-type AddrRef struct {
-	Base   Operand
+// Mem is a memory operand: [base], [base+off], or [base-off].
+type Mem struct {
+	Base   Addressable
 	Offset int64
 }
 
-func (a AddrRef) Text() string {
-	if a.Offset != 0 {
-		if a.Offset < 0 {
-			return fmt.Sprintf("[%s%d]", a.Base.Text(), a.Offset)
-		}
-		return fmt.Sprintf("[%s+%d]", a.Base.Text(), a.Offset)
+func (m Mem) Text() string {
+	if m.Base == nil {
+		return "[<nil>]"
 	}
-	return "[" + a.Base.Text() + "]"
+	switch {
+	case m.Offset > 0:
+		return "[" + m.Base.Text() + "+" + strconv.FormatInt(m.Offset, 10) + "]"
+	case m.Offset < 0:
+		return "[" + m.Base.Text() + strconv.FormatInt(m.Offset, 10) + "]"
+	}
+	return "[" + m.Base.Text() + "]"
 }
+func (Mem) operand() {}
 
-// Addr builds a memory operand from a register or symbol, with an
-// optional byte offset: Addr(a) -> [%rd1], Addr(a, 16) -> [%rd1+16].
-func Addr(base Operand, off ...int64) AddrRef {
-	a := AddrRef{Base: base}
+// At builds a memory operand with an optional byte offset:
+// At(r) renders as [%rd1], At(r, 16) as [%rd1+16].
+func At(base Addressable, off ...int64) Mem {
+	m := Mem{Base: base}
 	if len(off) > 0 {
-		a.Offset = off[0]
+		m.Offset = off[0]
 	}
-	return a
+	return m
 }
 
-// SymAddr builds a memory operand addressing a named symbol: [name].
-func SymAddr(name string, off ...int64) AddrRef {
-	return Addr(Sym(name), off...)
-}
+// VecOp is a braced operand list for vector loads and stores. Its length
+// supplies the .vN qualifier, so the vector width is stated exactly once.
+type VecOp []Operand
 
-// vecOperand groups registers for vector ld/st: {%f1, %f2, %f3, %f4}.
-type vecOperand []Operand
-
-func (v vecOperand) Text() string {
-	s := "{"
+func (v VecOp) Text() string {
+	parts := make([]string, len(v))
 	for i, o := range v {
-		if i > 0 {
-			s += ", "
-		}
-		s += o.Text()
+		parts[i] = o.Text()
 	}
-	return s + "}"
+	return "{" + strings.Join(parts, ", ") + "}"
 }
+func (VecOp) operand() {}
 
-// Vec groups operands for vector loads/stores.
-func Vec(ops ...Operand) Operand { return vecOperand(ops) }
+// Vec groups operands for a vector load or store.
+func Vec(ops ...Operand) VecOp { return VecOp(ops) }
 
 // group is a parenthesized operand list used by call.
 type group []Operand
 
 func (g group) Text() string {
-	s := "("
+	parts := make([]string, len(g))
 	for i, o := range g {
-		if i > 0 {
-			s += ", "
-		}
-		s += o.Text()
+		parts[i] = o.Text()
 	}
-	return s + ")"
+	return "(" + strings.Join(parts, ", ") + ")"
 }
+func (group) operand() {}
 
-// toOperand coerces convenient Go values into operands, so emit methods
-// accept plain ints and floats (cb.MulWideU32(off, i, 4)).
-func toOperand(v any) Operand {
-	switch x := v.(type) {
-	case Operand:
-		return x
-	case int:
-		return Imm(x)
-	case int32:
-		return Imm(x)
-	case int64:
-		return Imm(x)
-	case uint:
-		return Imm(x)
-	case uint32:
-		return Imm(x)
-	case uint64:
-		return Imm(x)
-	case float32:
-		return FImm(x)
-	case float64:
-		return FImm(x)
-	case string:
-		return Sym(x)
-	default:
-		panic(fmt.Sprintf("ptx: cannot use %T as operand", v))
-	}
-}
+// pair joins two operands with a vertical bar, as in shfl.sync's optional
+// predicate destination: d|p.
+type pair struct{ a, b Operand }
 
-func toOperands(vs []any) []Operand {
-	out := make([]Operand, len(vs))
-	for i, v := range vs {
-		out[i] = toOperand(v)
-	}
-	return out
-}
+func (p pair) Text() string { return p.a.Text() + "|" + p.b.Text() }
+func (pair) operand()       {}
 
-func formatFloat(v float64) string {
-	if v == math.Trunc(v) && math.Abs(v) < 1e15 {
-		return strconv.FormatFloat(v, 'f', 1, 64)
-	}
-	return strconv.FormatFloat(v, 'g', -1, 64)
-}
+// Or pairs a destination register with an optional predicate destination.
+func Or(d, p Reg) Operand { return pair{d, p} }

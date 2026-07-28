@@ -1,12 +1,17 @@
-// Package msl is an in-memory intermediate representation (IR) for Apple
-// Metal Shading Language (MSL) translation units. It models the structure
-// of a .metal source file — language-version header, includes, module
-// constants, structs, and function bodies — without any formatting logic.
-// Text printing lives in the encoding/text sub-package.
+// Package msl is an in-memory intermediate representation for Apple Metal
+// Shading Language translation units.
 //
-// See the README for the full design rationale. In short: text is the
-// wire format (the metal compiler consumes .metal source), the body IR
-// is a statement tree over a small expression IR, there is no register
-// model, thread indices are attributed parameters, and this package does
-// no type inference — the metal frontend is the verifier of record.
+// MSL is C++ with extensions, so the IR is a declaration/statement/expression
+// tree over the MSL grammar — not a flat instruction stream. Every exported
+// symbol corresponds to a grammar production. Templates, the preprocessor, and
+// address-space qualifiers are modelled as grammar, not as string escapes.
+//
+// Construction, checking, and printing are three separate steps:
+//
+//	m := msl.NewModule(msl.Metal32)   // build
+//	diags := msl.Verify(m)            // check (structure + version gating)
+//	src, err := text.Print(m)         // print (the only encoder)
+//
+// The package performs no type inference and no operand checking. The metal
+// frontend is the verifier of record.
 package msl

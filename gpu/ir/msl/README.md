@@ -1,498 +1,109 @@
 # msl
 
-Package `msl` is an in-memory intermediate representation (IR) for Apple
-Metal Shading Language (MSL) translation units. It models the structure
-of a `.metal` source file — language-version header, includes, module
-constants, structs, and function bodies (kernel / vertex / fragment /
-visible) — without any formatting logic. Text printing lives in a
-separate sub-package.
+The `msl` package provides a structured, in-memory Intermediate Representation (IR) for Apple Metal Shading Language (MSL) translation units.
 
-Text is the interchange format this package produces: the `.metal`
-source *is* what the `metal` compiler (a clang frontend) consumes, and
-it is Apple's toolchain — not this package — that lowers it to `.air`
-bitcode and links it into a `.metallib`. Producing `.air`/`.metallib`
-directly is explicitly out of scope (they are unstable LLVM bitcode
-containers). Decoding (parsing MSL back into the IR) is out of scope
-for v1.
+It models `.metal` files explicitly — includes, using-directives, module-scope constants, structs, function-constants, and stage functions (`kernel`, `vertex`, `fragment`, and friends), down through statement and expression bodies. The IR focuses purely on structure; all text formatting and generation logic is delegated to the `msl/encoding/text` package.
 
-MSL is a *structured* C++-based language, not a flat instruction
-stream. The body builder therefore emits **statements** (declarations,
-assignments, control-flow blocks, calls) over a small **expression**
-IR. There is no register model — variables are named — and thread
-indices arrive as attributed kernel parameters
-(`[[thread_position_in_grid]]`), which is modeled on `Param`.
+## Design Principles
 
-````
-github.com/vertex-language/vvm/gpu/ir/msl                 # IR types (this package)
-github.com/vertex-language/vvm/gpu/ir/msl/encoding/text   # text printer (.metal)
-````
+- **Grammar-driven.** Every exported symbol in the API corresponds directly to a construct in the MSL grammar. Address spaces, attributes, and templates are modelled as typed grammar, not string escapes.
+- **Declare-before-use, by construction.** `Module.Decls` is a single ordered list rather than per-kind buckets. MSL requires declarations to precede their use — `Module.Add`, `Constant`, `Alias`, and friends append in call order, so a generated `constant Params kDefaults = {...};` naturally follows its `struct Params`.
+- **Editable bodies.** A `Block` supports standard array mutations — `.Append()`, `.InsertBefore()`, `.Replace()`, `.Remove()` — alongside fluent emit methods (`Let`, `Assign`, `If`, `For`, `Range`, `Switch`, ...) so passes can build and rewrite statement lists directly.
+- **No implicit inference.** The package performs no type checking and no operand validation. `msl.Verify` handles structural and revision-gating validation, but the `metal` frontend remains the verifier of record.
+- **Name hygiene as a pass, not a side effect.** `Resolve` disambiguates shadowed declarations (`sum`, `sum_1`, `sum_2`, ...) on demand, so splicing a detached function body into a module stays safe until you explicitly ask for renaming.
+- **Version is explicit.** `Version` maps directly to the `-std=` flag, the `__METAL_VERSION__` macro, and the feature floors `Verify` enforces. There is no default revision — `NewModule` requires one.
 
----
+## Quick Start
 
-## Quick start
+The example below builds a module, declares a kernel with buffer-bound parameters, emits a bounds-checked body, verifies it, and renders the final source text.
 
-````go
+```go
+package main
+
 import (
-    "github.com/vertex-language/vvm/gpu/ir/msl"
-    "github.com/vertex-language/vvm/gpu/ir/msl/encoding/text"
+	"log"
+
+	"github.com/vertex-language/vvm/gpu/ir/msl"
+	"github.com/vertex-language/vvm/gpu/ir/msl/encoding/text"
 )
 
-// 1. Create a module (defaults to metal3.2, <metal_stdlib>, using namespace metal).
-m := msl.NewModule()
-m.SetVersion(msl.Metal32)
+func main() {
+	// A module requires a language revision; it seeds <metal_stdlib> and
+	// `using namespace metal;` automatically.
+	m := msl.NewModule(msl.Metal30)
 
-// 2. Build a kernel: C[i] = A[i] + B[i]
-k := msl.NewKernel("vadd")
-a  := k.Params.Add(msl.Param{Name: "A",   Type: msl.Ptr(msl.Device,   msl.Float), Attr: msl.Buffer(0)})
-b  := k.Params.Add(msl.Param{Name: "B",   Type: msl.Ptr(msl.Device,   msl.Float), Attr: msl.Buffer(1)})
-c  := k.Params.Add(msl.Param{Name: "C",   Type: msl.Ptr(msl.Device,   msl.Float), Attr: msl.Buffer(2)})
-n  := k.Params.Add(msl.Param{Name: "n",   Type: msl.Ref(msl.Constant, msl.UInt),  Attr: msl.Buffer(3)})
-id := k.Params.Add(msl.Param{Name: "gid", Type: msl.UInt, Attr: msl.ThreadPositionInGrid})
+	k := msl.NewKernel("vector_add")
 
-cb := k.Code
-cb.If(msl.Ge(id, n)).Return().End()          // if (gid >= n) { return; }
-cb.Assign(msl.Index(c, id),                  // C[gid] = A[gid] + B[gid];
-    msl.Add(msl.Index(a, id), msl.Index(b, id)))
+	// Params return an Expr, so the reference can be used directly in the body.
+	a := k.Param("a", msl.Ptr(msl.Device, msl.Const(msl.Float)), msl.Buffer(0))
+	b := k.Param("b", msl.Ptr(msl.Device, msl.Const(msl.Float)), msl.Buffer(1))
+	c := k.Param("c", msl.Ptr(msl.Device, msl.Float), msl.Buffer(2))
+	tid := k.Param("tid", msl.UInt, msl.ThreadPositionInGrid)
 
-m.Funcs.Add(k)
+	body := k.Body
+	n := body.Let(msl.UInt, "n", msl.U(1<<20)) // stand-in for a real bound
 
-// 3. Print as MSL source.
-src, err := text.NewPrinter(m).Print()
-````
+	body.If(tid.Ge(n), func(b *msl.Block) {
+		b.Return()
+	})
+	body.Assign(c.At(tid), a.At(tid).Add(b.At(tid)))
 
-The snippet above produces:
+	m.Add(k)
 
-````metal
-//
-// Generated by vertex
-//
+	// Verify checks structure and revision gating (e.g. an attribute that
+	// postdates the module's -std=).
+	for _, diag := range msl.Verify(m) {
+		log.Println(diag)
+	}
 
-#include <metal_stdlib>
-using namespace metal;
+	// Resolve disambiguates any shadowed names before printing.
+	msl.Resolve(m)
 
-kernel void vadd(
-    device float*        A   [[buffer(0)]],
-    device float*        B   [[buffer(1)]],
-    device float*        C   [[buffer(2)]],
-    constant uint&       n   [[buffer(3)]],
-    uint                 gid [[thread_position_in_grid]])
-{
-    if (gid >= n) {
-        return;
-    }
-    C[gid] = A[gid] + B[gid];
+	// Print is the only encoder: .metal source is the wire format the metal
+	// frontend consumes.
+	src, err := text.Print(m)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(src)
 }
-````
+```
 
-Compile-check with `xcrun -sdk macosx metal -std=metal3.2 vadd.metal`.
+## Advanced Usage
 
----
+### The `Raw` Escape Hatches
 
-## Concepts
+MSL surfaces new stdlib functions, attributes, and scalar spellings faster than any typed package can track. Every layer of the IR has an untyped escape hatch that still participates in walking, resolution, and printing:
 
-### Module
+```go
+// Module scope.
+m.Add(&msl.RawDecl{Text: "// hand-written epilogue"})
 
-`Module` is the root of the IR. It corresponds to a single `.metal`
-translation unit and carries the language version (advisory — MSL has
-no in-source version pragma; the version maps to the `-std=` flag and
-is used only for linting), the include list, namespace usings, module
-constants (`constant` address space globals and function constants),
-struct definitions, and functions.
+// Statement scope.
+body.Raw("simdgroup_barrier(mem_flags::mem_threadgroup);")
 
-````go
-m := msl.NewModule()               // metal3.2, #include <metal_stdlib>, using namespace metal
-m.SetVersion(msl.Metal40)          // lint floor + suggested -std=metal4.0
-m.Includes.Add("metal_tensor")     // extra system headers (#include <metal_tensor>)
-m.UsingNamespaces = []string{"metal", "mpp::tensor_ops"}
-````
+// Expressions.
+x := msl.Raw("as_type<float>(bits)")
 
-#### Language version constants
+// Attributes without a typed constructor.
+p.Attrs = append(p.Attrs, msl.RawAttr("some_new_attribute", "1"))
 
-| Constant  | `-std=`     | Ships with          | Notes                                    |
-|-----------|-------------|---------------------|-------------------------------------------|
-| `Metal23` | `metal2.3`  | iOS 14 / macOS 11   | function pointers, intersection fns      |
-| `Metal24` | `metal2.4`  | iOS 15 / macOS 12   |                                           |
-| `Metal30` | `metal3.0`  | iOS 16 / macOS 13   | unified iOS/macOS revision, mesh shaders |
-| `Metal31` | `metal3.1`  | iOS 17 / macOS 14   | `bfloat`, atomic texture ops             |
-| `Metal32` | `metal3.2`  | iOS 18 / macOS 15   | shader logging — **current default**     |
-| `Metal40` | `metal4.0`  | iOS 26 / macOS 26   | tensors, cooperative tensors, Shader ML  |
-| `Metal41` | `metal4.1`  | iOS 27 / macOS 27   |                                           |
+// Scalars and types newer than this package's ScalarType table.
+t := msl.ScalarType("float8_e4m3")
+```
 
-`Version` is a plain `{Major, Minor}` struct with a `GTE` comparison, so
-future revisions can be constructed directly. Pre-3.0 split revisions
-(`ios-metal2.x` / `macos-metal2.x`) can be spelled via `Version.OS` but
-are not given named constants.
+`RawAttr` and unlisted `ScalarType` spellings pass through `Verify` unchecked — they are accepted anywhere and never version-gated, since the package has no floor to check them against.
 
-The default is `Metal32` rather than the newest revision: the `-std`
-floor directly gates which OS releases can load the resulting library,
-so the default favors deployment reach. Set `Metal40`+ explicitly for
-tensor work.
+### Version Gating
 
-> **No target directive.** MSL has no target architecture concept in
-> source; GPU-family gating happens at pipeline creation via the Metal
-> Feature Set tables. The version constant is the only gate this
-> package models.
+`Version.GTE` and `Module.VersionGate` model MSL's `#if __METAL_VERSION__ >= N` convention directly, for code that must ship against more than one OS floor:
 
----
+```go
+m.VersionGate(msl.Metal40,
+	[]msl.Decl{tensorPath},
+	[]msl.Decl{bufferFallbackPath},
+)
+```
 
-### Address spaces
-
-````go
-msl.Device                // device
-msl.Constant              // constant
-msl.Threadgroup           // threadgroup
-msl.ThreadgroupImageblock // threadgroup_imageblock
-msl.Thread                // thread
-msl.RayData               // ray_data
-msl.ObjectData            // object_data
-````
-
-Address spaces qualify pointer and reference *types* — they are part of
-the type system, not of individual operations. `msl.Ptr(space, t)` and
-`msl.Ref(space, t)` build the qualified type; there is no unqualified
-pointer constructor (the Metal compiler rejects one, so the API makes
-it unrepresentable).
-
----
-
-### Types
-
-Scalar constants mirroring the spec's fundamental types:
-
-````go
-msl.Bool
-msl.Char,  msl.UChar, msl.Short, msl.UShort   // 8/16-bit ints
-msl.Int,   msl.UInt,  msl.Long,  msl.ULong    // 32/64-bit ints
-msl.Half,  msl.Float, msl.BFloat              // bfloat requires ≥ Metal31
-msl.Size,  msl.PtrDiff, msl.Void
-````
-
-Constructors compose the rest:
-
-````go
-msl.Vec(msl.Float, 4)          // float4
-msl.Mat(msl.Float, 4, 4)       // float4x4
-msl.Packed(msl.Float, 3)       // packed_float3
-msl.Atomic(msl.UInt)           // atomic_uint
-msl.Array(msl.Float, 256)      // float[256] (prints at declarator site)
-msl.Ptr(msl.Device, msl.Float) // device float*
-msl.Ref(msl.Constant, msl.UInt)// constant uint&
-msl.Named("MyStruct")          // reference to a declared struct
-````
-
-Resource types:
-
-````go
-msl.Texture2D(msl.Float, msl.AccessSample)   // texture2d<float, access::sample>
-msl.Texture3D(...), msl.TextureCube(...), msl.Texture2DArray(...)
-msl.Depth2D(msl.Float, msl.AccessSample)
-msl.Sampler                                   // sampler
-msl.ImageBlock("Layout")                      // imageblock<Layout>
-````
-
-Metal 4 tensor types (require `Metal40`, `#include <metal_tensor>`):
-
-````go
-msl.TensorHandle(msl.Half, 2)   // tensor<device half, dextents<int, 2>, tensor_handle>
-msl.TensorInline(...)           // GPU-side view into a tensor or buffer
-msl.CooperativeTensor(...)      // thread-distributed transient tensor
-````
-
-`TypeString` renders any `Type` to its canonical MSL spelling; the
-printer uses it internally, but it's exported for anyone building their
-own tooling on top of the IR.
-
----
-
-### Attributes
-
-`Attr` values model `[[...]]` attributes. Binding attributes take an
-index; built-in attributes are predefined:
-
-````go
-// Bindings (parameters)
-msl.Buffer(0)  msl.Texture(1)  msl.SamplerAttr(0)  msl.ThreadgroupSlot(0)
-
-// Kernel built-ins (parameters)
-msl.ThreadPositionInGrid          msl.ThreadPositionInThreadgroup
-msl.ThreadgroupPositionInGrid     msl.ThreadsPerThreadgroup
-msl.ThreadsPerGrid                msl.ThreadIndexInThreadgroup
-msl.SIMDGroupIndexInThreadgroup   msl.ThreadIndexInSIMDGroup
-msl.DispatchThreadsPerThreadgroup
-
-// Vertex/fragment built-ins (params and struct fields)
-msl.StageIn        msl.VertexID      msl.InstanceID
-msl.Position       msl.PointSize     msl.ColorAttr(0)
-msl.AttributeAttr(0)                 // [[attribute(0)]] on stage-in fields
-
-// Function-level
-msl.MaxTotalThreadsPerThreadgroup(256)
-msl.Visible        msl.Stitchable
-msl.RawAttr("early_fragment_tests") // escape hatch
-````
-
-Thread and dispatch indices are declaration-site concerns: you declare
-an attributed parameter once and then use it as an ordinary expression
-throughout the body.
-
----
-
-### Structs
-
-Vertex/fragment IO and argument buffers are structs with attributed
-fields:
-
-````go
-s := msl.NewStruct("VertexOut")
-s.Fields.Add(msl.Field{Name: "position", Type: msl.Vec(msl.Float, 4), Attr: msl.Position})
-s.Fields.Add(msl.Field{Name: "uv",       Type: msl.Vec(msl.Float, 2)})
-m.Structs.Add(s)
-````
-
-````metal
-struct VertexOut {
-    float4 position [[position]];
-    float2 uv;
-};
-````
-
----
-
-### Module-scoped constants and function constants
-
-````go
-m.Consts.Add(msl.Const{Type: msl.Float, Name: "kPi", Init: msl.F(3.14159265)})
-// constant float kPi = 3.14159265;
-
-m.FnConsts.Add(msl.FnConst{Type: msl.Bool, Name: "useFastPath", Index: 0})
-// constant bool useFastPath [[function_constant(0)]];
-````
-
-Function constants are MSL's link-time specialization mechanism, filled
-in on the host side via `MTLFunctionConstantValues`.
-
----
-
-### Functions
-
-`Kernel` (→ `kernel`), `Vertex` (→ `vertex`), `Fragment` (→ `fragment`),
-and `Function` (→ plain / `[[visible]]` / `[[stitchable]]`) share a
-`Callable` core: return type, parameter list, function attributes, and a
-`*CodeBuilder` body (nil body = declaration only). Later stage
-qualifiers (`intersection`, `object`, `mesh`) are constructed via
-`msl.NewStageFunction(qualifier, name)` and otherwise identical.
-
-````go
-k := msl.NewKernel("reduce")
-k.Attrs.Add(msl.MaxTotalThreadsPerThreadgroup(1024))
-
-v := msl.NewVertex("vmain")
-v.Ret = msl.Named("VertexOut")
-
-f := msl.NewFunction("helper")
-f.Ret = msl.Float
-f.Attrs.Add(msl.Visible)
-````
-
----
-
-### CodeBuilder
-
-Statement-oriented, append-only, chainable — every emit method returns
-the receiver. Because MSL is structured, block statements (`If`, `For`,
-`While`) open a nested scope and are closed with `End()`; the printer
-handles indentation. `Depth()` reports the number of unclosed blocks
-(0 for a structurally complete body), and `Body()` returns the finished
-top-level statement list.
-
-#### Variables
-
-`Let` declares named locals, `LetUninit` declares one without an
-initializer, `LetThreadgroup` declares a `threadgroup`-space local, and
-`Temp` hands out deterministic fresh names (`_t1`, `_t2`, …) when you
-don't care:
-
-````go
-sum := cb.Let(msl.Float, "sum", msl.F(0))       // float sum = 0.0;
-cb.LetUninit(msl.Float, "acc")                  // float acc;
-tmp := cb.Temp(msl.Vec(msl.Float, 4), expr)      // float4 _t1 = <expr>;
-tg  := cb.LetThreadgroup(msl.Array(msl.Float, 256), "tile")
-                                                 // threadgroup float tile[256];
-````
-
-`Let` (and `LetThreadgroup`, `LetUninit`) uniquify duplicate names
-(`sum`, `sum_1`, …) so generated code never shadows accidentally.
-Parameter names share the same scope, so a local can't collide with a
-parameter either.
-
-#### Expressions
-
-A small typed expression tree; constructors coerce plain Go values
-(`int` → `msl.I`, `float64` → `msl.F`, `string` → identifier), which is
-why `msl.Ge(id, n)` and `msl.Add(x, 1)` both work:
-
-````go
-msl.Add(a, b)  msl.Sub  msl.Mul  msl.Div  msl.Rem       // arithmetic
-msl.Eq  msl.Ne  msl.Lt  msl.Le  msl.Gt  msl.Ge           // comparison
-msl.And msl.Or  msl.Not  msl.BitAnd  msl.Shl  ...        // logic / bits
-msl.Index(ptr, i)         // ptr[i]
-msl.Member(v, "x")        // v.x     (also msl.Swizzle(v, "xyz"))
-msl.CallExpr("dot", a, b) // dot(a, b)
-msl.Ctor(msl.Vec(msl.Float, 4), x, y, z, 1) // float4(x, y, z, 1.0)
-msl.Cast(msl.Int, x)      // int(x)     — functional-style
-msl.AddrOf(x)  msl.Deref(p)
-````
-
-#### Statements
-
-````go
-cb.Assign(dst, src)                  // dst = src;
-cb.AddAssign(dst, src)               // dst += src;  (and Sub/Mul/Div)
-cb.Expr(msl.CallExpr(...))           // expression statement
-cb.Return(x) / cb.Return()           // return x; / return;
-cb.If(cond). ... .Else(). ... .End()
-cb.For(init, cond, step). ... .End() // also cb.ForRange(i, 0, n) sugar
-cb.While(cond). ... .End()
-cb.Break() / cb.Continue()
-cb.Comment("note") / cb.Blank()
-cb.Trailing("note")                  // attach // note to the last emitted stmt
-````
-
-`ForRange(v, lo, hi)` is sugar for a counted loop
-(`for (uint i = lo; i < hi; ++i)`); it reserves the loop variable's name
-in the builder's scope. For a hand-built `For`, the free functions
-`msl.DeclS`, `msl.AssignS`, and `msl.Inc` construct standalone init/post
-statements without emitting them into a frame:
-
-````go
-cb.For(msl.DeclS(msl.Int, "i", msl.I(0)), msl.Lt("i", n), msl.Inc("i")).
-    ... .
-    End()
-````
-
-`Trailing` attaches a trailing `// comment` to the most recently emitted
-simple statement (declaration, assignment, expression, or return); it's
-a no-op if nothing has been emitted yet, and only prints when the
-printer has comments enabled.
-
-There are no labels and no `goto` in the builder — MSL inherits C++
-`goto` but the IR deliberately doesn't model it; structured control
-flow covers the emission surface.
-
-#### Builtin call helpers (representative)
-
-Anything in `<metal_stdlib>` is reachable via `CallExpr`; the common
-sync/SIMD/atomic/texture surface gets typed helpers:
-
-````go
-// Sync
-cb.ThreadgroupBarrier(msl.MemThreadgroup)   // threadgroup_barrier(mem_flags::mem_threadgroup);
-cb.SIMDGroupBarrier(msl.MemNone)
-
-// SIMD-group
-msl.SimdShuffle(x, lane) / msl.SimdShuffleXor(x, mask)
-msl.SimdSum(x) / msl.SimdMax(x) / msl.SimdBallot(p)
-
-// Atomics (expression helpers over atomic_* fetch/exchange/CAS)
-msl.AtomicLoad(p, msl.Relaxed)
-msl.AtomicFetchAdd(p, v, msl.Relaxed)
-msl.AtomicCompareExchangeWeak(p, expected, desired, ...)
-
-// Textures & samplers
-msl.Sample(tex, smp, uv) / msl.TexRead(tex, coord)
-cb.TexWrite(tex, val, coord)
-````
-
-Atomic and barrier orderings default to `msl.Relaxed`, the only memory
-order MSL actually supports, so the trailing `MemoryOrder` args are
-almost always omittable.
-
-#### Raw escape hatch
-
-The stdlib surface is enormous (ray tracing intersectors, mesh grids,
-imageblocks, tensor_ops, …). Rather than chase all of it, anything not
-covered by a typed constructor goes through:
-
-````go
-cb.Raw("auto mm = mpp::tensor_ops::matmul2d<desc>(tA, tB, tC);")
-cb.Rawf("os_log_default.log(\"%s\", %s);", "%d", v)
-````
-
-`Raw` statements participate in scoping and indentation. Typed builders
-for the tensor/raytracing families can be added incrementally as their
-own files (`tensor.go`, `raytracing.go`) without touching the core.
-
----
-
-## Text printing
-
-````go
-src, err := text.NewPrinter(m).Print()
-````
-
-Output ordering: header comment, includes, usings, function constants,
-module constants, structs (in declaration order — no dependency
-sorting; declare before use), function declarations/definitions.
-Parameters print one-per-line with aligned attributes for kernels and
-inline for short signatures; bodies indent with 4 spaces.
-
-`Printer` options:
-
-````go
-p := text.NewPrinter(m).
-    WithComments(true).                    // trailing // comments from Stmt.Comment
-    WithHeader("Generated by vertex 0.4"). // "" disables the header block
-    WithLint(true)                         // advisory version-gate warnings
-
-src, err := p.Print()
-notes := p.Warnings()   // e.g. "bfloat requires metal3.1"; "tensor types require metal4.0"
-````
-
-`Print` returns an error only for structurally invalid modules (e.g. a
-`Ptr`/`Ref` with no address space smuggled in via zero values, a kernel
-with a non-void return type, or a body left with an unclosed `If`/`For`/
-`While` block — check `CodeBuilder.Depth()` if you want to catch that
-before printing). Lint findings are warnings, never errors.
-
----
-
-## Design notes
-
-**Text is the wire format.** The `metal` frontend consumes `.metal`
-source; only its output (`.air` → `.metallib`) is binary, and the AIR
-bitcode format is undocumented and unstable across Xcode releases. So
-there is exactly one encoder (the printer) and its output must be
-byte-stable for a given IR (deterministic temp naming, stable attribute
-ordering). This is covered by `TestDeterminism`.
-
-**Statements, not instructions.** MSL has real control flow, scopes,
-and expressions, so the body IR is a statement tree with explicit
-`If/.../End()` blocks. No labels, no branches, no offset resolution.
-
-**No register model.** Variables are named; `Temp` is a naming
-convenience, not an allocator. The Metal compiler's LLVM backend owns
-register allocation outright.
-
-**Built-ins are parameters.** Thread and dispatch indices are
-attributed kernel parameters, so "reading the thread id" is a
-declaration-site concern, not an emit-site one.
-
-**No inference.** This package does not type-check expression trees,
-does not verify address-space compatibility, and does not gate features
-per GPU family. Garbage in, garbage out — the `metal` frontend is the
-verifier of record.
-
-**Version gating is advisory.** Version constants exist so callers can
-pick a floor matching their `-std=` flag; the printer optionally warns
-(not errors) via `WithLint(true)` when an emitted feature postdates
-`m.Version`, with warnings retrievable from `Printer.Warnings()`.
-
-**Typed core, raw periphery.** Scalar/vector math, control flow,
-atomics, barriers, SIMD-group ops, and basic texture access get typed
-constructors; tensor_ops, ray tracing, mesh shaders, and imageblocks
-start as `Raw` and get promoted per-family as needed.
-
-**Convenience coercion.** Expression constructors and statement methods
-accept plain Go ints, floats, and strings alongside `Expr` values.
-This is the one place ergonomics won over strict typing; declaration
-sites (types, attributes, names) remain strictly typed.
+`Verify` cross-checks version-gated attributes and types (`bfloat`, `auto`, tensors, cooperative tensors, `[[stitchable]]`, ...) against the module's declared `Version` and emits warnings — not errors — when a feature postdates the floor, since a `VersionGate` branch may intentionally target a newer revision than the module's baseline.

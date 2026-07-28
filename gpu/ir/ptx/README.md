@@ -1,539 +1,124 @@
 # ptx
 
-Package `ptx` is an in-memory intermediate representation (IR) for NVIDIA
-PTX (Parallel Thread Execution) modules. It models the structure of a
-`.ptx` translation unit — version/target/address-size header, global
-variables, kernels, device functions, and instruction bodies — without any
-formatting logic. Text printing lives in a separate sub-package.
+The `ptx` package provides a structured, in-memory Intermediate Representation (IR) for NVIDIA PTX (Parallel Thread Execution) modules.
 
-PTX has no binary wire format: the `.ptx` text *is* the interchange format
-consumed by `ptxas` and the CUDA driver, so there is no
-`encoding/binary`. Decoding (parsing PTX back into the IR) is out of scope
-for v1.
+It models `.ptx` translation units explicitly — module directives, module-scoped variables, kernels (`.entry`), device functions (`.func`), and instruction bodies. The IR focuses purely on structure; all text formatting and generation logic is delegated to the `ptx/encoding/text` package.
 
+## Design Principles
 
-```
+- **Grammar-driven.** Every exported symbol in the API corresponds directly to a construct in the PTX grammar. There are no convenience types drawn from Go's type system.
+- **Constant enums.** Types, spaces, opcodes, and special registers are constant enums backed by internal tables, preventing invalid string manipulation.
+- **Instructions are values.** An `Instr` is a struct holding an opcode, typed qualifiers, positional types, and operands. Canonical qualifier ordering is handled internally by the opcode table, so equivalent IR always prints byte-identically regardless of the order qualifiers are supplied.
+- **Editable bodies.** An instruction `Body` supports standard array mutations — `.Append()`, `.InsertBefore()`, `.Replace()`, `.Remove()` — making analysis and rewrite passes straightforward in Go.
+- **Explicit flow control.** Predication is applied directly to the returned instruction via `.If(p)` or `.IfNot(p)`. This ensures guards are attached to the exact instruction and cannot accidentally leak across labels.
+- **No implicit inference.** The package does not type-check operand compatibility or infer rounding modes. `ptx.Verify` handles structural and version-gating validation, but `ptxas` remains the definitive verifier of record.
 
-github.com/vertex-language/vvm/gpu/ir/ptx                   # IR types (this package)
-github.com/vertex-language/vvm/gpu/ir/ptx/encoding/text     # text printer (.ptx)
+## Quick Start
 
-```
-
----
-
-## Quick start
+The example below builds a module, declares variables, allocates registers, emits predicated instructions, and renders the final assembly text.
 
 ```go
+package main
+
 import (
-    "github.com/vertex-language/vvm/gpu/ir/ptx"
-    "github.com/vertex-language/vvm/gpu/ir/ptx/encoding/text"
+	"log"
+
+	"github.com/vertex-language/vvm/gpu/ir/ptx"
+	"github.com/vertex-language/vvm/gpu/ir/ptx/encoding/text"
 )
 
-// 1. Create a module (defaults to ISA 9.3, sm_90, .address_size 64).
-m := ptx.NewModule()
-m.SetTarget(ptx.SM90)
+func main() {
+	// A module requires an ISA version, target architecture, and address size.
+	m := ptx.NewModule(ptx.ISA93, ptx.SM90, ptx.Addr64)
 
-// 2. Build a kernel: C[i] = A[i] + B[i]
-k := ptx.NewKernel("vadd")
-k.Linkage = ptx.Visible
-k.Params.Add(ptx.Param{Name: "A", Type: ptx.U64})
-k.Params.Add(ptx.Param{Name: "B", Type: ptx.U64})
-k.Params.Add(ptx.Param{Name: "C", Type: ptx.U64})
-k.Params.Add(ptx.Param{Name: "n", Type: ptx.U32})
+	// NewKernel creates a .entry kernel with an empty instruction body.
+	k := ptx.NewKernel("vector_add")
+	k.Linkage = ptx.Visible
 
-cb := k.Code
-rd := cb.Regs // register file: declares .reg blocks on demand
+	// Kernel parameters.
+	pA := k.Param("A", ptx.U64)
+	pB := k.Param("B", ptx.U64)
+	pC := k.Param("C", ptx.U64)
+	pN := k.Param("n", ptx.U32)
 
-i    := rd.U32()  // %u1
-n    := rd.U32()
-p    := rd.Pred() // %p1
-a    := rd.U64()  // %d1 ...
-b    := rd.U64()
-c    := rd.U64()
-off  := rd.U64()
-va   := rd.F32()
-vb   := rd.F32()
+	// Body and register file.
+	b := k.Body
+	r := b.Regs
 
-done := cb.NewLabel("done")
+	// Virtual registers mapped to PTX types.
+	i, n, p := r.New(ptx.U32), r.New(ptx.U32), r.New(ptx.Pred)
+	a, bb, c := r.New(ptx.U64), r.New(ptx.U64), r.New(ptx.U64)
+	off := r.New(ptx.U64)
+	va, vb := r.New(ptx.F32), r.New(ptx.F32)
 
-// i = ctaid.x * ntid.x + tid.x
-cb.MovU32(i, ptx.CtaIdX)              // mov.u32 %u1, %ctaid.x;
-cb.MadLoU32(i, i, ptx.NtidX, ptx.TidX)
-cb.LdParamU32(n, "n")
-cb.SetpGeU32(p, i, n)
-cb.BraIf(p, done)                     // @%p1 bra done;
+	// Label for control flow.
+	done := b.Label("done")
 
-cb.LdParamU64(a, "A")
-cb.LdParamU64(b, "B")
-cb.LdParamU64(c, "C")
-cb.MulWideU32(off, i, 4)              // plain Go ints coerce to immediates
-cb.AddU64(a, a, off)
-cb.AddU64(b, b, off)
-cb.AddU64(c, c, off)
-cb.LdGlobalF32(va, ptx.Addr(a))       // ld.global.f32 %f1, [%d1];
-cb.LdGlobalF32(vb, ptx.Addr(b))
-cb.AddF32(va, va, vb)
-cb.StGlobalF32(ptx.Addr(c), va)
+	// Thread ID: i = (blockIdx.x * blockDim.x) + threadIdx.x
+	b.MovSReg(i, ptx.CtaIdX)
+	b.Mad(ptx.U32, i, i, ptx.NTidX, ptx.TidX, ptx.MulLo)
 
-cb.Bind(done)
-cb.Ret()
+	// Load array size and check bounds.
+	b.Ld(ptx.U32, n, ptx.At(pN), ptx.ParamSpace)
+	b.Setp(ptx.U32, ptx.Ge, p, i, n) // p = (i >= n)
 
-m.Kernels.Add(k)
+	// Branch to 'done' if p is true. .If(p) guards the branch itself.
+	b.Bra(done).If(p)
 
-// 3. Print as PTX assembly.
-src, err := text.NewPrinter(m).Print()
+	// Byte offset: i * 4 (F32 element size)
+	b.Mul(ptx.U32, off, i, ptx.Imm(4), ptx.MulWide)
 
-```
+	// Load base addresses from parameters.
+	b.Ld(ptx.U64, a, ptx.At(pA), ptx.ParamSpace)
+	b.Ld(ptx.U64, bb, ptx.At(pB), ptx.ParamSpace)
+	b.Ld(ptx.U64, c, ptx.At(pC), ptx.ParamSpace)
 
-The snippet above produces:
+	// Apply the byte offset to each base pointer.
+	b.Add(ptx.U64, a, a, off)
+	b.Add(ptx.U64, bb, bb, off)
+	b.Add(ptx.U64, c, c, off)
 
-```ptx
-//
-// Generated by vertex
-//
-.version 9.3
-.target sm_90
-.address_size 64
+	// Load, add, and store.
+	b.Ld(ptx.F32, va, ptx.At(a), ptx.Global)
+	b.Ld(ptx.F32, vb, ptx.At(bb), ptx.Global)
+	b.Add(ptx.F32, va, va, vb)
+	b.St(ptx.F32, ptx.At(c), va, ptx.Global)
 
-.visible .entry vadd(
-    .param .u64 A,
-    .param .u64 B,
-    .param .u64 C,
-    .param .u32 n
-)
-{
-    .reg .pred %p<2>;
-    .reg .u32  %u<3>;
-    .reg .u64  %d<5>;
-    .reg .f32  %f<3>;
+	// Bind 'done' and return.
+	b.Bind(done)
+	b.Ret()
 
-    mov.u32         %u1, %ctaid.x;
-    mad.lo.u32      %u1, %u1, %ntid.x, %tid.x;
-    ld.param.u32    %u2, [n];
-    setp.ge.u32     %p1, %u1, %u2;
-    @%p1 bra        done;
+	m.Add(k)
 
-    ld.param.u64    %d1, [A];
-    ld.param.u64    %d2, [B];
-    ld.param.u64    %d3, [C];
-    mul.wide.u32    %d4, %u1, 4;
-    add.u64         %d1, %d1, %d4;
-    add.u64         %d2, %d2, %d4;
-    add.u64         %d3, %d3, %d4;
-    ld.global.f32   %f1, [%d1];
-    ld.global.f32   %f2, [%d2];
-    add.f32         %f1, %f1, %f2;
-    st.global.f32   [%d3], %f1;
-done:
-    ret;
+	// Verify checks structural issues and version/target gating requirements.
+	for _, diag := range ptx.Verify(m) {
+		log.Println(diag)
+	}
+
+	// Render the module to PTX assembly text.
+	src, err := text.Print(m)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(src)
 }
-
 ```
 
-A blank line is inserted automatically after every branch; use
-`cb.Blank()` for any additional grouping you want.
+## Advanced Usage
 
----
+### The `Emit` Escape Hatch
 
-## Concepts
-
-### Module
-
-`Module` is the root of the IR. It corresponds to a single `.ptx`
-translation unit and carries the three module directives, module-scoped
-variables, kernels, device functions, file table (for `.loc`), and any
-module-level directives (`.blocksareclusters`, etc.).
+PTX introduces new instructions frequently. For instructions not yet strictly typed in the package (e.g. `mma`, `wgmma`, `cp.async`, `tensormap`), use the generic `Body.Emit` method:
 
 ```go
-m := ptx.NewModule()                 // .version 9.3, .target sm_90, .address_size 64
-m.SetVersion(ptx.ISA80)              // override to .version 8.0
-m.SetTarget(ptx.SM120a)              // .target sm_120a
-m.TargetOpts = []ptx.TargetOpt{ptx.TexmodeUnified, ptx.Debug}
-m.AddressSize = 64                   // 32 or 64
-m.BlocksAreClusters = true           // .blocksareclusters (ISA ≥ 9.0)
-
+// Emitted instructions participate in predication, walking, and printing
+// exactly like natively modelled instructions.
+b.Emit("cp.async.ca.shared.global", []ptx.Operand{dst, src}, ptx.Imm(16)).If(p)
 ```
 
-#### ISA version constants
+Instructions created via `Emit` use the generic canonical qualifier order and remain fully compliant with the package's formatting logic.
 
-| Constant | Emits | CUDA Toolkit | Notes |
-| --- | --- | --- | --- |
-| `ISA70` | `7.0` | 11.0 | sm_80, async copy, mbarrier |
-| `ISA78` | `7.8` | 11.8 | sm_89, sm_90 |
-| `ISA80` | `8.0` | 12.0 | sm_90a, wgmma, clusters |
-| `ISA85` | `8.5` | 12.5/12.6 |  |
-| `ISA87` | `8.7` | 12.8 | sm_120 |
-| `ISA88` | `8.8` | 12.9 | family targets (`f` suffix) |
-| `ISA90` | `9.0` | 13.0 | sm_110, `.blocksareclusters` |
-| `ISA93` | `9.3` | 13.3 | current default |
+### Exact-Bits Floating Point
 
-`ISAVersion` is a plain `{Major, Minor}` struct with a `GTE` comparison,
-so future versions can be constructed directly.
-
-#### Target constants
-
-`SM50` … `SM90`, `SM100`, `SM103`, `SM110`, `SM120`, `SM121`, plus
-arch-specific (`SM90a`, `SM100a`, `SM103a`, `SM110a`, `SM120a`, `SM121a`)
-and family-specific (`SM100f`, `SM101f`, `SM103f`, `SM110f`, `SM120f`,
-`SM121f`) variants. `Target` is a struct `{Base int, Suffix rune}` so
-unknown future targets can be constructed directly.
-
----
-
-### Linkage
-
-```go
-ptx.Default   // (none)
-ptx.Visible   // .visible
-ptx.Extern    // .extern
-ptx.Weak      // .weak
-ptx.Common    // .common   (variables only)
-
-```
-
----
-
-### State spaces
-
-```go
-ptx.RegSpace   // .reg
-ptx.SReg       // .sreg
-ptx.Const      // .const
-ptx.Global     // .global
-ptx.Local      // .local
-ptx.ParamSpace // .param
-ptx.Shared     // .shared
-
-```
-
-> **Naming note:** the register and parameter spaces are `RegSpace` and
-> `ParamSpace` (not `Reg`/`Param`) because `Reg` is the register-value
-> type and `Param` is the kernel-parameter struct — Go can't share one
-> identifier between a type and a variable.
-
-`Shared` and `ParamSpace` accept sub-qualifiers via `.Sub()`:
-`ptx.Shared.Sub(ptx.Cluster)` → `.shared::cluster`,
-`ptx.ParamSpace.Sub(ptx.Entry)` → `.param::entry`. Available qualifiers:
-`Cta`, `Cluster`, `Entry`, `Func`.
-
----
-
-### Types
-
-Fundamental type constants, mirroring the spec's fundamental type
-specifiers:
-
-```go
-ptx.S8, ptx.S16, ptx.S32, ptx.S64      // signed
-ptx.U8, ptx.U16, ptx.U32, ptx.U64      // unsigned
-ptx.F16, ptx.F16x2, ptx.F32, ptx.F64   // float
-ptx.B8, ptx.B16, ptx.B32, ptx.B64, ptx.B128  // untyped bits
-ptx.Pred                               // predicate
-
-```
-
-Alternate FP formats (`.bf16`, `.tf32`, `.e4m3`, `.e5m2`, `.e3m2`,
-`.e2m3`, `.e2m1`, and packed variants) are *instruction* types, not
-storage types, and are available as `ptx.BF16`, `ptx.TF32`, `ptx.E4M3`, …
-for use in instruction qualifiers only.
-
-Vectors wrap a scalar: `ptx.V2(ptx.F32)` → `.v2 .f32`,
-`ptx.V4(ptx.U32)` → `.v4 .u32`.
-
-Opaque types: `ptx.TexRef`, `ptx.SamplerRef`, `ptx.SurfRef`.
-
----
-
-### Operands
-
-Anything implementing `Operand` can appear in an operand position:
-registers, special registers, labels, and:
-
-```go
-ptx.Imm(7)             // integer immediate
-ptx.FImm(0.5)          // decimal float immediate
-ptx.FHex32(1.0)        // exact-bits form: 0f3F800000
-ptx.FHex64(1.0)        // exact-bits form: 0d3FF0000000000000
-ptx.Sym("lut")         // bare symbol
-ptx.Addr(a)            // [%d1]
-ptx.Addr(a, 16)        // [%d1+16]
-ptx.SymAddr("lut", 8)  // [lut+8]
-ptx.Vec(x, y, z, w)    // {%f1, %f2, %f3, %f4}
-
-```
-
-Emit methods take `any` for source operands and coerce plain Go values:
-`int`/`int64`/`uint` → `Imm`, `float32`/`float64` → `FImm`, `string` →
-`Sym`. That's why `cb.MulWideU32(off, i, 4)` works. Destinations are
-always typed `Reg`.
-
----
-
-### Module-scoped variables
-
-```go
-m.Globals.Add(ptx.Variable{
-    Linkage: ptx.Visible,
-    Space:   ptx.Global,
-    Align:   8,
-    Type:    ptx.F32,
-    Name:    "lut",
-    Len:     256,                        // array; 0 = scalar, -1 = incomplete []
-    Init:    ptx.InitFloats(0.0, 0.5),   // = {0.0, 0.5}
-})
-// .visible .global .align 8 .f32 lut[256] = {0.0, 0.5};
-
-```
-
-Initializers: `InitInts`, `InitFloats`, `InitAddr("symbol")` (address-of
-in initializer), or `RawInit(string)` for anything exotic. `.attribute`
-qualifiers (`ptx.Managed`, `ptx.Unified`) hang off `Variable.Attrs`.
-
----
-
-### Kernels and device functions
-
-`Kernel` (→ `.entry`) and `Function` (→ `.func`) share a `Callable` core:
-parameter list, performance-tuning directives, cluster directives, and a
-`*CodeBuilder` body (nil body + `Extern` linkage = declaration only).
-
-```go
-k := ptx.NewKernel("scale")
-k.Params.Add(ptx.Param{Name: "buf", Type: ptx.U64})
-k.MaxNTid  = [3]int{256, 1, 1}    // .maxntid 256, 1, 1
-k.ReqNTid  = [3]int{0, 0, 0}      // zero = omit
-k.MinNCTAPerSM = 2                // .minnctapersm 2
-k.MaxNReg  = 64                   // .maxnreg 64
-k.ReqNCTAPerCluster = [3]int{2, 1, 1}
-k.ExplicitCluster = true          // .explicitcluster
-
-f := ptx.NewFunction("helper")
-f.Ret = &ptx.Param{Name: "out", Type: ptx.F32}   // .func (.param .f32 out) helper(...)
-f.NoReturn = false                               // true → .noreturn
-
-```
-
-Kernel params may carry `.ptr` metadata:
-`ptx.Param{Name: "buf", Type: ptx.U64, Ptr: &ptx.PtrInfo{Space: ptx.Global, Align: 16}}`
-→ `.param .u64 .ptr .global .align 16 buf`. `Param.Len` produces byte-array
-params (`.param .align 8 .b8 s[64]`).
-
----
-
-### Registers
-
-`RegFile` (one per `CodeBuilder`) hands out virtual registers grouped by
-type; the printer collapses each group into a single ranged `.reg`
-declaration (`.reg .f32 %f<9>;`). ptxas performs the real allocation —
-this package never does.
-
-```go
-rd := cb.Regs
-p := rd.Pred()          // %p1, %p2, ...
-x := rd.F32()           // %f1, ...
-d := rd.B64()           // %rd1, ...
-v := rd.Named(ptx.U32, "idx")   // .reg .u32 %idx;
-g := rd.Of(ptx.B128)    // generic: any type
-
-```
-
-Typed allocators: `Pred`, `S16/S32/S64`, `U16/U32/U64`, `B16/B32/B64/B128`,
-`F16/F32/F64`. Prefixes are fixed per type (`%p`, `%r`, `%u`, `%d`, `%rd`,
-`%f`, `%fd`, …) so numbering is deterministic.
-
-Special registers are predefined `Operand` values: `ptx.TidX/Y/Z`,
-`ptx.NtidX`, `ptx.CtaIdX`, `ptx.NCtaIdX`, `ptx.LaneId`, `ptx.WarpId`,
-`ptx.SmId`, `ptx.Clock`, `ptx.Clock64`, `ptx.GridId`, the
-`ptx.LaneMaskEq/Le/Lt/Ge/Gt` family, `ptx.ClusterCtaIdX`,
-`ptx.ClusterCtaRank`, `ptx.IsExplicitCluster`, `ptx.GlobalTimer`,
-`ptx.TotalSmemSize`, `ptx.DynamicSmemSize`, plus the `ptx.WarpSz`
-run-time immediate constant.
-
----
-
-### CodeBuilder
-
-Append-only. Every emit method returns the receiver.
-Instructions are stored as typed `Instruction` values (guard, joined
-opcode, operands), so the printer is a dumb serializer.
-
-#### Predication
-
-Every instruction can be guarded:
-
-```go
-cb.Guard(p).AddF32(x, x, y)     // @%p1  add.f32 %f1, %f1, %f2;
-cb.GuardNot(p).Bra(skip)        // @!%p1 bra skip;
-cb.BraIf(p, l) / cb.BraIfNot(p, l)   // sugar for the common case
-
-```
-
-`Guard` applies to the next emitted instruction only.
-
-#### Labels and branching
-
-Labels are symbolic — no offset resolution is ever needed. `NewLabel`
-uniquifies duplicate names (`done`, `done_1`, …).
-
-```go
-loop := cb.NewLabel("loop")
-cb.Bind(loop).
-    ...
-    Goto(loop)              // bra loop;  (alias of Bra)
-cb.BrxIdx(reg, targets)     // brx.idx + $LtargetsN: .branchtargets ...;
-
-```
-
-#### Instruction families (representative)
-
-```go
-// Integer
-cb.AddS32(d,a,b).SubU64(d,a,b).MulLoS32(d,a,b).MulHiU32(d,a,b).MulWideU32(d,a,b)
-cb.MadLoU32(d,a,b,c).MadWideU32(d,a,b,c).DivS32(d,a,b).RemU32(d,a,b)
-cb.AbsS32(d,a).NegS32(d,a).MinS32(d,a,b).MaxU32(d,a,b)
-cb.Popc(d,a).Clz(d,a).Brev(d,a).Bfe(t,d,a,b,c).Bfi(t,f,a,b,c,d)
-
-// Floating point — rounding/ftz/sat as option qualifiers
-cb.AddF32(d,a,b, ptx.Rn, ptx.Ftz)
-cb.FmaF32(d,a,b,c, ptx.Rn)
-cb.DivF32(d,a,b, ptx.ApproxFtz) / cb.SqrtF64(d,a, ptx.Rn)
-cb.RcpF32(...).RsqrtF32(...).SinF32(...).CosF32(...).Ex2F32(...).Lg2F32(...)
-
-// Comparison / select
-cb.SetpEqS32(p,a,b) ... cb.SetpLtF32(p,a,b, ptx.Ftz)
-cb.Setp(ptx.CmpGeu, ptx.F32, p, a, b)          // generic, incl. unordered cmps
-cb.SelpF32(d,a,b,p) / cb.SlctF32(d,a,b,c)
-
-// Logic / shift
-cb.AndB32(d,a,b).OrB64(d,a,b).XorPred(p,q,r).NotB32(d,a)
-cb.ShlB32(d,a,b).ShrU32(d,a,b).Shf("l","clamp",d,a,b,c)
-
-// Data movement
-cb.MovU32(d, src) / cb.MovAddr(d, "symbol")     // mov.u64 %d, symbol;
-cb.Cvt(dstType, srcType, d, a, ptx.Rn)          // cvt.rn.f32.s32
-cb.CvtaGlobal(d, a) / cb.CvtaToShared(d, a)
-
-// Memory — space, type, and options compose
-cb.Ld(ptx.Global, ptx.F32, d, ptx.Addr(a, 16))          // ld.global.f32 %f, [%rd+16];
-cb.LdVolatile(...) / cb.LdAcquire(ptx.ScopeGPU, ...)    // ld.acquire.gpu...
-cb.LdV4(ptx.Global, ptx.F32, []ptx.Reg{...}, addr)      // ld.global.v4.f32 {..},[..]
-cb.St(ptx.Shared, ptx.U32, addr, v) / cb.StRelease(...)
-cb.Atom(ptx.Global, ptx.AtomAdd, ptx.U32, d, addr, v)   // atom.global.add.u32
-cb.Atom(ptx.Global, ptx.AtomCAS, ptx.B32, d, addr, cmp, val)
-cb.Red(ptx.Global, ptx.RedMax, ptx.S32, addr, v)
-
-// Sync & communication
-cb.BarSync(0) / cb.BarrierSync(id, cnt) / cb.BarWarpSync(mask)
-cb.BarrierClusterArrive() / cb.BarrierClusterWait()
-cb.Membar(ptx.LevelGL) / cb.Fence(ptx.AcqRel, ptx.ScopeSys)
-cb.ShflSync(ptx.ShflBfly, d, a, b, c, mask) / cb.ShflSyncPred(...)
-cb.VoteSync(ptx.VoteBallot, d, p, mask).MatchSync("any", ptx.B32, d, a, mask)
-cb.Activemask(d).ReduxSync(ptx.ReduxAdd, ptx.U32, d, a, mask)
-
-// Control
-cb.Call(retOps, "fn", argOps)   // call.uni (r), fn, (a, b);
-cb.Ret() / cb.Exit() / cb.Trap() / cb.Nop()
-
-// Misc
-cb.Comment("trailing note")     // attaches to the last instruction
-cb.Blank()                      // explicit blank line
-cb.DeclLocal(ptx.Variable{Space: ptx.Shared, Type: ptx.F32, Name: "tile", Len: 256})
-
-```
-
-Generic cores (`Add`, `Sub`, `Setp`, `Mov`, `Selp`, `Ld`, `St`, `Cvt`,
-`Atom`, `Red`, …) take a `Type` argument and cover any type/qualifier
-combination the named wrappers don't.
-
-#### Raw escape hatch
-
-The PTX instruction surface is enormous (mma, wgmma, tcgen05, cp.async,
-mbarrier, tensormap, tex/surf, video ops…). Rather than chase all of it,
-anything not covered by a typed emit goes through:
-
-```go
-cb.Raw("cp.async.ca.shared.global [%rd1], [%rd2], 16;")
-cb.Rawf("mbarrier.init.shared::cta.b64 [%%rd%d], %d;", n, cnt)
-
-```
-
-`Raw` instructions still participate in guards and label placement.
-Typed builders for the async/tensor families can be added incrementally
-as their own files (`mma.go`, `async.go`) without touching the core.
-
-#### Debug info
-
-```go
-idx := m.Files.Add("kernel.cu")  // .file 1 "kernel.cu" (returns 1-based index)
-cb.Loc(idx, 42, 5)               // .loc 1 42 5
-
-```
-
----
-
-## Text printing
-
-```go
-src, err := text.NewPrinter(m).Print()
-
-```
-
-Output ordering follows the spec's required layout: `.version`, `.target`,
-`.address_size`, module directives, `.file` table, globals, functions,
-then kernels. Within a body: one ranged `.reg` declaration per register
-class, named registers, local `.shared`/`.local` variables, then
-instructions. Guarded instructions print with the guard inline; operands
-start at a fixed column in the conventional `ptxas -o -` style.
-
-`Printer` options:
-
-```go
-p := text.NewPrinter(m).
-    WithComments(true).                  // trailing // comments from Instruction.Comment
-    WithHeader("Generated by vertex 0.4"). // "" disables the header block
-    WithLint(true)                       // advisory version-gate warnings
-
-src, err := p.Print()
-notes := p.Warnings()                    // e.g. ".blocksareclusters requires ISA >= 9.0"
-
-```
-
-`Print` returns an error only for structurally invalid modules
-(e.g. `.address_size` not 32/64). Lint findings are warnings, never
-errors.
-
----
-
-## Design notes
-
-**Text is the wire format.** PTX has no binary encoding; `ptxas` consumes
-the text. So there is exactly one encoder (the printer) and its output
-must be byte-stable for a given IR (deterministic register numbering,
-stable qualifier ordering). This is covered by `TestDeterminism`.
-
-**No inference.** This package does not type-check operand
-compatibility, does not infer rounding modes, and does not verify target
-gating (e.g. that `wgmma` requires sm_90a). Garbage in, garbage out —
-`ptxas` is the verifier of record.
-
-**Symbolic labels.** There are no byte offsets;
-labels print by name, so no fixed-point resolution pass exists.
-
-**Virtual registers only.** `RegFile` is a naming allocator, nothing
-more. Physical allocation, spilling, and stack handling are ptxas's
-domain.
-
-**Typed core, raw periphery.** The ~120 core scalar/memory/sync
-instructions get typed emit methods; the long tail (tensor cores, async
-copy, texture/surface) starts as `Raw` and gets promoted to typed
-builders per-family as needed.
-
-**Version gating is advisory.** Version/target constants exist so callers
-can pick a floor; the printer optionally warns (not errors) via
-`WithLint(true)` when an emitted feature postdates `m.Version`, with
-warnings retrievable from `Printer.Warnings()`.
-
-**Convenience coercion.** Emit-method source operands are `any` and
-accept plain Go ints, floats, and strings alongside `Operand` values.
-This is the one place ergonomics won over strict typing; destinations
-remain typed `Reg`.
+Float immediates are exact-bits only, to prevent invalid PTX rendering. `F32Imm` and `F64Imm` guarantee that values print in the `0f...` or `0d...` hex format, so special values like NaN and infinity convert to PTX text safely and losslessly.

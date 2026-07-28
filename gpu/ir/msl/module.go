@@ -1,81 +1,101 @@
 package msl
 
-// Const is a module-scoped constant address space global:
-// constant float kPi = 3.14159265;
-type Const struct {
-	Type Type
-	Name string
-	Init Expr
-}
+import "strconv"
 
-// ConstList is an append-only constant collection.
-type ConstList struct{ items []Const }
-
-// Add appends a module constant.
-func (l *ConstList) Add(c Const) { l.items = append(l.items, c) }
-
-// Items returns the constants in declaration order.
-func (l *ConstList) Items() []Const { return l.items }
-
-// FnConst is a function constant — MSL's link-time specialization
-// mechanism, filled in on the host via MTLFunctionConstantValues:
-// constant bool useFastPath [[function_constant(0)]];
-type FnConst struct {
-	Type  Type
-	Name  string
-	Index int
-}
-
-// FnConstList is an append-only function-constant collection.
-type FnConstList struct{ items []FnConst }
-
-// Add appends a function constant.
-func (l *FnConstList) Add(c FnConst) { l.items = append(l.items, c) }
-
-// Items returns the function constants in declaration order.
-func (l *FnConstList) Items() []FnConst { return l.items }
-
-// IncludeList is an ordered, deduplicated system header list.
-type IncludeList struct{ items []string }
-
-// Add appends a system header (without angle brackets), skipping
-// duplicates: Add("metal_tensor") prints #include <metal_tensor>.
-func (l *IncludeList) Add(name string) {
-	for _, it := range l.items {
-		if it == name {
-			return
-		}
-	}
-	l.items = append(l.items, name)
-}
-
-// Items returns the headers in insertion order.
-func (l *IncludeList) Items() []string { return l.items }
-
-// Module is the root of the IR. It corresponds to a single .metal
-// translation unit.
+// Module is the root of the IR: one .metal translation unit.
+//
+// Declarations live in a single ordered list rather than in per-kind buckets,
+// because MSL requires declare-before-use and the order is therefore load
+// bearing: a `constant Params kDefaults = {...};` must follow `struct Params`.
 type Module struct {
-	Version         Version
-	Includes        IncludeList
-	UsingNamespaces []string
-	Consts          ConstList
-	FnConsts        FnConstList
-	Structs         StructList
-	Funcs           FuncList
+	Version Version
+	Decls   []Decl
 }
 
-// NewModule creates a module with the defaults: Metal32,
-// #include <metal_stdlib>, using namespace metal. The default favors
-// deployment reach — set Metal40+ explicitly for tensor work.
-func NewModule() *Module {
-	m := &Module{
-		Version:         Metal32,
-		UsingNamespaces: []string{"metal"},
-	}
-	m.Includes.Add("metal_stdlib")
+// NewModule creates a module at the given language revision, seeded with
+// <metal_stdlib> and `using namespace metal;`.
+//
+// The revision is required rather than defaulted: it is the -std= floor, it
+// gates which OS releases can load the resulting library, and Verify reads it.
+func NewModule(v Version) *Module {
+	m := &Module{Version: v}
+	m.Include("metal_stdlib")
+	m.Using("metal")
 	return m
 }
 
-// SetVersion sets the advisory language version (lint floor and
-// suggested -std= flag).
-func (m *Module) SetVersion(v Version) { m.Version = v }
+// Add appends declarations in order.
+func (m *Module) Add(d ...Decl) *Module {
+	m.Decls = append(m.Decls, d...)
+	return m
+}
+
+// Include appends a system header, skipping duplicates.
+func (m *Module) Include(name string) *Module {
+	for _, d := range m.Decls {
+		if inc, ok := d.(*Include); ok && inc.Name == name && !inc.Local {
+			return m
+		}
+	}
+	return m.Add(&Include{Name: name})
+}
+
+// Using appends a namespace using-directive, skipping duplicates.
+func (m *Module) Using(ns string) *Module {
+	for _, d := range m.Decls {
+		if u, ok := d.(*Using); ok && u.Namespace == ns {
+			return m
+		}
+	}
+	return m.Add(&Using{Namespace: ns})
+}
+
+// Alias appends a type alias and returns it.
+func (m *Module) Alias(name string, t Type) *Alias {
+	a := &Alias{Name: name, Type: t}
+	m.Add(a)
+	return a
+}
+
+// Constant appends a module-scope constant: constant float kPi = 3.14;.
+func (m *Module) Constant(t Type, name string, init Expr) *VarDecl {
+	v := &VarDecl{Space: Constant, Type: t, Name: name, Init: init}
+	m.Add(v)
+	return v
+}
+
+// FnConst appends a function constant, MSL's link-time specialization hook:
+// constant bool useFastPath [[function_constant(0)]];
+func (m *Module) FnConst(t Type, name string, index int) *VarDecl {
+	v := &VarDecl{
+		Space: Constant, Type: t, Name: name,
+		Attrs: []Attr{FunctionConstant(index)},
+	}
+	m.Add(v)
+	return v
+}
+
+// VersionGate appends a preprocessor conditional on __METAL_VERSION__. A 4.1
+// binary will not load on an older OS, so shipping libraries carry gated
+// source rather than a single revision floor.
+func (m *Module) VersionGate(v Version, then, els []Decl) *PPIfDecl {
+	d := &PPIfDecl{
+		Cond: "__METAL_VERSION__ >= " + strconv.Itoa(v.Macro()),
+		Then: then,
+		Els:  els,
+	}
+	m.Add(d)
+	return d
+}
+
+// Func returns the first function with the given name, or nil.
+func (m *Module) Func(name string) *Function {
+	var found *Function
+	Walk(m, func(n Node) bool {
+		if f, ok := n.(*Function); ok && f.Name == name && found == nil {
+			found = f
+		}
+		return found == nil
+	})
+	return found
+}
