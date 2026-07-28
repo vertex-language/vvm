@@ -1,62 +1,60 @@
 // module.go
 package gvir
 
-// Module is the IR-level representation of one .gvir compilation unit
-// (§2). Field order mirrors the mandatory section order, which is what
-// makes one-pass verification possible.
-//
-// Device-only (§1): there is no host entry point, no globals, no links,
-// no externs, no imports. Everything a vir Module carries for the host
-// side is absent here by construction, not by convention.
-type Module struct {
-	Version      Version
-	Name         string
-	Targets      []Backend
-	FloatProfile FloatProfile
-	Structs      []*Struct
-	Constants    []*Constant
-	Funcs        []*Func
-	Kernels      []*Kernel
-}
+import "fmt"
 
+// Version is the `gvir MAJOR.MINOR` version declaration (§2).
 type Version struct{ Major, Minor int }
 
-// SpecVersion is the language version this package implements.
-var SpecVersion = Version{Major: 1, Minor: 0}
+// LanguageVersion is the specification version this package implements.
+var LanguageVersion = Version{Major: 1, Minor: 0}
 
-func (v Version) String() string { return itoa(v.Major) + "." + itoa(v.Minor) }
+func (v Version) String() string { return fmt.Sprintf("%d.%d", v.Major, v.Minor) }
 
-// FloatProfile is the module-wide float-profile declaration (§2, §11.6).
-type FloatProfile string
-
-const (
-	// ProfileUnset means no float_profile line was declared. The
-	// declaration is optional in the grammar; this package treats an
-	// absent one as strict, the conservative reading — an unannotated
-	// module never silently gains FMA contraction or approximate math.
-	ProfileUnset   FloatProfile = ""
-	ProfileStrict  FloatProfile = "strict"
-	ProfileBounded FloatProfile = "bounded"
-)
-
-// Effective resolves ProfileUnset to its default.
-func (p FloatProfile) Effective() FloatProfile {
-	if p == ProfileUnset {
-		return ProfileStrict
-	}
-	return p
+// Module is the single IR-level representation of one .gvir translation
+// unit. Field order mirrors the mandatory section order (§2):
+//
+//	version-decl module-header target-decl float-profile-decl?
+//	struct-decl* const-decl* func-def* kernel-def*
+//
+// There is deliberately no host surface: no globals, no imports, no link
+// dependencies, no entry point, no TLS (§1). A .gvir module is device-only
+// and its host integration lives entirely in gvir_arch.md §6.
+type Module struct {
+	Version   Version
+	Name      string
+	Target    *Target
+	Profile   FloatProfile
+	Structs   []*Struct
+	Constants []*Const
+	Funcs     []*Func
+	Kernels   []*Kernel
 }
 
-// Struct is a memory-only aggregate declaration (§4.7). Layout is defined
-// by this IR (layout.go), not inherited from any C ABI.
-type Struct struct {
-	Name   string
-	Fields []Field
+// FloatProfile is the module-wide `float_profile` declaration (§11.6). The
+// two flags are orthogonal and both default to off; off means strict IEEE
+// with no contraction and no approximate opcodes.
+type FloatProfile struct {
+	Contract bool // permits mul+add -> fma fusion
+	Approx   bool // enables rcp/rsqrt/sin/cos/exp2/log2/tanh
 }
+
+func (p FloatProfile) Declared() bool { return p.Contract || p.Approx }
+
+// ---------------------------------------------------------------------------
+// Structs and constants (§2, §4.7)
+// ---------------------------------------------------------------------------
 
 type Field struct {
 	Name string
 	Type Type
+}
+
+// Struct is a memory-only aggregate. Layout is defined by §4.7 and computed
+// here (layout.go), not inherited from any C ABI.
+type Struct struct {
+	Name   string
+	Fields []Field
 }
 
 func (s *Struct) FieldByName(name string) (Field, bool) {
@@ -68,6 +66,8 @@ func (s *Struct) FieldByName(name string) (Field, bool) {
 	return Field{}, false
 }
 
+// FieldIndex returns the positional index of a field, or -1. `field.ptr`
+// takes a literal index (§8.3), not a name, so frontends resolve names here.
 func (s *Struct) FieldIndex(name string) int {
 	for i, f := range s.Fields {
 		if f.Name == name {
@@ -77,26 +77,17 @@ func (s *Struct) FieldIndex(name string) int {
 	return -1
 }
 
-// Struct looks up a declared struct by name. Struct types are nominal and
-// the module namespace is flat (§2), so the name alone resolves it.
-func (m *Module) Struct(name string) *Struct {
-	for _, s := range m.Structs {
-		if s.Name == name {
-			return s
-		}
-	}
-	return nil
-}
-
-// Constant is a module-scope immutable (§2 const-decl).
-type Constant struct {
+// Const is a module-scope compile-time value (§2). i1, vec[i1,N] and
+// submask are value-only and never legal as a const type (§4.1, §4.5, §4.6).
+type Const struct {
 	Name string
 	Type Type
 	Init ConstInit
 }
 
-// ConstInit is the const-init grammar (§2). There is no address-of form:
-// device-only modules have no globals whose address could be taken.
+// ConstInit is the const-init grammar (§2): literal | zero | aggregate.
+// There is no address-of form — there are no module-scope objects to take
+// the address of.
 type ConstInit interface{ isInit() }
 
 type InitLiteral struct{ Value Operand }
@@ -107,182 +98,138 @@ func (InitLiteral) isInit()   {}
 func (InitZero) isInit()      {}
 func (InitAggregate) isInit() {}
 
-// Param is one declared parameter. Kernel parameters are identified
-// portably by index, never by byte offset (§6.2).
+// ---------------------------------------------------------------------------
+// Functions and kernels (§6)
+// ---------------------------------------------------------------------------
+
 type Param struct {
 	Name string
 	Type Type
 }
 
-// FuncAttr is a device-function attribute (§6.4).
-type FuncAttr string
-
-const (
-	AttrInline   FuncAttr = "inline"
-	AttrNoInline FuncAttr = "noinline"
-	// AttrReadonly asserts the function writes through no pointer
-	// reachable from its arguments. Violating it is UB (§12.10).
-	AttrReadonly FuncAttr = "readonly"
-)
-
-// Func is a device-side helper (§6.4). Direct calls only; recursion,
-// mutual recursion, indirect calls, and address-taking are all illegal,
-// so there is no function-pointer or signature machinery here — the
-// FunctionSignature table vir needs for indirect calls has no analogue.
-type Func struct {
-	Name   string
-	Params []Param
-	Ret    Type
-	Attrs  []FuncAttr
+// Body is the block structure shared by funcs and kernels (§7.1): one
+// unlabelled entry block followed by labelled blocks.
+type Body struct {
 	Entry  *Block
 	Blocks []*Block
 }
 
-func (f *Func) HasAttr(a FuncAttr) bool {
-	for _, x := range f.Attrs {
-		if x == a {
-			return true
-		}
+// AllBlocks returns the entry block followed by the labelled blocks.
+func (b *Body) AllBlocks() []*Block {
+	out := make([]*Block, 0, len(b.Blocks)+1)
+	if b.Entry != nil {
+		out = append(out, b.Entry)
 	}
-	return false
+	return append(out, b.Blocks...)
 }
 
-// GroupShape is an exact group_size X,Y,Z attribute (§6.1).
+// BlockByLabel finds a labelled block. It deliberately never returns the
+// entry block: the entry block cannot be branched to (§7.1).
+func (b *Body) BlockByLabel(label string) *Block {
+	for _, x := range b.Blocks {
+		if x.Label == label {
+			return x
+		}
+	}
+	return nil
+}
+
+// Func is a device-side helper (§6.4). Direct calls only; recursion,
+// indirect calls and address-taking are illegal, so there is no signature
+// table and no function-pointer type anywhere in this package.
+//
+// There is no inline/noinline attribute: inlining is not observable and not
+// controllable (§6.4).
+type Func struct {
+	Name     string
+	Params   []Param
+	Ret      Type // value type or Void; never struct/array (§6.4)
+	Readonly bool // writes through no pointer reachable from its arguments
+	Body
+}
+
+// GroupShape is the `group_size X,Y,Z` exact shape contract (§6.1).
 type GroupShape struct{ X, Y, Z int }
 
 func (g GroupShape) Threads() int { return g.X * g.Y * g.Z }
 
-// DynamicGroup is the one launch-sized group allocation a kernel may
-// declare (§6.1, §8.2). Its byte size is read back through the
-// dynamic_group_size builtin (§9.1), which reads the hidden kernarg field
-// of §6.3.
-type DynamicGroup struct {
-	Name  string
-	Align int // 0 = unspecified
-}
-
-// GroupDecl is one statically sized, kernel-scoped group allocation
+// GroupVar is one kernel-scoped, statically sized `group` declaration
 // (§8.2). Zero-initialization is not guaranteed.
-type GroupDecl struct {
+type GroupVar struct {
 	Name  string
 	Type  Type
 	Align int // 0 = natural
 }
 
-// Kernel is a dispatchable entry point (§6.1). Attributes are separate
-// typed fields rather than a slice because each is at-most-once and
-// carries its own operands; a zero value means the attribute is absent.
+// DynamicGroup is the one launch-sized group allocation a kernel may
+// declare (§6.1, §8.2). Its byte size is read with the dynamic_group_size
+// builtin; access past it is UB (§12.7), the single host-contract trigger.
+type DynamicGroup struct {
+	Name  string
+	Align int // 0 = natural
+}
+
+// Kernel is a dispatchable entry point (§6.1). Kernels implicitly return
+// void; `return` inside a kernel takes no operand.
 type Kernel struct {
-	Name   string
-	Params []Param
-
-	// GroupSize is the exact required group shape. Normative: launching
-	// a contradicting shape is UB (§12.7).
-	GroupSize *GroupShape
-	// MaxGroupSize bounds X*Y*Z. Normative. 0 = absent.
-	MaxGroupSize int
-	// MinGroupsPerUnit is an occupancy hint. Advisory only — it never
-	// affects semantics (§6.1). 0 = absent.
-	MinGroupsPerUnit int
-	// SubgroupSize requests a specific subgroup width. Normative and
-	// gated: unavailable on every msl artifact (§4.3, §9.2). 0 = absent.
-	SubgroupSize int
-	// Dynamic is the at-most-one dynamic_group declaration.
-	Dynamic *DynamicGroup
-
-	Groups []*GroupDecl
-	Entry  *Block
-	Blocks []*Block
+	Name         string
+	Params       []Param
+	GroupSize    *GroupShape   // nil = no compile-time shape contract
+	MaxGroupSize int           // 0 = unset
+	SubgroupSize int           // 0 = unset; gated on msl (§4.3, §9.2)
+	DynamicGroup *DynamicGroup // nil = none; at most one per kernel
+	Groups       []*GroupVar
+	Body
 }
 
-// HasShapeContract reports whether the kernel constrains its group shape
-// at compile time. Without one, the host still supplies group dimensions
-// at launch — it is the *compile-time* contract that is absent (§6.1).
-func (k *Kernel) HasShapeContract() bool {
-	return k.GroupSize != nil || k.MaxGroupSize > 0
-}
-
-func (m *Module) Kernel(name string) *Kernel {
-	for _, k := range m.Kernels {
-		if k.Name == name {
-			return k
-		}
-	}
-	return nil
-}
-
-func (m *Module) Func(name string) *Func {
-	for _, f := range m.Funcs {
-		if f.Name == name {
-			return f
+func (k *Kernel) GroupByName(name string) *GroupVar {
+	for _, g := range k.Groups {
+		if g.Name == name {
+			return g
 		}
 	}
 	return nil
 }
 
 // ---------------------------------------------------------------------------
-// Blocks and merge annotations (§7).
+// Blocks (§7.1, §7.2)
 // ---------------------------------------------------------------------------
 
-// Block is the entry block (Label "") or a labelled block (§7.1). Merge is
-// non-nil exactly when the terminator has more than one distinct successor
-// (§7.2); it sits on the line immediately after the label.
+// MergeKind discriminates the two merge-decl forms (§7.2).
+type MergeKind uint8
+
+const (
+	MergeSelection MergeKind = iota // merge L
+	MergeLoop                       // loop_merge Lexit, Lcontinue
+)
+
+// Merge is the reconvergence annotation a block carries on the line
+// immediately after its label (§7.2). Note the §2 grammar attaches
+// merge-decl to `block` only, never to `entry-block`; whether an entry
+// block ending in a multi-successor br_if is representable is a question
+// for ir/verify, not something this package silently decides.
+type Merge struct {
+	Kind     MergeKind
+	Merge    string // `merge L`, or a loop's Lexit
+	Continue string // loop only: Lcontinue
+}
+
+// Block is one sequence of body-lines ending in exactly one terminator
+// (§7.1). Label is "" for the entry block. Lines holds every body-line in
+// source order, including alloca-lines (which §8.1 requires to come first
+// in the entry block, enforced by ir/verify) and loc-lines.
 type Block struct {
 	Label string
-	Merge Merge
+	Merge *Merge // nil unless the block carries a reconvergence annotation
 	Lines []*Instruction
 	Term  Terminator
 }
 
-func (b *Block) IsEntry() bool { return b.Label == "" }
-
-// Merge is a merge-decl (§7.2).
-type Merge interface{ isMerge() }
-
-// SelectionMerge is `merge L`: the selection headed here reconverges at L.
-type SelectionMerge struct{ Label string }
-
-// LoopMerge is `loop_merge Lexit, Lcontinue`: this block is a loop header.
-type LoopMerge struct{ Exit, Continue string }
-
-func (SelectionMerge) isMerge() {}
-func (LoopMerge) isMerge()      {}
-
-// Dim is a builtin's optional .x/.y/.z suffix (§9).
-type Dim uint8
-
-const (
-	DimNone Dim = iota
-	DimX
-	DimY
-	DimZ
-)
-
-func (d Dim) String() string {
-	switch d {
-	case DimX:
-		return "x"
-	case DimY:
-		return "y"
-	case DimZ:
-		return "z"
-	}
-	return ""
-}
-
-// Instruction is one body-line (§2). At most one of Suffix, Dim, and Exec
-// is set, and which one is fixed by the opcode:
-//
-//	Suffix — the `.<T>` type suffix on an ordinary op, or AnyPtr for the
-//	         bare `.ptr` ident suffix (eq.ptr / index.ptr / field.ptr).
-//	Dim    — the `.x`/`.y`/`.z` suffix on a §9 execution builtin.
-//	Exec   — the execution scope on `barrier.<exec-scope>`; barrier's
-//	         optional memory scope is Args[0], since the grammar puts it
-//	         after the comma.
-//
-// Note for printers and parsers: a type suffix may itself contain commas
-// (`add.vec[f32,4] a, b`), so splitting an inst line on commas requires
-// tracking bracket depth (§2 lexical).
+// Instruction is one body-line. Exactly one suffix channel is used per
+// opcode, and which one is registered in opTable (opcode.go): Suffix for a
+// type suffix (and for the bare `ptr` suffix word, spelled PtrWord), Dim
+// for dimension-suffixed builtins (§9), Exec for barrier (§10.1).
+// OpInvalid is never a legal instruction opcode.
 type Instruction struct {
 	Result string
 	Op     Opcode
@@ -290,12 +237,11 @@ type Instruction struct {
 	Dim    Dim
 	Exec   ExecScope
 	Args   []Operand
-	Align  int // 0 = natural; power of two, 1..1024 (§2)
+	Align  int // `align N` clause (§8.3); 0 = natural
 }
 
 // ---------------------------------------------------------------------------
-// Terminators (§2, §7). No trap and no tailcall: .gvir has no trap
-// semantics at all (§1) and no indirect or tail calls (§6.4).
+// Terminators (§2, §7.1)
 // ---------------------------------------------------------------------------
 
 type Terminator interface{ isTerm() }
@@ -314,11 +260,8 @@ type Switch struct {
 	Default string
 	Cases   []SwitchCase
 }
-
-// Return carries no operand inside a kernel (§6.1).
-type Return struct{ Value *Operand }
-
-type Unreachable struct{}
+type Return struct{ Value *Operand } // nil Value in kernels and void funcs
+type Unreachable struct{}            // executing one is UB (§12.6)
 
 func (Br) isTerm()          {}
 func (BrIf) isTerm()        {}
@@ -326,8 +269,10 @@ func (Switch) isTerm()      {}
 func (Return) isTerm()      {}
 func (Unreachable) isTerm() {}
 
-// Successors returns the distinct labels a terminator may transfer to, in
-// first-mention order.
+// Successors returns the labels a terminator may transfer to, deduplicated
+// in first-occurrence order. A br_if whose arms are identical has one
+// successor, which is why §7.2's "more than one distinct successor" test
+// can be written against this function.
 func Successors(t Terminator) []string {
 	switch x := t.(type) {
 	case Br:
@@ -351,25 +296,71 @@ func Successors(t Terminator) []string {
 	return nil
 }
 
-// NeedsMerge reports whether a block ending in t must carry a merge-decl:
-// exactly the "more than one distinct successor" test of §7.2. A br_if
-// whose arms are the same label does not qualify.
-func NeedsMerge(t Terminator) bool {
-	switch t.(type) {
-	case BrIf, Switch:
-		return len(Successors(t)) > 1
+// ---------------------------------------------------------------------------
+// Module lookups. The namespace is flat and module-wide (§2).
+// ---------------------------------------------------------------------------
+
+func (m *Module) StructByName(name string) *Struct {
+	for _, s := range m.Structs {
+		if s.Name == name {
+			return s
+		}
 	}
-	return false
+	return nil
 }
 
-// AllBlocks returns entry followed by the labelled blocks.
-func (k *Kernel) AllBlocks() []*Block { return allBlocks(k.Entry, k.Blocks) }
-func (f *Func) AllBlocks() []*Block   { return allBlocks(f.Entry, f.Blocks) }
-
-func allBlocks(entry *Block, rest []*Block) []*Block {
-	out := make([]*Block, 0, len(rest)+1)
-	if entry != nil {
-		out = append(out, entry)
+func (m *Module) ConstByName(name string) *Const {
+	for _, c := range m.Constants {
+		if c.Name == name {
+			return c
+		}
 	}
-	return append(out, rest...)
+	return nil
+}
+
+func (m *Module) FuncByName(name string) *Func {
+	for _, f := range m.Funcs {
+		if f.Name == name {
+			return f
+		}
+	}
+	return nil
+}
+
+func (m *Module) KernelByName(name string) *Kernel {
+	for _, k := range m.Kernels {
+		if k.Name == name {
+			return k
+		}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Lexical helpers (§2)
+// ---------------------------------------------------------------------------
+
+// ValidIdent reports whether s matches [A-Za-z_][A-Za-z0-9_]* and contains
+// no "__". The double underscore is forbidden module-wide because it is
+// reserved as the host symbol ABI separator (§2, gvir_arch.md §6).
+func ValidIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c == '_':
+		case c >= '0' && c <= '9':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+		if i > 0 && c == '_' && s[i-1] == '_' {
+			return false
+		}
+	}
+	return true
 }

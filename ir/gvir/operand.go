@@ -6,14 +6,69 @@ import (
 	"strconv"
 )
 
-// OperandKind discriminates Operand payloads (§2 operand grammar):
-//
-//	operand := ident | literal | ordering | scope
-//
-// Narrower than vir's: no type operands (index.ptr is byte arithmetic and
-// takes no element type), no vector literals (a shuffle mask is a run of
-// int literals), and no qualified idents (the namespace is flat, and `__`
-// is reserved for the host symbol ABI). Strings appear only in loc.
+// ---------------------------------------------------------------------------
+// Closed vocabularies (§2). Small enough to be string types: they appear in
+// the text verbatim and there is no arithmetic to do on them.
+// ---------------------------------------------------------------------------
+
+// Ordering is a fence ordering (§10.2). Atomics are always relaxed and carry
+// no ordering operand, so this appears on `fence` alone.
+type Ordering string
+
+const (
+	OrderRelaxed Ordering = "relaxed"
+	OrderAcquire Ordering = "acquire"
+	OrderRelease Ordering = "release"
+	OrderAcqRel  Ordering = "acqrel"
+	OrderSeqCst  Ordering = "seqcst"
+)
+
+var CanonicalOrderings = map[Ordering]bool{
+	OrderRelaxed: true, OrderAcquire: true, OrderRelease: true,
+	OrderAcqRel: true, OrderSeqCst: true,
+}
+
+// Scope is a memory/atomic scope (§10.1, §10.2). ScopeNone is legal only as
+// a barrier's memory scope.
+type Scope string
+
+const (
+	ScopeSubgroup Scope = "subgroup"
+	ScopeGroup    Scope = "group"
+	ScopeGrid     Scope = "grid"
+	ScopeNone     Scope = "none"
+)
+
+var CanonicalScopes = map[Scope]bool{
+	ScopeSubgroup: true, ScopeGroup: true, ScopeGrid: true, ScopeNone: true,
+}
+
+// ExecScope is a barrier's execution scope (§10.1) — the suffix, not an
+// operand, and never `grid` or `none`.
+type ExecScope string
+
+const (
+	ExecNone     ExecScope = "" // unset
+	ExecSubgroup ExecScope = "subgroup"
+	ExecGroup    ExecScope = "group"
+)
+
+// Dim is a builtin's optional dimension suffix (§9).
+type Dim string
+
+const (
+	DimNone Dim = ""
+	DimX    Dim = "x"
+	DimY    Dim = "y"
+	DimZ    Dim = "z"
+)
+
+// ---------------------------------------------------------------------------
+// Operands (§2 operand grammar)
+// ---------------------------------------------------------------------------
+
+// OperandKind discriminates Operand payloads. There are no qualified idents:
+// the module namespace is flat and there is no cross-module reference form.
 type OperandKind int
 
 const (
@@ -22,71 +77,45 @@ const (
 	OperandFloat                       // float literal (incl. NaN, Inf, -Inf)
 	OperandBool                        // true / false
 	OperandNull                        // null (ptr)
-	OperandOrdering                    // relaxed | acquire | release | acqrel | seqcst
-	OperandScope                       // subgroup | group | grid | none
-	OperandString                      // loc only (§2)
+	OperandOrdering                    // fence ordering
+	OperandScope                       // memory / atomic scope
+	OperandString                      // string literal — `loc` only (§2)
 )
-
-// Ordering is a fence's memory ordering (§10.2). Atomics never carry one:
-// they are relaxed in v1 and ordering is expressed separately.
-type Ordering string
-
-const (
-	Relaxed Ordering = "relaxed"
-	Acquire Ordering = "acquire"
-	Release Ordering = "release"
-	AcqRel  Ordering = "acqrel"
-	SeqCst  Ordering = "seqcst"
-)
-
-// Scope is a memory or atomic scope (§10).
-type Scope string
-
-const (
-	ScopeSubgroup Scope = "subgroup"
-	ScopeGroup    Scope = "group"
-	ScopeGrid     Scope = "grid"
-	ScopeNone     Scope = "none" // barrier memory scope only
-)
-
-// ExecScope is a barrier's execution scope suffix (§10.1). Deliberately a
-// separate type from Scope: grid and none are memory scopes and are never
-// execution scopes.
-type ExecScope string
-
-const (
-	ExecSubgroup ExecScope = "subgroup"
-	ExecGroup    ExecScope = "group"
-	ExecNone     ExecScope = "" // absent
-)
-
-// DefaultMemScope is the memory scope a barrier gets when the comma form
-// is omitted: the execution scope itself (§10.1).
-func DefaultMemScope(e ExecScope) Scope { return Scope(e) }
 
 // Operand is one operand-grammar value.
+//
+// Hex marks a float literal that must be emitted in the hex-float spelling.
+// §2 makes hex-float exact by construction and the portable way to pin a bit
+// pattern, so the choice is part of the source text's meaning and is
+// preserved here rather than re-derived by a printer.
 type Operand struct {
 	Kind     OperandKind
 	Ident    string
 	Int      int64
 	Float    float64
+	Hex      bool
 	Bool     bool
 	Str      string
 	Ordering Ordering
 	Scope    Scope
 }
 
+// Constructors — the builder-facing spelling of each operand form.
 func Ident(name string) Operand      { return Operand{Kind: OperandIdent, Ident: name} }
 func IntLiteral(v int64) Operand     { return Operand{Kind: OperandInt, Int: v} }
 func FloatLiteral(v float64) Operand { return Operand{Kind: OperandFloat, Float: v} }
-func BoolLiteral(v bool) Operand     { return Operand{Kind: OperandBool, Bool: v} }
-func NullLiteral() Operand           { return Operand{Kind: OperandNull} }
-func StringLiteral(s string) Operand { return Operand{Kind: OperandString, Str: s} }
 
-func OrderingOperand(o Ordering) Operand {
-	return Operand{Kind: OperandOrdering, Ordering: o}
+// HexFloatLiteral is the exact spelling: the emitted text round-trips to v
+// bit for bit on every conforming frontend (§2, §13 "Literals").
+func HexFloatLiteral(v float64) Operand {
+	return Operand{Kind: OperandFloat, Float: v, Hex: true}
 }
-func ScopeOperand(s Scope) Operand { return Operand{Kind: OperandScope, Scope: s} }
+
+func BoolLiteral(v bool) Operand         { return Operand{Kind: OperandBool, Bool: v} }
+func NullLiteral() Operand               { return Operand{Kind: OperandNull} }
+func StringLiteral(s string) Operand     { return Operand{Kind: OperandString, Str: s} }
+func OrderingOperand(o Ordering) Operand { return Operand{Kind: OperandOrdering, Ordering: o} }
+func ScopeOperand(s Scope) Operand       { return Operand{Kind: OperandScope, Scope: s} }
 
 func (o Operand) String() string {
 	switch o.Kind {
@@ -95,6 +124,9 @@ func (o Operand) String() string {
 	case OperandInt:
 		return strconv.FormatInt(o.Int, 10)
 	case OperandFloat:
+		if o.Hex {
+			return formatHexFloat(o.Float)
+		}
 		return formatFloat(o.Float)
 	case OperandBool:
 		if o.Bool {

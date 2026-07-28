@@ -3,84 +3,18 @@ package gvir
 
 import "fmt"
 
-// Layout rules (§4.4, §4.7, §6.3). Defined by the IR itself and identical
-// on every backend — not inherited from a C ABI and, for msl, explicitly
-// not Metal's struct rules. The conformance suite compares kernarg buffers
-// byte for byte across all three backends (§13), so this file is the one
-// place that computation may live.
+// Memory and kernarg layout (§4.4, §4.7, §6.3). Layout is defined by the
+// specification, not inherited from a C ABI, and the kernarg buffer must be
+// byte-identical across all three backends (§13 "Layout").
+//
+// Exported so the launcher generator, the differential test suite and
+// ir/verify all resolve the same offsets without re-implementing the
+// derivation a second time.
 
-// SizeOf returns t's size in bytes.
-func (m *Module) SizeOf(t Type) (int, error) {
-	switch x := t.(type) {
-	case IntType:
-		// i1 is a byte in memory. The spec fixes no width for it; a byte
-		// is the only choice that keeps struct layout addressable and
-		// matches every backend's bool storage.
-		if x.Bits == 1 {
-			return 1, nil
-		}
-		return x.Bits / 8, nil
-	case FloatType:
-		return x.Bits() / 8, nil
-	case PtrType:
-		if x.Space == SpaceNone {
-			return 0, fmt.Errorf("layout: bare `.ptr` suffix is not a value type")
-		}
-		return 8, nil // 64-bit on every backend (§4.1)
-	case VecType:
-		if IsPredVec(x) {
-			return 0, fmt.Errorf("layout: vec[i1,%d] has no memory representation (§4.5)", x.Len)
-		}
-		es, err := m.SizeOf(x.Elem)
-		if err != nil {
-			return 0, err
-		}
-		return nextPow2(x.Len) * es, nil // vec[T,3] is 4 elements wide
-	case ArrayType:
-		es, err := m.SizeOf(x.Elem)
-		if err != nil {
-			return 0, err
-		}
-		ea, err := m.AlignOf(x.Elem)
-		if err != nil {
-			return 0, err
-		}
-		// No inter-element padding: the element's own size is already a
-		// multiple of its alignment for every legal element type.
-		if es%ea != 0 {
-			return 0, fmt.Errorf("layout: element %s is not a multiple of its own alignment", x.Elem)
-		}
-		return es * x.Len, nil
-	case StructType:
-		f, err := m.StructLayout(x.Name)
-		if err != nil {
-			return 0, err
-		}
-		return f.Size, nil
-	}
-	return 0, fmt.Errorf("layout: %s has no size", t)
-}
+// PointerSize is 8 on every backend (§4.1).
+const PointerSize = 8
 
-// AlignOf returns t's natural alignment in bytes.
-func (m *Module) AlignOf(t Type) (int, error) {
-	switch x := t.(type) {
-	case IntType, FloatType, PtrType:
-		return m.SizeOf(x) // scalars are naturally aligned to their size
-	case VecType:
-		return m.SizeOf(x) // vec alignment == its padded size (§4.4)
-	case ArrayType:
-		return m.AlignOf(x.Elem)
-	case StructType:
-		f, err := m.StructLayout(x.Name)
-		if err != nil {
-			return 0, err
-		}
-		return f.Align, nil
-	}
-	return 0, fmt.Errorf("layout: %s has no alignment", t)
-}
-
-// FieldOffset is one laid-out struct field.
+// FieldOffset is one member's placement inside a struct.
 type FieldOffset struct {
 	Name   string
 	Type   Type
@@ -89,154 +23,216 @@ type FieldOffset struct {
 	Align  int
 }
 
-// StructInfo is a fully laid-out struct (§4.7): fields in declaration
-// order, each naturally aligned, the whole padded to the largest member
+// StructLayoutInfo is a struct's complete §4.7 layout: fields in
+// declaration order, naturally aligned, padded to the largest member
 // alignment.
-type StructInfo struct {
-	Name   string
+type StructLayoutInfo struct {
 	Fields []FieldOffset
 	Size   int
 	Align  int
 }
 
-// StructLayout computes the layout of the named struct.
-func (m *Module) StructLayout(name string) (*StructInfo, error) {
-	s := m.Struct(name)
-	if s == nil {
-		return nil, fmt.Errorf("layout: undeclared struct %q", name)
-	}
-	info := &StructInfo{Name: name, Align: 1}
-	off := 0
-	for _, f := range s.Fields {
-		sz, err := m.SizeOf(f.Type)
-		if err != nil {
-			return nil, fmt.Errorf("layout: struct %s field %s: %w", name, f.Name, err)
-		}
-		al, err := m.AlignOf(f.Type)
-		if err != nil {
-			return nil, fmt.Errorf("layout: struct %s field %s: %w", name, f.Name, err)
-		}
-		off = roundUp(off, al)
-		info.Fields = append(info.Fields, FieldOffset{
-			Name: f.Name, Type: f.Type, Offset: off, Size: sz, Align: al,
-		})
-		off += sz
-		if al > info.Align {
-			info.Align = al
-		}
-	}
-	info.Size = roundUp(off, info.Align)
-	return info, nil
+// SizeOf reports the byte size t occupies in memory.
+func (m *Module) SizeOf(t Type) (int, error) {
+	size, _, err := m.sizeAlign(t, map[string]bool{})
+	return size, err
 }
 
-// --- kernarg (§6.3) --------------------------------------------------------
+// AlignOf reports t's natural alignment.
+func (m *Module) AlignOf(t Type) (int, error) {
+	_, align, err := m.sizeAlign(t, map[string]bool{})
+	return align, err
+}
 
-// KernargField is one slot of the packed kernarg buffer. Index is the §6.2
-// parameter index, or -1 for a hidden trailer field.
-type KernargField struct {
-	Name   string
+// StructLayout computes s's field offsets, total size and alignment.
+func (m *Module) StructLayout(s *Struct) (StructLayoutInfo, error) {
+	return m.structLayout(s, map[string]bool{})
+}
+
+func (m *Module) structLayout(s *Struct, seen map[string]bool) (StructLayoutInfo, error) {
+	if seen[s.Name] {
+		return StructLayoutInfo{}, fmt.Errorf("struct %s is recursive — no forward references exist in .gvir (§2)", s.Name)
+	}
+	seen[s.Name] = true
+	defer delete(seen, s.Name)
+
+	out := StructLayoutInfo{Align: 1}
+	offset := 0
+	for _, f := range s.Fields {
+		size, align, err := m.sizeAlign(f.Type, seen)
+		if err != nil {
+			return StructLayoutInfo{}, fmt.Errorf("struct %s field %s: %w", s.Name, f.Name, err)
+		}
+		offset = alignUp(offset, align)
+		out.Fields = append(out.Fields, FieldOffset{
+			Name: f.Name, Type: f.Type, Offset: offset, Size: size, Align: align,
+		})
+		offset += size
+		if align > out.Align {
+			out.Align = align
+		}
+	}
+	out.Size = alignUp(offset, out.Align)
+	return out, nil
+}
+
+func (m *Module) sizeAlign(t Type, seen map[string]bool) (int, int, error) {
+	switch x := t.(type) {
+	case IntType:
+		if !IsSInt(x) {
+			return 0, 0, fmt.Errorf("i1 has no defined size or layout (§4.1)")
+		}
+		n := x.Bits / 8
+		return n, n, nil
+
+	case FloatType:
+		n := x.Bits / 8
+		if n == 0 {
+			return 0, 0, fmt.Errorf("%s is not a float type (§4.1)", x)
+		}
+		return n, n, nil
+
+	case PtrType:
+		if x.Space == "" {
+			return 0, 0, fmt.Errorf("the bare `ptr` suffix word is not a value type and has no layout")
+		}
+		return PointerSize, PointerSize, nil
+
+	case VecType:
+		if IsBool(x.Elem) {
+			return 0, 0, fmt.Errorf("vec[i1,N] is value-only and has no layout (§4.5)")
+		}
+		if !IsVecElemType(x.Elem) {
+			return 0, 0, fmt.Errorf("vec element %s is not a non-i1 scalar (§4.4)", x.Elem)
+		}
+		if x.Len < 2 || x.Len > 4 {
+			return 0, 0, fmt.Errorf("vec width %d is not 2, 3 or 4 (§4.4)", x.Len)
+		}
+		elemSize, _, err := m.sizeAlign(x.Elem, seen)
+		if err != nil {
+			return 0, 0, err
+		}
+		// Width 3 rounds up to 4: element 3 is padding (§4.4).
+		n := nextPow2(x.Len) * elemSize
+		return n, n, nil
+
+	case ArrayType:
+		elemSize, elemAlign, err := m.sizeAlign(x.Elem, seen)
+		if err != nil {
+			return 0, 0, err
+		}
+		if x.Len < 0 {
+			return 0, 0, fmt.Errorf("array length %d is negative", x.Len)
+		}
+		// No inter-element padding (§4.7).
+		return elemSize * x.Len, elemAlign, nil
+
+	case StructType:
+		s := m.StructByName(x.Name)
+		if s == nil {
+			return 0, 0, fmt.Errorf("undeclared struct %s", x.Name)
+		}
+		l, err := m.structLayout(s, seen)
+		if err != nil {
+			return 0, 0, err
+		}
+		return l.Size, l.Align, nil
+
+	case SubmaskType:
+		return 0, 0, fmt.Errorf("submask is opaque: its width is the runtime subgroup width (§4.6)")
+
+	case VoidType:
+		return 0, 0, fmt.Errorf("void has no layout")
+	}
+	return 0, 0, fmt.Errorf("type %s has no memory layout", t)
+}
+
+// ---------------------------------------------------------------------------
+// Kernarg layout (§6.3)
+// ---------------------------------------------------------------------------
+
+// KernargParam is one argument's placement in the packed kernarg buffer.
+// Index — not Offset — is the portable identity of a parameter (§6.2).
+type KernargParam struct {
 	Index  int
+	Name   string
 	Type   Type
 	Offset int
 	Size   int
 	Align  int
-	Hidden bool
 }
 
-// KernargLayout is the packed argument buffer, identical on all three
-// backends. On msl it is realized as the single argument buffer at
-// buffer(0), whose offsets and padding come from here rather than from
-// Metal — which is why it requires Argument Buffers Tier 2.
+// KernargLayout is a kernel's complete argument buffer layout. There is no
+// hidden trailer: every backend carries the dynamic group size natively, so
+// the buffer holds explicit arguments and nothing else and is byte-identical
+// across all three backends (§6.3).
 type KernargLayout struct {
-	Fields []KernargField
+	Params []KernargParam
 	Size   int
 	Align  int
 }
 
-// KernargLayout computes k's argument buffer.
-func (m *Module) KernargLayout(k *Kernel) (*KernargLayout, error) {
-	l := &KernargLayout{Align: 8} // buffer align is max(8, largest member)
-	off := 0
+// KernargLayout computes k's argument buffer layout: arguments in
+// declaration order, each at the next offset satisfying its natural
+// alignment; buffer aligned to max(8, largest member alignment); trailing
+// padding rounding the size up to that alignment.
+func (m *Module) KernargLayout(k *Kernel) (KernargLayout, error) {
+	out := KernargLayout{Align: 8}
+	offset := 0
 	for i, p := range k.Params {
-		sz, err := m.SizeOf(p.Type)
-		if err != nil {
-			return nil, fmt.Errorf("kernarg: kernel %s param %s: %w", k.Name, p.Name, err)
+		if !IsKernelParamType(p.Type) {
+			return KernargLayout{}, fmt.Errorf("kernel %s param %d (%s): %s is not a permitted kernel parameter type (§6.2)", k.Name, i, p.Name, p.Type)
 		}
-		al, err := m.AlignOf(p.Type)
+		size, align, err := m.sizeAlign(p.Type, map[string]bool{})
 		if err != nil {
-			return nil, fmt.Errorf("kernarg: kernel %s param %s: %w", k.Name, p.Name, err)
+			return KernargLayout{}, fmt.Errorf("kernel %s param %d (%s): %w", k.Name, i, p.Name, err)
 		}
-		off = roundUp(off, al)
-		l.Fields = append(l.Fields, KernargField{
-			Name: p.Name, Index: i, Type: p.Type, Offset: off, Size: sz, Align: al,
+		offset = alignUp(offset, align)
+		out.Params = append(out.Params, KernargParam{
+			Index: i, Name: p.Name, Type: p.Type,
+			Offset: offset, Size: size, Align: align,
 		})
-		off += sz
-		if al > l.Align {
-			l.Align = al
+		offset += size
+		if align > out.Align {
+			out.Align = align
 		}
 	}
-	// Hidden trailer, on every backend, at the next natural offset after
-	// the last explicit argument.
-	if k.Dynamic != nil {
-		off = roundUp(off, 4)
-		l.Fields = append(l.Fields, KernargField{
-			Name:   "dynamic_group_size",
-			Index:  -1,
-			Type:   I32,
-			Offset: off,
-			Size:   4,
-			Align:  4,
-			Hidden: true,
-		})
-		off += 4
-	}
-	l.Size = roundUp(off, l.Align)
-	return l, nil
+	out.Size = alignUp(offset, out.Align)
+	return out, nil
 }
 
-// --- group memory (§6.5) ---------------------------------------------------
-
-// StaticGroupBytes totals a kernel's statically declared group memory,
-// laying declarations out in order at their declared-or-natural alignment.
-// This is the figure §6.5 checks against GroupMemoryLimit; a backend may
-// pad further, never less.
+// StaticGroupBytes reports the total statically declared `group` footprint
+// of a kernel, laid out in declaration order with each declaration at its
+// declared or natural alignment. This is the figure §6.5 checks against the
+// per-backend budget; the `dynamic_group` allocation is host-provisioned and
+// deliberately not counted.
 func (m *Module) StaticGroupBytes(k *Kernel) (int, error) {
-	off, maxAlign := 0, 1
+	offset, maxAlign := 0, 1
 	for _, g := range k.Groups {
-		sz, err := m.SizeOf(g.Type)
+		size, align, err := m.sizeAlign(g.Type, map[string]bool{})
 		if err != nil {
-			return 0, fmt.Errorf("group %s: %w", g.Name, err)
+			return 0, fmt.Errorf("kernel %s group %s: %w", k.Name, g.Name, err)
 		}
-		al := g.Align
-		if al == 0 {
-			if al, err = m.AlignOf(g.Type); err != nil {
-				return 0, fmt.Errorf("group %s: %w", g.Name, err)
-			}
+		if g.Align > 0 {
+			align = g.Align
 		}
-		off = roundUp(off, al)
-		off += sz
-		if al > maxAlign {
-			maxAlign = al
+		offset = alignUp(offset, align)
+		offset += size
+		if align > maxAlign {
+			maxAlign = align
 		}
 	}
-	return roundUp(off, maxAlign), nil
+	return alignUp(offset, maxAlign), nil
 }
 
-// FitsEverywhere reports whether k's static group memory stays under the
-// portable budget (§6.5).
-func (m *Module) FitsEverywhere(k *Kernel) (bool, error) {
-	n, err := m.StaticGroupBytes(k)
-	if err != nil {
-		return false, err
+func alignUp(v, a int) int {
+	if a <= 1 {
+		return v
 	}
-	return n <= PortableGroupLimit, nil
-}
-
-func roundUp(n, align int) int {
-	if align <= 1 {
-		return n
+	if r := v % a; r != 0 {
+		return v + a - r
 	}
-	return (n + align - 1) / align * align
+	return v
 }
 
 func nextPow2(n int) int {

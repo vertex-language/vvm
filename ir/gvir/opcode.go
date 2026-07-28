@@ -3,42 +3,22 @@ package gvir
 
 import "fmt"
 
-// Opcode identifies a core GPU IR mnemonic (§8, §9, §10, §11). As in vir
-// it replaces bare strings so a typo is a compile error, and every
-// opcode's constraint/arity/result rule is registered exactly once in
-// opTable below — init() panics at package load if any constant is
-// missing an entry.
+// Opcode identifies a core Vertex GPU IR mnemonic (§8-§11). It replaces bare
+// strings so a typo is a compile error, and every opcode's suffix shape,
+// arity, operand constraint, result rule and behavioural flags are
+// registered exactly once in opTable below — init() panics at package load
+// if any constant is missing an entry.
 //
-// The vocabulary is closed and deliberately smaller than vir's: no
-// overflow predicates, no saturating add/sub, no masked/gather/scatter, no
-// reductions over vectors, no syscall, no va_*, no prefetch. What is here
-// and not in vir is the subgroup layer (§10.3) and the execution builtins
-// (§9).
+// The vocabulary is closed by construction: §1 promises an opcode means the
+// same thing on all three backends or it is not in the IR, so there is no
+// per-dialect extension mechanism and nothing here is open-ended.
 type Opcode uint16
 
 const (
 	OpInvalid Opcode = iota // zero value; never a valid instruction opcode
 
-	// --- Memory and addressing (§8) ---
-	OpAlloca
-	OpLoad
-	OpStore
-	OpLoadVol
-	OpStoreVol
-	OpMemcopy
-	OpMemmove
-	OpMemset
-	OpIndex // index.ptr
-	OpField // field.ptr
-
-	// --- Vector element access (§8.3, §4.4) ---
-	OpExtract
-	OpInsert
-	OpSplat
-	OpShuffle
-
-	// --- Integer arithmetic (§11.1) ---
-	OpAdd // shared with float (§11.3)
+	// Integer arithmetic (§11.1). add/sub/mul/neg/abs are shared with §11.3.
+	OpAdd
 	OpSub
 	OpMul
 	OpNeg
@@ -54,7 +34,7 @@ const (
 	OpSMin
 	OpSMax
 
-	// --- Bitwise and shifts (§11.2) ---
+	// Bitwise and shifts (§11.2).
 	OpAnd
 	OpOr
 	OpXor
@@ -70,7 +50,7 @@ const (
 	OpBrev
 	OpBSwap
 
-	// --- Float arithmetic (§11.3) ---
+	// Float (§11.3).
 	OpDiv
 	OpSqrt
 	OpFma
@@ -85,43 +65,41 @@ const (
 	OpIsNaN
 	OpIsInf
 
-	// --- Integer and pointer comparisons (§11.4) ---
+	// Integer and pointer comparisons (§11.4).
 	OpEq
 	OpNe
-	OpULt
-	OpULe
-	OpUGt
-	OpUGe
-	OpSLt
-	OpSLe
-	OpSGt
-	OpSGe
+	OpUlt
+	OpUle
+	OpUgt
+	OpUge
+	OpSlt
+	OpSle
+	OpSgt
+	OpSge
 
-	// --- Float comparisons (§11.4) ---
-	OpOEq
-	OpONe
-	OpOLt
-	OpOLe
-	OpOGt
-	OpOGe
+	// Float comparisons (§11.4) — ordered only, plus ord/unord.
+	OpOeq
+	OpOne
+	OpOlt
+	OpOle
+	OpOgt
+	OpOge
 	OpOrd
-	OpUEq
-	OpUNe
 	OpUnord
 
-	// --- Conversions (§11.5) — suffix is the destination type ---
+	// Conversions (§11.5) — suffix is the destination type.
 	OpTrunc
 	OpSext
 	OpZext
 	OpFPTrunc
 	OpFPExt
-	OpSToInt // float -> signed iN, saturating and total
-	OpUToInt // float -> unsigned iN, saturating and total
-	OpIntToS // signed iN -> fN
-	OpIntToU // unsigned iN -> fN
+	OpStoint
+	OpUtoint
+	OpInttos
+	OpInttou
 	OpBitcast
 
-	// --- Approximate math (§11.6) — float_profile bounded only ---
+	// Approximate opcodes (§11.6) — require float_profile approx.
 	OpRcp
 	OpRsqrt
 	OpSin
@@ -130,14 +108,25 @@ const (
 	OpLog2
 	OpTanh
 
-	// --- Select and calls (§11.7) ---
-	OpSelect
-	OpCall
+	// Memory (§8.1, §8.3).
+	OpAlloca
+	OpLoad
+	OpStore
+	OpMemcopy
+	OpMemmove
+	OpMemset
+	OpIndex
+	OpField
 
-	// --- Barriers (§10.1) ---
+	// Vectors (§8.3, §4.4).
+	OpExtract
+	OpInsert
+	OpSplat
+	OpSwizzle
+
+	// Synchronization and atomics (§10.1, §10.2).
 	OpBarrier
-
-	// --- Atomics (§10.2) — relaxed in v1; ordering lives in fence ---
+	OpFence
 	OpAtomicLoad
 	OpAtomicStore
 	OpAtomicAdd
@@ -151,10 +140,9 @@ const (
 	OpAtomicSMin
 	OpAtomicSMax
 	OpCmpxchg
-	OpFence
 
-	// --- Subgroup collectives (§10.3) ---
-	// OpShuffle above doubles as the subgroup shuffle; see its opTable note.
+	// Subgroup collectives (§10.3).
+	OpShuffle
 	OpShuffleXor
 	OpShuffleUp
 	OpShuffleDown
@@ -170,7 +158,7 @@ const (
 	OpSubOr
 	OpSubXor
 
-	// --- Submask ops and constants (§10.3) ---
+	// submask operations and constants (§10.3).
 	OpMaskCount
 	OpMaskTest
 	OpMaskFirst
@@ -181,7 +169,7 @@ const (
 	OpMaskGe
 	OpMaskEq
 
-	// --- Execution builtins (§9) — no operands, optional dim suffix ---
+	// Execution builtins (§9).
 	OpThreadInGrid
 	OpThreadInGroup
 	OpGroupInGrid
@@ -194,68 +182,81 @@ const (
 	OpSubgroupsPerGroup
 	OpDynamicGroupSize
 
-	// --- Debug (§2) ---
+	// Select and calls (§11.7).
+	OpSelect
+	OpCall
+
+	// Debug (§2 loc-line).
 	OpLoc
 
 	opcodeCount // sentinel: total defined opcodes; must stay last
 )
 
-// operandConstraint restricts which element type an opcode's suffix may
-// name, checked against ElemOrSelf(suffix).
+// operandConstraint restricts which element type an opcode's type suffix may
+// name. Checked against ElemOrSelf(suffix).
 type operandConstraint uint8
 
 const (
 	ConstraintNone operandConstraint = iota
-	ConstraintInt
+	ConstraintInt                    // i8..i64 (i1 excluded) / vec thereof
 	ConstraintFloat
 	ConstraintIntOrFloat
-	ConstraintIntOrPtr
+	ConstraintIntOrPred // adds i1 and vec[i1,N] (§4.5 and/or/xor/not)
+	ConstraintIntOrPtr  // adds the bare `ptr` suffix word (§11.4)
+)
+
+// suffixKind says which suffix channel an opcode uses. Exactly one channel
+// per opcode; init() and CheckSuffix keep Instruction honest about it.
+type suffixKind uint8
+
+const (
+	suffixNone          suffixKind = iota // no suffix at all
+	suffixType                            // op "." type
+	suffixTypeOrPtrWord                   // type, or the bare word `ptr` (§11.4)
+	suffixPtrWord                         // always the bare word `ptr` (§8.3)
+	suffixDim                             // optional .x/.y/.z (§9)
+	suffixExec                            // .subgroup / .group (§10.1)
 )
 
 // resultRule says how an instruction's result type is derived.
 type resultRule uint8
 
 const (
-	ruleSuffix       resultRule = iota // result type == Suffix
-	ruleVoid                           // never produces a value
-	ruleBool                           // i1, or vec[i1,N] for a vector suffix
-	ruleSubmask                        // submask (§4.6)
-	ruleI32                            // fixed i32 (mask_count, mask_first)
-	rulePrivatePtr                     // alloca: ptr[private] (§8.1)
-	rulePtrOfOperand                   // index.ptr / field.ptr: operand 0's own
-	// pointer type, since `.ptr` names no space and the space is inherited
-	// from the base pointer (§8.3).
-	ruleBuiltin // §9 table, keyed by opcode and dim suffix
-	ruleSpecial // computed by ir/verify with a typing environment
+	ruleSuffix      resultRule = iota // result type == Suffix
+	ruleVoid                          // op never produces a value
+	ruleBool                          // i1, or vec[i1,N] when Suffix is a vector
+	ruleElem                          // element type of a vector Suffix (extract)
+	ruleI32                           // §9 fixed-width builtins, mask_count/mask_first
+	ruleI64                           // unsuffixed positional builtins that reject .x/.y/.z
+	ruleDim                           // i32 with a dim suffix, i64 without (§9)
+	ruleSubmask                       // ballot and the mask_* constants
+	rulePrivatePtr                    // alloca yields ptr[private] (§8.1)
+	ruleSpecial                       // computed by ir/verify: call, index, field
 )
 
 type opFlags uint8
 
 const (
-	// flagBounded: legal only under float_profile bounded (§11.6).
-	flagBounded opFlags = 1 << iota
-	// flagBuiltin: §9 execution builtin — takes no operands.
-	flagBuiltin
-	// flagUniform: requires uniform reachability across its execution
-	// scope; non-uniform arrival is UB (§12.8). Covers barrier and every
-	// subgroup collective.
-	flagUniform
-	// flagAtomic: carries a scope as its final operand and no ordering
-	// operand (§10.2).
-	flagAtomic
+	flagBuiltin    opFlags = 1 << iota // §9 execution builtin; takes no operands
+	flagApprox                         // requires float_profile approx (§11.6)
+	flagCollective                     // §10.3 collective: subgroup-uniform reachability required
+	flagAtomic                         // final operand is a §10.2 scope
+	flagAlignable                      // may carry an `align N` clause (§8.1, §8.3)
 )
 
 type opDef struct {
 	op      Opcode
 	name    string
 	numeric operandConstraint
-	arity   int // -1 == not pinned by the grammar text
+	suffix  suffixKind
+	arity   int // -1 == not pinned by the grammar text; checked in ir/verify
 	result  resultRule
 	flags   opFlags
 }
 
 type opMeta struct {
 	numeric operandConstraint
+	suffix  suffixKind
 	arity   int
 	result  resultRule
 	flags   opFlags
@@ -264,196 +265,203 @@ type opMeta struct {
 // opTable is the single source of truth for every opcode. Every Opcode
 // constant above must appear here exactly once; init() enforces it.
 var opTable = []opDef{
-	// Memory (§8). Store takes its destination first.
-	{OpAlloca, "alloca", ConstraintNone, 0, rulePrivatePtr, 0},
-	{OpLoad, "load", ConstraintNone, 1, ruleSuffix, 0},
-	{OpStore, "store", ConstraintNone, 2, ruleVoid, 0},
-	{OpLoadVol, "load_vol", ConstraintNone, 1, ruleSuffix, 0},
-	{OpStoreVol, "store_vol", ConstraintNone, 2, ruleVoid, 0},
-	{OpMemcopy, "memcopy", ConstraintNone, 3, ruleVoid, 0},
-	{OpMemmove, "memmove", ConstraintNone, 3, ruleVoid, 0},
-	{OpMemset, "memset", ConstraintNone, 3, ruleVoid, 0},
-	// index.ptr is byte arithmetic with an i64 offset — no element-type
-	// operand, unlike vir's index. field.ptr's k is a literal index.
-	{OpIndex, "index", ConstraintNone, 2, rulePtrOfOperand, 0},
-	{OpField, "field", ConstraintNone, 2, rulePtrOfOperand, 0},
+	// --- Integer / shared arithmetic (§11.1) ------------------------------
+	{OpAdd, "add", ConstraintIntOrFloat, suffixType, 2, ruleSuffix, 0},
+	{OpSub, "sub", ConstraintIntOrFloat, suffixType, 2, ruleSuffix, 0},
+	{OpMul, "mul", ConstraintIntOrFloat, suffixType, 2, ruleSuffix, 0},
+	{OpNeg, "neg", ConstraintIntOrFloat, suffixType, 1, ruleSuffix, 0},
+	{OpAbs, "abs", ConstraintIntOrFloat, suffixType, 1, ruleSuffix, 0},
+	{OpUDiv, "udiv", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpSDiv, "sdiv", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpURem, "urem", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpSRem, "srem", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpUMulH, "umulh", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpSMulH, "smulh", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpUMin, "umin", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpUMax, "umax", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpSMin, "smin", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpSMax, "smax", ConstraintInt, suffixType, 2, ruleSuffix, 0},
 
-	{OpExtract, "extract", ConstraintNone, 2, ruleSpecial, 0},
-	{OpInsert, "insert", ConstraintNone, 3, ruleSuffix, 0},
-	{OpSplat, "splat", ConstraintNone, 1, ruleSuffix, 0},
-	// shuffle is overloaded by the spec: §8.3 gives the vector form
-	// (a, b, mask...) and §10.3 gives the subgroup form (v, lane). One
-	// mnemonic, one suffix, one result rule (== suffix), so a single
-	// opcode covers both; ir/verify distinguishes them by operand count
-	// and operand kinds. Arity is left unpinned for that reason.
-	{OpShuffle, "shuffle", ConstraintNone, -1, ruleSuffix, 0},
+	// --- Bitwise and shifts (§11.2) ---------------------------------------
+	// and/or/xor/not additionally accept i1 and vec[i1,N] (§4.5).
+	{OpAnd, "and", ConstraintIntOrPred, suffixType, 2, ruleSuffix, 0},
+	{OpOr, "or", ConstraintIntOrPred, suffixType, 2, ruleSuffix, 0},
+	{OpXor, "xor", ConstraintIntOrPred, suffixType, 2, ruleSuffix, 0},
+	{OpNot, "not", ConstraintIntOrPred, suffixType, 1, ruleSuffix, 0},
+	{OpShl, "shl", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpLShr, "lshr", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpAShr, "ashr", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpRotl, "rotl", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpRotr, "rotr", ConstraintInt, suffixType, 2, ruleSuffix, 0},
+	{OpCtlz, "ctlz", ConstraintInt, suffixType, 1, ruleSuffix, 0},
+	{OpCttz, "cttz", ConstraintInt, suffixType, 1, ruleSuffix, 0},
+	{OpPopcnt, "popcnt", ConstraintInt, suffixType, 1, ruleSuffix, 0},
+	{OpBrev, "brev", ConstraintInt, suffixType, 1, ruleSuffix, 0},
+	{OpBSwap, "bswap", ConstraintInt, suffixType, 1, ruleSuffix, 0},
 
-	// Integer (§11.1). add/sub/mul/neg/abs are shared with float (§11.3).
-	{OpAdd, "add", ConstraintIntOrFloat, 2, ruleSuffix, 0},
-	{OpSub, "sub", ConstraintIntOrFloat, 2, ruleSuffix, 0},
-	{OpMul, "mul", ConstraintIntOrFloat, 2, ruleSuffix, 0},
-	{OpNeg, "neg", ConstraintIntOrFloat, 1, ruleSuffix, 0},
-	{OpAbs, "abs", ConstraintIntOrFloat, 1, ruleSuffix, 0},
-	{OpUDiv, "udiv", ConstraintInt, 2, ruleSuffix, 0},
-	{OpSDiv, "sdiv", ConstraintInt, 2, ruleSuffix, 0},
-	{OpURem, "urem", ConstraintInt, 2, ruleSuffix, 0},
-	{OpSRem, "srem", ConstraintInt, 2, ruleSuffix, 0},
-	{OpUMulH, "umulh", ConstraintInt, 2, ruleSuffix, 0},
-	{OpSMulH, "smulh", ConstraintInt, 2, ruleSuffix, 0},
-	{OpUMin, "umin", ConstraintInt, 2, ruleSuffix, 0},
-	{OpUMax, "umax", ConstraintInt, 2, ruleSuffix, 0},
-	{OpSMin, "smin", ConstraintInt, 2, ruleSuffix, 0},
-	{OpSMax, "smax", ConstraintInt, 2, ruleSuffix, 0},
+	// --- Float (§11.3) -----------------------------------------------------
+	{OpDiv, "div", ConstraintFloat, suffixType, 2, ruleSuffix, 0},
+	{OpSqrt, "sqrt", ConstraintFloat, suffixType, 1, ruleSuffix, 0},
+	{OpFma, "fma", ConstraintFloat, suffixType, 3, ruleSuffix, 0},
+	{OpMin, "min", ConstraintFloat, suffixType, 2, ruleSuffix, 0},
+	{OpMax, "max", ConstraintFloat, suffixType, 2, ruleSuffix, 0},
+	{OpFloor, "floor", ConstraintFloat, suffixType, 1, ruleSuffix, 0},
+	{OpCeil, "ceil", ConstraintFloat, suffixType, 1, ruleSuffix, 0},
+	{OpRound, "round", ConstraintFloat, suffixType, 1, ruleSuffix, 0},
+	{OpRoundEven, "round_even", ConstraintFloat, suffixType, 1, ruleSuffix, 0},
+	{OpTruncF, "trunc_f", ConstraintFloat, suffixType, 1, ruleSuffix, 0},
+	{OpCopysign, "copysign", ConstraintFloat, suffixType, 2, ruleSuffix, 0},
+	{OpIsNaN, "isnan", ConstraintFloat, suffixType, 1, ruleBool, 0},
+	{OpIsInf, "isinf", ConstraintFloat, suffixType, 1, ruleBool, 0},
 
-	// Bitwise (§11.2). i1 is an int type, so these also cover the
-	// vec[i1,N] operand form §4.5 permits.
-	{OpAnd, "and", ConstraintInt, 2, ruleSuffix, 0},
-	{OpOr, "or", ConstraintInt, 2, ruleSuffix, 0},
-	{OpXor, "xor", ConstraintInt, 2, ruleSuffix, 0},
-	{OpNot, "not", ConstraintInt, 1, ruleSuffix, 0},
-	{OpShl, "shl", ConstraintInt, 2, ruleSuffix, 0},
-	{OpLShr, "lshr", ConstraintInt, 2, ruleSuffix, 0},
-	{OpAShr, "ashr", ConstraintInt, 2, ruleSuffix, 0},
-	{OpRotl, "rotl", ConstraintInt, 2, ruleSuffix, 0},
-	{OpRotr, "rotr", ConstraintInt, 2, ruleSuffix, 0},
-	{OpCtlz, "ctlz", ConstraintInt, 1, ruleSuffix, 0},
-	{OpCttz, "cttz", ConstraintInt, 1, ruleSuffix, 0},
-	{OpPopcnt, "popcnt", ConstraintInt, 1, ruleSuffix, 0},
-	{OpBrev, "brev", ConstraintInt, 1, ruleSuffix, 0}, // vir spells this bitrev
-	{OpBSwap, "bswap", ConstraintInt, 1, ruleSuffix, 0},
+	// --- Comparisons (§11.4) ----------------------------------------------
+	// The unsigned family doubles as the pointer family (eq.ptr, ult.ptr,
+	// ...); same-address-space is a two-operand check in ir/verify.
+	{OpEq, "eq", ConstraintIntOrPtr, suffixTypeOrPtrWord, 2, ruleBool, 0},
+	{OpNe, "ne", ConstraintIntOrPtr, suffixTypeOrPtrWord, 2, ruleBool, 0},
+	{OpUlt, "ult", ConstraintIntOrPtr, suffixTypeOrPtrWord, 2, ruleBool, 0},
+	{OpUle, "ule", ConstraintIntOrPtr, suffixTypeOrPtrWord, 2, ruleBool, 0},
+	{OpUgt, "ugt", ConstraintIntOrPtr, suffixTypeOrPtrWord, 2, ruleBool, 0},
+	{OpUge, "uge", ConstraintIntOrPtr, suffixTypeOrPtrWord, 2, ruleBool, 0},
+	{OpSlt, "slt", ConstraintInt, suffixType, 2, ruleBool, 0},
+	{OpSle, "sle", ConstraintInt, suffixType, 2, ruleBool, 0},
+	{OpSgt, "sgt", ConstraintInt, suffixType, 2, ruleBool, 0},
+	{OpSge, "sge", ConstraintInt, suffixType, 2, ruleBool, 0},
 
-	// Float (§11.3). Unlike vir, min/max are unambiguously float-only —
-	// integers use umin/umax/smin/smax — so no special case is needed.
-	{OpDiv, "div", ConstraintFloat, 2, ruleSuffix, 0},
-	{OpSqrt, "sqrt", ConstraintFloat, 1, ruleSuffix, 0},
-	{OpFma, "fma", ConstraintFloat, 3, ruleSuffix, 0},
-	{OpMin, "min", ConstraintFloat, 2, ruleSuffix, 0},
-	{OpMax, "max", ConstraintFloat, 2, ruleSuffix, 0},
-	{OpFloor, "floor", ConstraintFloat, 1, ruleSuffix, 0},
-	{OpCeil, "ceil", ConstraintFloat, 1, ruleSuffix, 0},
-	{OpRound, "round", ConstraintFloat, 1, ruleSuffix, 0},
-	{OpRoundEven, "round_even", ConstraintFloat, 1, ruleSuffix, 0},
-	{OpTruncF, "trunc_f", ConstraintFloat, 1, ruleSuffix, 0},
-	{OpCopysign, "copysign", ConstraintFloat, 2, ruleSuffix, 0},
-	{OpIsNaN, "isnan", ConstraintFloat, 1, ruleBool, 0},
-	{OpIsInf, "isinf", ConstraintFloat, 1, ruleBool, 0},
+	{OpOeq, "oeq", ConstraintFloat, suffixType, 2, ruleBool, 0},
+	{OpOne, "one", ConstraintFloat, suffixType, 2, ruleBool, 0},
+	{OpOlt, "olt", ConstraintFloat, suffixType, 2, ruleBool, 0},
+	{OpOle, "ole", ConstraintFloat, suffixType, 2, ruleBool, 0},
+	{OpOgt, "ogt", ConstraintFloat, suffixType, 2, ruleBool, 0},
+	{OpOge, "oge", ConstraintFloat, suffixType, 2, ruleBool, 0},
+	{OpOrd, "ord", ConstraintFloat, suffixType, 2, ruleBool, 0},
+	{OpUnord, "unord", ConstraintFloat, suffixType, 2, ruleBool, 0},
 
-	// Integer/pointer comparisons (§11.4). Pointer forms are the bare
-	// `.ptr` suffix and are legal within one address space only.
-	{OpEq, "eq", ConstraintIntOrPtr, 2, ruleBool, 0},
-	{OpNe, "ne", ConstraintIntOrPtr, 2, ruleBool, 0},
-	{OpULt, "ult", ConstraintIntOrPtr, 2, ruleBool, 0},
-	{OpULe, "ule", ConstraintIntOrPtr, 2, ruleBool, 0},
-	{OpUGt, "ugt", ConstraintIntOrPtr, 2, ruleBool, 0},
-	{OpUGe, "uge", ConstraintIntOrPtr, 2, ruleBool, 0},
-	{OpSLt, "slt", ConstraintInt, 2, ruleBool, 0},
-	{OpSLe, "sle", ConstraintInt, 2, ruleBool, 0},
-	{OpSGt, "sgt", ConstraintInt, 2, ruleBool, 0},
-	{OpSGe, "sge", ConstraintInt, 2, ruleBool, 0},
+	// --- Conversions (§11.5) ----------------------------------------------
+	{OpTrunc, "trunc", ConstraintInt, suffixType, 1, ruleSuffix, 0},
+	{OpSext, "sext", ConstraintInt, suffixType, 1, ruleSuffix, 0},
+	{OpZext, "zext", ConstraintInt, suffixType, 1, ruleSuffix, 0},
+	{OpFPTrunc, "fptrunc", ConstraintFloat, suffixType, 1, ruleSuffix, 0},
+	{OpFPExt, "fpext", ConstraintFloat, suffixType, 1, ruleSuffix, 0},
+	{OpStoint, "stoint", ConstraintInt, suffixType, 1, ruleSuffix, 0},
+	{OpUtoint, "utoint", ConstraintInt, suffixType, 1, ruleSuffix, 0},
+	{OpInttos, "inttos", ConstraintFloat, suffixType, 1, ruleSuffix, 0},
+	{OpInttou, "inttou", ConstraintFloat, suffixType, 1, ruleSuffix, 0},
+	// bitcast's legality is a width-and-space pair rule, not an element-type
+	// rule: IsBitcastType plus the §11.5 equal-width check in ir/verify.
+	{OpBitcast, "bitcast", ConstraintNone, suffixType, 1, ruleSuffix, 0},
 
-	// Float comparisons (§11.4).
-	{OpOEq, "oeq", ConstraintFloat, 2, ruleBool, 0},
-	{OpONe, "one", ConstraintFloat, 2, ruleBool, 0},
-	{OpOLt, "olt", ConstraintFloat, 2, ruleBool, 0},
-	{OpOLe, "ole", ConstraintFloat, 2, ruleBool, 0},
-	{OpOGt, "ogt", ConstraintFloat, 2, ruleBool, 0},
-	{OpOGe, "oge", ConstraintFloat, 2, ruleBool, 0},
-	{OpOrd, "ord", ConstraintFloat, 2, ruleBool, 0},
-	{OpUEq, "ueq", ConstraintFloat, 2, ruleBool, 0},
-	{OpUNe, "une", ConstraintFloat, 2, ruleBool, 0},
-	{OpUnord, "unord", ConstraintFloat, 2, ruleBool, 0},
+	// --- Approximate opcodes (§11.6) --------------------------------------
+	{OpRcp, "rcp", ConstraintFloat, suffixType, 1, ruleSuffix, flagApprox},
+	{OpRsqrt, "rsqrt", ConstraintFloat, suffixType, 1, ruleSuffix, flagApprox},
+	{OpSin, "sin", ConstraintFloat, suffixType, 1, ruleSuffix, flagApprox},
+	{OpCos, "cos", ConstraintFloat, suffixType, 1, ruleSuffix, flagApprox},
+	{OpExp2, "exp2", ConstraintFloat, suffixType, 1, ruleSuffix, flagApprox},
+	{OpLog2, "log2", ConstraintFloat, suffixType, 1, ruleSuffix, flagApprox},
+	{OpTanh, "tanh", ConstraintFloat, suffixType, 1, ruleSuffix, flagApprox},
 
-	// Conversions (§11.5). Float-to-int is one saturating, total family —
-	// there is no separate _sat spelling as in vir.
-	{OpTrunc, "trunc", ConstraintInt, 1, ruleSuffix, 0},
-	{OpSext, "sext", ConstraintInt, 1, ruleSuffix, 0},
-	{OpZext, "zext", ConstraintInt, 1, ruleSuffix, 0},
-	{OpFPTrunc, "fptrunc", ConstraintFloat, 1, ruleSuffix, 0},
-	{OpFPExt, "fpext", ConstraintFloat, 1, ruleSuffix, 0},
-	{OpSToInt, "stoint", ConstraintInt, 1, ruleSuffix, 0},
-	{OpUToInt, "utoint", ConstraintInt, 1, ruleSuffix, 0},
-	{OpIntToS, "inttos", ConstraintFloat, 1, ruleSuffix, 0},
-	{OpIntToU, "inttou", ConstraintFloat, 1, ruleSuffix, 0},
-	{OpBitcast, "bitcast", ConstraintNone, 1, ruleSuffix, 0},
+	// --- Memory (§8.1, §8.3) ----------------------------------------------
+	// alloca takes no operand: its type is statically sized (§8.1), unlike
+	// the host IR's sized alloca.
+	{OpAlloca, "alloca", ConstraintNone, suffixType, 0, rulePrivatePtr, flagAlignable},
+	{OpLoad, "load", ConstraintNone, suffixType, 1, ruleSuffix, flagAlignable},
+	// store is destination-first (§8.3): store.<T> ptr, value.
+	{OpStore, "store", ConstraintNone, suffixType, 2, ruleVoid, flagAlignable},
+	{OpMemcopy, "memcopy", ConstraintNone, suffixNone, 3, ruleVoid, 0},
+	{OpMemmove, "memmove", ConstraintNone, suffixNone, 3, ruleVoid, 0},
+	{OpMemset, "memset", ConstraintNone, suffixNone, 3, ruleVoid, 0},
+	// index/field keep the operand's address space, so their result is
+	// computed in ir/verify rather than read off the suffix.
+	{OpIndex, "index", ConstraintNone, suffixPtrWord, 2, ruleSpecial, 0},
+	{OpField, "field", ConstraintNone, suffixPtrWord, 2, ruleSpecial, 0},
 
-	// Approximate math (§11.6) — illegal under strict.
-	{OpRcp, "rcp", ConstraintFloat, 1, ruleSuffix, flagBounded},
-	{OpRsqrt, "rsqrt", ConstraintFloat, 1, ruleSuffix, flagBounded},
-	{OpSin, "sin", ConstraintFloat, 1, ruleSuffix, flagBounded},
-	{OpCos, "cos", ConstraintFloat, 1, ruleSuffix, flagBounded},
-	{OpExp2, "exp2", ConstraintFloat, 1, ruleSuffix, flagBounded},
-	{OpLog2, "log2", ConstraintFloat, 1, ruleSuffix, flagBounded},
-	{OpTanh, "tanh", ConstraintFloat, 1, ruleSuffix, flagBounded},
+	// --- Vectors (§8.3) ----------------------------------------------------
+	// For all four, the suffix names the *vector* type; extract's result is
+	// therefore its element type. k = 3 on a width-3 vector is a
+	// verification error (§4.4), checked in ir/verify.
+	{OpExtract, "extract", ConstraintNone, suffixType, 2, ruleElem, 0},
+	{OpInsert, "insert", ConstraintNone, suffixType, 3, ruleSuffix, 0},
+	{OpSplat, "splat", ConstraintNone, suffixType, 1, ruleSuffix, 0},
+	{OpSwizzle, "swizzle", ConstraintNone, suffixType, -1, ruleSuffix, 0},
 
-	// Select and calls (§11.7). Both select arms are evaluated; select is
-	// not control flow.
-	{OpSelect, "select", ConstraintNone, 3, ruleSuffix, 0},
-	{OpCall, "call", ConstraintNone, -1, ruleSpecial, 0},
+	// --- Synchronization and atomics (§10.1, §10.2) ------------------------
+	// barrier's execution scope is the suffix; the optional memory scope is
+	// its one operand, hence an unpinned arity.
+	{OpBarrier, "barrier", ConstraintNone, suffixExec, -1, ruleVoid, 0},
+	{OpFence, "fence", ConstraintNone, suffixNone, 2, ruleVoid, 0},
+	// Atomics carry no operandConstraint: "i32, i64, ptr" is not an element
+	// class, so IsAtomicType / IsAtomicAddType do that work in ir/verify.
+	{OpAtomicLoad, "atomic_load", ConstraintNone, suffixType, 2, ruleSuffix, flagAtomic | flagAlignable},
+	{OpAtomicStore, "atomic_store", ConstraintNone, suffixType, 3, ruleVoid, flagAtomic | flagAlignable},
+	{OpAtomicAdd, "atomic_add", ConstraintNone, suffixType, 3, ruleSuffix, flagAtomic | flagAlignable},
+	{OpAtomicSub, "atomic_sub", ConstraintNone, suffixType, 3, ruleSuffix, flagAtomic | flagAlignable},
+	{OpAtomicAnd, "atomic_and", ConstraintNone, suffixType, 3, ruleSuffix, flagAtomic | flagAlignable},
+	{OpAtomicOr, "atomic_or", ConstraintNone, suffixType, 3, ruleSuffix, flagAtomic | flagAlignable},
+	{OpAtomicXor, "atomic_xor", ConstraintNone, suffixType, 3, ruleSuffix, flagAtomic | flagAlignable},
+	{OpAtomicXchg, "atomic_xchg", ConstraintNone, suffixType, 3, ruleSuffix, flagAtomic | flagAlignable},
+	{OpAtomicUMin, "atomic_umin", ConstraintNone, suffixType, 3, ruleSuffix, flagAtomic | flagAlignable},
+	{OpAtomicUMax, "atomic_umax", ConstraintNone, suffixType, 3, ruleSuffix, flagAtomic | flagAlignable},
+	{OpAtomicSMin, "atomic_smin", ConstraintNone, suffixType, 3, ruleSuffix, flagAtomic | flagAlignable},
+	{OpAtomicSMax, "atomic_smax", ConstraintNone, suffixType, 3, ruleSuffix, flagAtomic | flagAlignable},
+	// cmpxchg yields the old value, not a success flag (§10.2).
+	{OpCmpxchg, "cmpxchg", ConstraintNone, suffixType, 4, ruleSuffix, flagAtomic | flagAlignable},
 
-	// Barrier (§10.1): execution scope is the suffix, memory scope the
-	// lone optional operand.
-	{OpBarrier, "barrier", ConstraintNone, -1, ruleVoid, flagUniform},
+	// --- Subgroup collectives (§10.3) --------------------------------------
+	{OpShuffle, "shuffle", ConstraintNone, suffixType, 2, ruleSuffix, flagCollective},
+	{OpShuffleXor, "shuffle_xor", ConstraintNone, suffixType, 2, ruleSuffix, flagCollective},
+	{OpShuffleUp, "shuffle_up", ConstraintNone, suffixType, 2, ruleSuffix, flagCollective},
+	{OpShuffleDown, "shuffle_down", ConstraintNone, suffixType, 2, ruleSuffix, flagCollective},
+	{OpBroadcast, "broadcast", ConstraintNone, suffixType, 2, ruleSuffix, flagCollective},
+	{OpBroadcastFirst, "broadcast_first", ConstraintNone, suffixType, 1, ruleSuffix, flagCollective},
+	{OpAny, "any", ConstraintNone, suffixNone, 1, ruleBool, flagCollective},
+	{OpAll, "all", ConstraintNone, suffixNone, 1, ruleBool, flagCollective},
+	{OpBallot, "ballot", ConstraintNone, suffixNone, 1, ruleSubmask, flagCollective},
+	// sub_min/sub_max take the §11.3 float reading on floats; the spec does
+	// not spell a signed/unsigned split for their integer forms, so the
+	// signedness question is left to ir/verify rather than invented here.
+	{OpSubAdd, "sub_add", ConstraintIntOrFloat, suffixType, 1, ruleSuffix, flagCollective},
+	{OpSubMin, "sub_min", ConstraintIntOrFloat, suffixType, 1, ruleSuffix, flagCollective},
+	{OpSubMax, "sub_max", ConstraintIntOrFloat, suffixType, 1, ruleSuffix, flagCollective},
+	{OpSubAnd, "sub_and", ConstraintInt, suffixType, 1, ruleSuffix, flagCollective},
+	{OpSubOr, "sub_or", ConstraintInt, suffixType, 1, ruleSuffix, flagCollective},
+	{OpSubXor, "sub_xor", ConstraintInt, suffixType, 1, ruleSuffix, flagCollective},
 
-	// Atomics (§10.2). Scope is the final operand; there is no ordering
-	// operand — cmpxchg therefore takes four, not vir's five.
-	{OpAtomicLoad, "atomic_load", ConstraintIntOrPtr, 2, ruleSuffix, flagAtomic},
-	{OpAtomicStore, "atomic_store", ConstraintIntOrPtr, 3, ruleVoid, flagAtomic},
-	{OpAtomicAdd, "atomic_add", ConstraintIntOrFloat, 3, ruleSuffix, flagAtomic},
-	{OpAtomicSub, "atomic_sub", ConstraintInt, 3, ruleSuffix, flagAtomic},
-	{OpAtomicAnd, "atomic_and", ConstraintInt, 3, ruleSuffix, flagAtomic},
-	{OpAtomicOr, "atomic_or", ConstraintInt, 3, ruleSuffix, flagAtomic},
-	{OpAtomicXor, "atomic_xor", ConstraintInt, 3, ruleSuffix, flagAtomic},
-	{OpAtomicXchg, "atomic_xchg", ConstraintIntOrPtr, 3, ruleSuffix, flagAtomic},
-	{OpAtomicUMin, "atomic_umin", ConstraintInt, 3, ruleSuffix, flagAtomic},
-	{OpAtomicUMax, "atomic_umax", ConstraintInt, 3, ruleSuffix, flagAtomic},
-	{OpAtomicSMin, "atomic_smin", ConstraintInt, 3, ruleSuffix, flagAtomic},
-	{OpAtomicSMax, "atomic_smax", ConstraintInt, 3, ruleSuffix, flagAtomic},
-	// cmpxchg yields the OLD value at p, not a success flag (§10.2).
-	{OpCmpxchg, "cmpxchg", ConstraintIntOrPtr, 4, ruleSuffix, flagAtomic},
-	{OpFence, "fence", ConstraintNone, 2, ruleVoid, 0},
+	// submask ops read a mask already in hand rather than other lanes, so
+	// they are not flagged collective; ballot, which produces one, is.
+	{OpMaskCount, "mask_count", ConstraintNone, suffixNone, 1, ruleI32, 0},
+	{OpMaskTest, "mask_test", ConstraintNone, suffixNone, 2, ruleBool, 0},
+	{OpMaskFirst, "mask_first", ConstraintNone, suffixNone, 1, ruleI32, 0},
+	{OpMaskEmpty, "mask_empty", ConstraintNone, suffixNone, 1, ruleBool, 0},
+	{OpMaskLt, "mask_lt", ConstraintNone, suffixNone, 0, ruleSubmask, 0},
+	{OpMaskLe, "mask_le", ConstraintNone, suffixNone, 0, ruleSubmask, 0},
+	{OpMaskGt, "mask_gt", ConstraintNone, suffixNone, 0, ruleSubmask, 0},
+	{OpMaskGe, "mask_ge", ConstraintNone, suffixNone, 0, ruleSubmask, 0},
+	{OpMaskEq, "mask_eq", ConstraintNone, suffixNone, 0, ruleSubmask, 0},
 
-	// Subgroup collectives (§10.3). All require uniform reachability.
-	{OpShuffleXor, "shuffle_xor", ConstraintNone, 2, ruleSuffix, flagUniform},
-	{OpShuffleUp, "shuffle_up", ConstraintNone, 2, ruleSuffix, flagUniform},
-	{OpShuffleDown, "shuffle_down", ConstraintNone, 2, ruleSuffix, flagUniform},
-	{OpBroadcast, "broadcast", ConstraintNone, 2, ruleSuffix, flagUniform},
-	{OpBroadcastFirst, "broadcast_first", ConstraintNone, 1, ruleSuffix, flagUniform},
-	{OpAny, "any", ConstraintNone, 1, ruleBool, flagUniform},
-	{OpAll, "all", ConstraintNone, 1, ruleBool, flagUniform},
-	{OpBallot, "ballot", ConstraintNone, 1, ruleSubmask, flagUniform},
-	// sub_add on floating-point T is not order-stable (§10.3).
-	{OpSubAdd, "sub_add", ConstraintIntOrFloat, 1, ruleSuffix, flagUniform},
-	{OpSubMin, "sub_min", ConstraintIntOrFloat, 1, ruleSuffix, flagUniform},
-	{OpSubMax, "sub_max", ConstraintIntOrFloat, 1, ruleSuffix, flagUniform},
-	{OpSubAnd, "sub_and", ConstraintInt, 1, ruleSuffix, flagUniform},
-	{OpSubOr, "sub_or", ConstraintInt, 1, ruleSuffix, flagUniform},
-	{OpSubXor, "sub_xor", ConstraintInt, 1, ruleSuffix, flagUniform},
+	// --- Execution builtins (§9) -------------------------------------------
+	// Dimension-suffixed forms are i32; the unsuffixed linearized forms are
+	// i64 (§9 "Result widths").
+	{OpThreadInGrid, "thread_in_grid", ConstraintNone, suffixDim, 0, ruleDim, flagBuiltin},
+	{OpThreadInGroup, "thread_in_group", ConstraintNone, suffixDim, 0, ruleDim, flagBuiltin},
+	{OpGroupInGrid, "group_in_grid", ConstraintNone, suffixDim, 0, ruleDim, flagBuiltin},
+	{OpThreadsPerGroup, "threads_per_group", ConstraintNone, suffixDim, 0, ruleDim, flagBuiltin},
+	{OpGroupsPerGrid, "groups_per_grid", ConstraintNone, suffixDim, 0, ruleDim, flagBuiltin},
+	{OpThreadsPerGrid, "threads_per_grid", ConstraintNone, suffixDim, 0, ruleDim, flagBuiltin},
+	// These five reject every dimension suffix (§9.1).
+	{OpThreadInSubgroup, "thread_in_subgroup", ConstraintNone, suffixNone, 0, ruleI64, flagBuiltin},
+	{OpSubgroupInGroup, "subgroup_in_group", ConstraintNone, suffixNone, 0, ruleI64, flagBuiltin},
+	{OpThreadsPerSubgroup, "threads_per_subgroup", ConstraintNone, suffixNone, 0, ruleI32, flagBuiltin},
+	{OpSubgroupsPerGroup, "subgroups_per_group", ConstraintNone, suffixNone, 0, ruleI32, flagBuiltin},
+	{OpDynamicGroupSize, "dynamic_group_size", ConstraintNone, suffixNone, 0, ruleI32, flagBuiltin},
 
-	// Submask ops and lane-mask constants (§10.3).
-	{OpMaskCount, "mask_count", ConstraintNone, 1, ruleI32, 0},
-	{OpMaskTest, "mask_test", ConstraintNone, 2, ruleBool, 0},
-	{OpMaskFirst, "mask_first", ConstraintNone, 1, ruleI32, 0},
-	{OpMaskEmpty, "mask_empty", ConstraintNone, 1, ruleBool, 0},
-	{OpMaskLt, "mask_lt", ConstraintNone, 0, ruleSubmask, 0},
-	{OpMaskLe, "mask_le", ConstraintNone, 0, ruleSubmask, 0},
-	{OpMaskGt, "mask_gt", ConstraintNone, 0, ruleSubmask, 0},
-	{OpMaskGe, "mask_ge", ConstraintNone, 0, ruleSubmask, 0},
-	{OpMaskEq, "mask_eq", ConstraintNone, 0, ruleSubmask, 0},
-
-	// Execution builtins (§9). Result widths live in builtins.go.
-	{OpThreadInGrid, "thread_in_grid", ConstraintNone, 0, ruleBuiltin, flagBuiltin},
-	{OpThreadInGroup, "thread_in_group", ConstraintNone, 0, ruleBuiltin, flagBuiltin},
-	{OpGroupInGrid, "group_in_grid", ConstraintNone, 0, ruleBuiltin, flagBuiltin},
-	{OpThreadInSubgroup, "thread_in_subgroup", ConstraintNone, 0, ruleBuiltin, flagBuiltin},
-	{OpSubgroupInGroup, "subgroup_in_group", ConstraintNone, 0, ruleBuiltin, flagBuiltin},
-	{OpThreadsPerGroup, "threads_per_group", ConstraintNone, 0, ruleBuiltin, flagBuiltin},
-	{OpGroupsPerGrid, "groups_per_grid", ConstraintNone, 0, ruleBuiltin, flagBuiltin},
-	{OpThreadsPerGrid, "threads_per_grid", ConstraintNone, 0, ruleBuiltin, flagBuiltin},
-	{OpThreadsPerSubgroup, "threads_per_subgroup", ConstraintNone, 0, ruleBuiltin, flagBuiltin},
-	{OpSubgroupsPerGroup, "subgroups_per_group", ConstraintNone, 0, ruleBuiltin, flagBuiltin},
-	{OpDynamicGroupSize, "dynamic_group_size", ConstraintNone, 0, ruleBuiltin, flagBuiltin},
-
-	{OpLoc, "loc", ConstraintNone, -1, ruleVoid, 0},
+	// --- Select, calls, debug (§11.7, §2) -----------------------------------
+	// select's condition is i1 or vec[i1,N] depending on T; both arms are
+	// always evaluated (§11.7).
+	{OpSelect, "select", ConstraintNone, suffixType, 3, ruleSuffix, 0},
+	// call's first operand is the callee ident; the result type comes from
+	// the callee's declared return type, resolved in ir/verify.
+	{OpCall, "call", ConstraintNone, suffixNone, -1, ruleSpecial, 0},
+	{OpLoc, "loc", ConstraintNone, suffixNone, -1, ruleVoid, 0},
 }
 
 var (
@@ -478,9 +486,21 @@ func init() {
 		if _, dup := opByName[d.name]; dup {
 			panic(fmt.Sprintf("gvir: opcode name %q registered twice in opTable", d.name))
 		}
+		if d.suffix == suffixDim && d.flags&flagBuiltin == 0 {
+			panic(fmt.Sprintf("gvir: %q takes a dimension suffix but is not a builtin", d.name))
+		}
+		if d.flags&flagBuiltin != 0 && d.arity != 0 {
+			panic(fmt.Sprintf("gvir: builtin %q must take no operands (§9)", d.name))
+		}
+		if d.flags&flagApprox != 0 && d.numeric != ConstraintFloat {
+			panic(fmt.Sprintf("gvir: approximate opcode %q must be float-constrained (§11.6)", d.name))
+		}
 		seen[d.op] = true
 		opNameTable[d.op] = d.name
-		opMetaTable[d.op] = opMeta{numeric: d.numeric, arity: d.arity, result: d.result, flags: d.flags}
+		opMetaTable[d.op] = opMeta{
+			numeric: d.numeric, suffix: d.suffix,
+			arity: d.arity, result: d.result, flags: d.flags,
+		}
 		opByName[d.name] = d.op
 	}
 	for i := 1; i < int(opcodeCount); i++ {
@@ -502,13 +522,15 @@ func (o Opcode) String() string {
 }
 
 // ParseOpcode resolves a mnemonic to its Opcode. Returns false for anything
-// outside the closed vocabulary — including terminator keywords, which are
-// separate Go types.
+// outside the closed vocabulary — including the terminator keywords, which
+// are separate Go types (module.go).
 func ParseOpcode(s string) (Opcode, bool) {
 	op, ok := opByName[s]
 	return op, ok
 }
 
+// meta looks up an opcode's registered metadata. ok is false only for
+// OpInvalid or an out-of-range value.
 func (o Opcode) meta() (opMeta, bool) {
 	if int(o) <= 0 || int(o) >= len(opMetaTable) || opNameTable[o] == "" {
 		return opMeta{}, false
@@ -516,129 +538,141 @@ func (o Opcode) meta() (opMeta, bool) {
 	return opMetaTable[o], true
 }
 
-// Arity returns the operand count the grammar pins for o, or -1 when it is
-// not pinned (call, loc, barrier, the overloaded shuffle).
+// Arity returns the operand count the grammar pins for o, or -1 when the
+// count is variable and checked in ir/verify.
 func (o Opcode) Arity() int {
-	m, ok := o.meta()
-	if !ok {
-		return -1
-	}
+	m, _ := o.meta()
 	return m.arity
 }
 
-func (o Opcode) has(f opFlags) bool {
+func (o Opcode) IsBuiltin() bool      { m, _ := o.meta(); return m.flags&flagBuiltin != 0 }
+func (o Opcode) RequiresApprox() bool { m, _ := o.meta(); return m.flags&flagApprox != 0 }
+func (o Opcode) IsCollective() bool   { m, _ := o.meta(); return m.flags&flagCollective != 0 }
+func (o Opcode) IsAtomic() bool       { m, _ := o.meta(); return m.flags&flagAtomic != 0 }
+func (o Opcode) AcceptsAlign() bool   { m, _ := o.meta(); return m.flags&flagAlignable != 0 }
+
+// AcceptsDim reports whether o may carry a .x/.y/.z suffix (§9.1).
+func (o Opcode) AcceptsDim() bool { m, _ := o.meta(); return m.suffix == suffixDim }
+
+// TakesTypeSuffix reports whether o is spelled with a type suffix.
+func (o Opcode) TakesTypeSuffix() bool {
+	m, _ := o.meta()
+	return m.suffix == suffixType || m.suffix == suffixTypeOrPtrWord
+}
+
+// HasResult reports whether o produces a value binding.
+func (o Opcode) HasResult() bool { m, _ := o.meta(); return m.result != ruleVoid }
+
+// ResultType derives the type of o's result from its suffix and dimension
+// suffix. ok is false for the three opcodes whose result depends on operands
+// rather than spelling — call, index and field — which ir/verify computes,
+// and for a missing suffix where one is required.
+func (o Opcode) ResultType(suffix Type, dim Dim) (Type, bool) {
 	m, ok := o.meta()
-	return ok && m.flags&f != 0
-}
-
-// RequiresBoundedProfile reports whether o is an approximate-math opcode,
-// legal only under float_profile bounded (§11.6).
-func (o Opcode) RequiresBoundedProfile() bool { return o.has(flagBounded) }
-
-// IsBuiltin reports whether o is a §9 execution builtin.
-func (o Opcode) IsBuiltin() bool { return o.has(flagBuiltin) }
-
-// RequiresUniformReach reports whether every thread in o's execution scope
-// must reach it; non-uniform arrival is UB (§12.8). True for barrier and
-// every subgroup collective (§10.1, §10.3).
-func (o Opcode) RequiresUniformReach() bool { return o.has(flagUniform) }
-
-// IsAtomic reports whether o carries a trailing scope operand and no
-// ordering operand (§10.2).
-func (o Opcode) IsAtomic() bool { return o.has(flagAtomic) }
-
-// LegalInProfile reports whether o may appear under profile p.
-func (o Opcode) LegalInProfile(p FloatProfile) bool {
-	return !o.RequiresBoundedProfile() || p.Effective() == ProfileBounded
-}
-
-// ResultType derives an instruction's result type where the opcode's rule
-// allows it. env resolves an ident operand's already-bound type and may be
-// nil; ok is false when the rule needs a typing environment that was not
-// supplied (index.ptr / field.ptr) or needs full operand typing that only
-// ir/verify has (call, extract, the overloaded shuffle).
-func (i *Instruction) ResultType(env func(name string) (Type, bool)) (Type, bool) {
-	m, ok := i.Op.meta()
 	if !ok {
 		return nil, false
 	}
 	switch m.result {
+	case ruleSuffix:
+		if suffix == nil {
+			return nil, false
+		}
+		return suffix, true
 	case ruleVoid:
 		return Void, true
-	case ruleSuffix:
-		if i.Suffix == nil {
-			return nil, false
-		}
-		return i.Suffix, true
 	case ruleBool:
-		if v, isVec := i.Suffix.(VecType); isVec {
-			return Vec(I1, v.Len), true
+		if v, isVec := suffix.(VecType); isVec {
+			return VecType{Elem: I1, Len: v.Len}, true
 		}
 		return I1, true
-	case ruleSubmask:
-		return Submask, true
+	case ruleElem:
+		if suffix == nil {
+			return nil, false
+		}
+		return ElemOrSelf(suffix), true
 	case ruleI32:
 		return I32, true
+	case ruleI64:
+		return I64, true
+	case ruleDim:
+		if dim != DimNone {
+			return I32, true
+		}
+		return I64, true
+	case ruleSubmask:
+		return Submask, true
 	case rulePrivatePtr:
 		return PtrPrivate, true
-	case rulePtrOfOperand:
-		if env == nil || len(i.Args) == 0 || i.Args[0].Kind != OperandIdent {
-			return nil, false
-		}
-		t, found := env(i.Args[0].Ident)
-		if !found || !IsPtr(t) {
-			return nil, false
-		}
-		return t, true
-	case ruleBuiltin:
-		return BuiltinResultType(i.Op, i.Dim)
 	}
-	return nil, false // ruleSpecial
+	return nil, false
 }
 
-// checkNumericConstraint enforces an opcode's registered element-type
-// constraint against a single instruction's suffix.
-func checkNumericConstraint(op Opcode, suffix Type, c operandConstraint) error {
-	if c == ConstraintNone {
+// CheckSuffix enforces the suffix shape and element-type constraint an
+// opcode registers. It is the exported entry point ir/verify uses so the
+// table stays the only place these rules are written down.
+func (o Opcode) CheckSuffix(suffix Type) error {
+	m, ok := o.meta()
+	if !ok {
+		return fmt.Errorf("gvir: %s is not a registered opcode", o)
+	}
+	switch m.suffix {
+	case suffixNone, suffixDim, suffixExec:
+		if suffix != nil {
+			return fmt.Errorf("%s takes no type suffix", o)
+		}
+		return nil
+	case suffixPtrWord:
+		if !IsPtrWord(suffix) {
+			return fmt.Errorf("%s is spelled %s.ptr — the address space comes from its operand (§8.3)", o, o)
+		}
 		return nil
 	}
-	elem := ElemOrSelf(suffix)
-	var ok bool
-	switch c {
-	case ConstraintInt:
-		ok = IsInt(elem)
-	case ConstraintFloat:
-		ok = IsFloat(elem)
-	case ConstraintIntOrFloat:
-		ok = IsInt(elem) || IsFloat(elem)
-	case ConstraintIntOrPtr:
-		ok = IsInt(elem) || IsPtr(suffix)
+	if suffix == nil {
+		return fmt.Errorf("%s requires a type suffix", o)
 	}
-	if !ok {
-		return fmt.Errorf("%s legal only on %s", op, constraintDescription(c))
+	if IsPtrWord(suffix) && m.suffix != suffixTypeOrPtrWord {
+		return fmt.Errorf("%s does not accept the bare `ptr` suffix", o)
+	}
+	if IsSpacedPtr(suffix) && m.suffix == suffixTypeOrPtrWord {
+		return fmt.Errorf("%s is spelled %s.ptr, not %s.%s (§11.4)", o, o, o, suffix)
+	}
+	if !constraintAllows(m.numeric, suffix) {
+		return fmt.Errorf("%s legal only on %s (§11)", o, constraintDescription(m.numeric))
 	}
 	return nil
 }
 
-// CheckSuffix is the exported form used by ir/verify.
-func CheckSuffix(op Opcode, suffix Type) error {
-	m, ok := op.meta()
-	if !ok {
-		return fmt.Errorf("unknown opcode %d", op)
+func constraintAllows(c operandConstraint, suffix Type) bool {
+	elem := ElemOrSelf(suffix)
+	switch c {
+	case ConstraintNone:
+		return true
+	case ConstraintInt:
+		return IsSInt(elem)
+	case ConstraintFloat:
+		return IsFloat(elem)
+	case ConstraintIntOrFloat:
+		return IsSInt(elem) || IsFloat(elem)
+	case ConstraintIntOrPred:
+		return IsSInt(elem) || IsBool(elem)
+	case ConstraintIntOrPtr:
+		return IsSInt(elem) || IsPtrWord(suffix)
 	}
-	return checkNumericConstraint(op, suffix, m.numeric)
+	return false
 }
 
 func constraintDescription(c operandConstraint) string {
 	switch c {
 	case ConstraintInt:
-		return "iN / vec[iN, N]"
+		return "iN / vec[iN,N], i1 excluded"
 	case ConstraintFloat:
-		return "fN / vec[fN, N]"
+		return "fN / vec[fN,N]"
 	case ConstraintIntOrFloat:
 		return "iN or fN (incl. vector forms)"
+	case ConstraintIntOrPred:
+		return "iN / i1 / vec[iN,N] / vec[i1,N]"
 	case ConstraintIntOrPtr:
-		return "iN / vec[iN, N] or ptr"
+		return "iN / vec[iN,N] or the bare ptr suffix"
 	}
 	return "a compatible type"
 }
