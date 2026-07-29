@@ -18,13 +18,9 @@ type Options struct {
 	// Comments emits `loc` lines, merge annotations and structural notes as
 	// MSL comments. They are never directives.
 	Comments bool
-
-	// Verify runs msl.Verify on the result and turns errors into a lowering
-	// error. Warnings are always returned in Result.Diags.
-	Verify bool
 }
 
-func DefaultOptions() Options { return Options{Comments: true, Verify: true} }
+func DefaultOptions() Options { return Options{Comments: true} }
 
 // Exclusion records a kernel dropped from this artifact by §4.3 gating.
 type Exclusion struct {
@@ -39,7 +35,6 @@ type Result struct {
 	Arch     string
 	Version  msl.Version
 	Excluded []Exclusion
-	Diags    []msl.Diag
 }
 
 // Lower lowers a verified .gvir module to MSL with the default options.
@@ -107,10 +102,6 @@ func LowerOptions(m *gvir.Module, opt Options) (*Result, error) {
 		}
 	}
 
-	l.res.Diags = msl.Verify(l.out)
-	if opt.Verify && msl.Errors(l.res.Diags) {
-		return l.res, fmt.Errorf("lower/msl: generated module fails msl.Verify: %s", l.res.Diags[0])
-	}
 	return l.res, nil
 }
 

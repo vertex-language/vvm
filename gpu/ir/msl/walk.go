@@ -184,3 +184,7 @@ func walkTArgs(as []TypeArg, fn func(Node) bool) {
 		walkExpr(a.Val, fn)
 	}
 }
+
+// b2node lets Walk descend a bare block. resolve.go uses this to rewrite
+// names inside a detached block without a containing Decl or Stmt.
+func b2node(b *Block) Node { return &Scope{Body: b} }

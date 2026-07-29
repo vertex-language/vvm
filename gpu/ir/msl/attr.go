@@ -61,73 +61,16 @@ type Attr struct {
 // IsZero reports whether the attribute is absent.
 func (a Attr) IsZero() bool { return a.Name == "" }
 
-// Place is a bit set of the syntactic positions an attribute may occupy.
-type Place uint8
-
-// Attribute placements.
-const (
-	OnParam Place = 1 << iota
-	OnField
-	OnFunc
-	OnReturn
-	OnVar
-)
-
-type attrSpec struct {
-	place Place
-	args  int // -1 means any arity
-	since Version
-}
-
-// attrTable drives Verify. Attributes absent from the table (including those
-// built with RawAttr) are accepted anywhere and never version-gated.
-var attrTable = map[AttrName]attrSpec{
-	AttrBuffer:           {OnParam, 1, Version{}},
-	AttrTexture:          {OnParam, 1, Version{}},
-	AttrSampler:          {OnParam, 1, Version{}},
-	AttrThreadgroup:      {OnParam, 1, Version{}},
-	AttrID:               {OnField, 1, Version{}},
-	AttrFunctionConstant: {OnVar | OnParam, 1, Version{}},
-
-	AttrThreadPositionInGrid:          {OnParam, 0, Version{}},
-	AttrThreadPositionInThreadgroup:   {OnParam, 0, Version{}},
-	AttrThreadgroupPositionInGrid:     {OnParam, 0, Version{}},
-	AttrThreadsPerThreadgroup:         {OnParam, 0, Version{}},
-	AttrThreadsPerGrid:                {OnParam, 0, Version{}},
-	AttrThreadIndexInThreadgroup:      {OnParam, 0, Version{}},
-	AttrSIMDGroupIndexInThreadgroup:   {OnParam, 0, Version{}},
-	AttrThreadIndexInSIMDGroup:        {OnParam, 0, Version{}},
-	AttrThreadsPerSIMDGroup:           {OnParam, 0, Version{}},
-	AttrDispatchThreadsPerThreadgroup: {OnParam, 0, Version{}},
-
-	AttrStageIn:     {OnParam, 0, Version{}},
-	AttrVertexID:    {OnParam, 0, Version{}},
-	AttrInstanceID:  {OnParam, 0, Version{}},
-	AttrFrontFacing: {OnParam, 0, Version{}},
-	AttrPatch:       {OnParam, -1, Version{}},
-	AttrPosition:    {OnField | OnReturn, 0, Version{}},
-	AttrPointSize:   {OnField | OnReturn, 0, Version{}},
-	AttrColor:       {OnField | OnReturn | OnParam, 1, Version{}},
-	AttrAttribute:   {OnField, 1, Version{}},
-	AttrPayload:     {OnParam, -1, Metal30},
-
-	AttrMaxTotalThreadsPerThreadgroup: {OnFunc, 1, Metal30},
-	AttrVisible:                       {OnFunc, 0, Metal23},
-	AttrStitchable:                    {OnFunc, 0, Metal24},
-	AttrEarlyFragmentTests:            {OnFunc, 0, Version{}},
-	AttrInvariant:                     {OnFunc | OnField, 0, Version{}},
-}
-
 func idxAttr(n AttrName, i int) Attr {
 	return Attr{Name: n, Args: []string{strconv.Itoa(i)}}
 }
 
 // Binding attributes.
-func Buffer(i int) Attr          { return idxAttr(AttrBuffer, i) }
-func TextureAt(i int) Attr       { return idxAttr(AttrTexture, i) }
-func SamplerAt(i int) Attr       { return idxAttr(AttrSampler, i) }
-func ThreadgroupSlot(i int) Attr { return idxAttr(AttrThreadgroup, i) }
-func ID(i int) Attr              { return idxAttr(AttrID, i) }
+func Buffer(i int) Attr           { return idxAttr(AttrBuffer, i) }
+func TextureAt(i int) Attr        { return idxAttr(AttrTexture, i) }
+func SamplerAt(i int) Attr        { return idxAttr(AttrSampler, i) }
+func ThreadgroupSlot(i int) Attr  { return idxAttr(AttrThreadgroup, i) }
+func ID(i int) Attr               { return idxAttr(AttrID, i) }
 func FunctionConstant(i int) Attr { return idxAttr(AttrFunctionConstant, i) }
 
 // Indexed stage attributes.

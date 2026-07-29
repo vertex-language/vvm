@@ -13,7 +13,28 @@ import (
 
 // Run is "vvm run": build for the host, execute the result immediately,
 // clean up the temp binary — nothing fancier than `go run`.
+//
+// Host-only, permanently as far as this function is concerned. A .gvir
+// module is rejected up front with its own message rather than falling
+// through to decodeModule's generic "wrong pipeline" error, because the
+// reason is more specific here: a device module has no entry point and no
+// process image to execute at all, and its artifacts are vendor-toolchain
+// *source*, not a runnable binary. There is nothing for Run to do with
+// one even in principle — a device "run" would need a host launcher, a
+// runtime, and a kernarg buffer, none of which exist yet.
 func Run(src []byte) (RunResult, error) {
+	kind, err := SourceKindOf(src)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("vvm: run: %w", err)
+	}
+	if kind == SourceDevice {
+		return RunResult{}, fmt.Errorf(
+			"vvm: run is host-only — a .gvir device module has no entry point and no " +
+				"process image. Emit artifacts with `vvm build`, then assemble and " +
+				"launch them through the vendor toolchain (ptxas, the metal frontend, " +
+				"or your AMD assembler)")
+	}
+
 	m, err := decodeModule(src)
 	if err != nil {
 		return RunResult{}, fmt.Errorf("vvm: decode: %w", err)

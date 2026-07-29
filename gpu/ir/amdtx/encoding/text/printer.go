@@ -1,8 +1,7 @@
 // Package text implements the canonical AMDTX text form (§15).
 //
-// The printer is a pure formatter. It runs verification first and refuses to
-// print a module that does not verify; it derives every mapping from IR data
-// rather than from re-parsing its own output; and it emits no comments at
+// The printer is a pure formatter. It derives every mapping from IR data
+// rather than from re-parsing its own output, and it emits no comments at
 // all. Instr.Comment and Raw.Comment are dropped, which is what makes
 // print(parse(text)) lossy on comments by design while parse(print(m)) stays
 // exact (P5, V32).
@@ -19,26 +18,7 @@ import (
 
 const indentUnit = "    " // rule 2: four spaces per nesting level
 
-// InvalidModuleError reports that printing was refused because the module
-// does not verify. Only Error-severity diagnostics block printing; warnings
-// (W1, W2) do not.
-type InvalidModuleError struct{ Diags []amdtx.Diag }
-
-func (e *InvalidModuleError) Error() string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "amdtx/text: refusing to print an invalid module (%d error", len(e.Diags))
-	if len(e.Diags) != 1 {
-		b.WriteByte('s')
-	}
-	b.WriteByte(')')
-	for _, d := range e.Diags {
-		b.WriteString("\n\t" + d.String())
-	}
-	return b.String()
-}
-
-// Print renders m as canonical AMDTX text. It verifies first and returns an
-// *InvalidModuleError without producing output if the module is invalid.
+// Print renders m as canonical AMDTX text.
 func Print(m *amdtx.Module) (string, error) {
 	var b strings.Builder
 	if err := Fprint(&b, m); err != nil {
@@ -52,23 +32,11 @@ func Fprint(w io.Writer, m *amdtx.Module) error {
 	if m == nil {
 		return fmt.Errorf("amdtx/text: nil module")
 	}
-	var bad []amdtx.Diag
-	for _, d := range amdtx.Verify(m) {
-		if d.Severity == amdtx.Error {
-			bad = append(bad, d)
-		}
-	}
-	if len(bad) > 0 {
-		return &InvalidModuleError{Diags: bad}
-	}
-	_, err := io.WriteString(w, PrintUnchecked(m))
+	_, err := io.WriteString(w, format(m))
 	return err
 }
 
-// PrintUnchecked formats m without verifying it. It exists so a failing
-// module can be inspected in a diagnostic; its output is not guaranteed to
-// be a conforming .amdtx module and it is not the canonical printer of §15.
-func PrintUnchecked(m *amdtx.Module) string {
+func format(m *amdtx.Module) string {
 	p := &printer{}
 	p.module(m)
 	return p.b.String()

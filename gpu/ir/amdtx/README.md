@@ -9,10 +9,9 @@ It models `.amdtx` translation units explicitly: the preamble (`.amdtx`, `.targe
 - **Grammar-driven.** Every exported symbol corresponds to a construct in the AMDTX grammar (§3.3).
 - **Widths, not types.** Registers carry `.bN`; interpretation lives in the mnemonic. `v_add_f32` and `v_add_u32` both take `.vgpr.b32`.
 - **Width stated once.** `SLoad`, `GlobalLoad`, `DSStore` and friends derive their `_bN` suffix from the data register, so **V9** holds by construction. Mnemonics use GFX11-style naming on all targets (**P4**); lowering rewrites to GFX9 spelling.
-- **Structured control flow is an item.** `If`, `Loop`, `BreakIf` and `ContinueIf` are IR nodes. EXEC-mask expansion belongs to lowering (**P2**), and `%exec` writes are rejected outside `raw` (**V15**).
+- **Structured control flow is an item.** `If`, `Loop`, `BreakIf` and `ContinueIf` are IR nodes. EXEC-mask expansion belongs to lowering (**P2**).
 - **Explicit synchronisation.** Adjacency conveys nothing (**P6**). Waits and fences are instructions you emit.
-- **Typed escape hatches.** `Raw` and `RawBytes` pass through untouched but must declare defs, uses and clobbers (**P8**, **V39**).
-- **Verify accepts or rejects; it never rewrites** (**P7**). Diagnostics carry the rule number.
+- **Typed escape hatches.** `Raw` and `RawBytes` pass through untouched but must declare defs, uses and clobbers (**P8**).
 
 ## Quick Start
 
@@ -75,10 +74,6 @@ func main() {
 	b.EndPgm()
 	m.Add(k)
 
-	for _, d := range amdtx.Verify(m) {
-		log.Println(d) // "saxpy[7]: error V9: access width .b64 does not match ..."
-	}
-
 	out, err := text.Print(m)
 	if err != nil {
 		log.Fatal(err)
@@ -86,16 +81,3 @@ func main() {
 	log.Println(out)
 }
 ```
-
-## Verification coverage
-
-`Verify` implements V1–V19, V21–V24, V26–V31, V33, V34, V37–V41, W1 and W2.
-
-Deliberately out of scope:
-
-| Rule | Owner | Why |
-|---|---|---|
-| V20 | lowering | Displacement ranges are per-encoding |
-| V25 | lowering | Pinned encodings are checked after instruction selection |
-| V32 | printer | `parse(print(m))` is a round-trip conformance test |
-| V36 | structural | Hidden arguments are never represented in the IR |

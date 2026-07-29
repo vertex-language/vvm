@@ -38,9 +38,6 @@ type Options struct {
 	// as trailing PTX comments. They are whitespace; the text printer emits
 	// them only when configured to.
 	Comments bool
-
-	// SkipVerify omits the ptx.Verify pass over the produced module.
-	SkipVerify bool
 }
 
 // Exclusion records a kernel dropped from this artifact by §4.3 gating.
@@ -64,9 +61,6 @@ type Result struct {
 	// every declared artifact is (§4.3 rule 4), and that is a whole-module
 	// judgement ir/verify makes.
 	Excluded []Exclusion
-
-	// Diags is the ptx.Verify report over Module, empty unless SkipVerify.
-	Diags []ptx.Diag
 }
 
 // Lower lowers m with default options.
@@ -106,9 +100,6 @@ func LowerOptions(m *gvir.Module, o Options) (*Result, error) {
 	}
 
 	res := &Result{Module: l.pm, Arch: arch, Target: target, Excluded: l.excluded}
-	if !o.SkipVerify {
-		res.Diags = ptx.Verify(l.pm)
-	}
 	return res, nil
 }
 

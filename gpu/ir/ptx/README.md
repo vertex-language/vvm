@@ -11,7 +11,7 @@ It models `.ptx` translation units explicitly — module directives, module-scop
 - **Instructions are values.** An `Instr` is a struct holding an opcode, typed qualifiers, positional types, and operands. Canonical qualifier ordering is handled internally by the opcode table, so equivalent IR always prints byte-identically regardless of the order qualifiers are supplied.
 - **Editable bodies.** An instruction `Body` supports standard array mutations — `.Append()`, `.InsertBefore()`, `.Replace()`, `.Remove()` — making analysis and rewrite passes straightforward in Go.
 - **Explicit flow control.** Predication is applied directly to the returned instruction via `.If(p)` or `.IfNot(p)`. This ensures guards are attached to the exact instruction and cannot accidentally leak across labels.
-- **No implicit inference.** The package does not type-check operand compatibility or infer rounding modes. `ptx.Verify` handles structural and version-gating validation, but `ptxas` remains the definitive verifier of record.
+- **No implicit inference.** The package does not type-check operand compatibility or infer rounding modes; `ptxas` remains the definitive verifier of record.
 
 ## Quick Start
 
@@ -89,11 +89,6 @@ func main() {
 	b.Ret()
 
 	m.Add(k)
-
-	// Verify checks structural issues and version/target gating requirements.
-	for _, diag := range ptx.Verify(m) {
-		log.Println(diag)
-	}
 
 	// Render the module to PTX assembly text.
 	src, err := text.Print(m)

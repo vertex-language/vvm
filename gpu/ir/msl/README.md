@@ -9,13 +9,13 @@ It models `.metal` files explicitly — includes, using-directives, module-scope
 - **Grammar-driven.** Every exported symbol in the API corresponds directly to a construct in the MSL grammar. Address spaces, attributes, and templates are modelled as typed grammar, not string escapes.
 - **Declare-before-use, by construction.** `Module.Decls` is a single ordered list rather than per-kind buckets. MSL requires declarations to precede their use — `Module.Add`, `Constant`, `Alias`, and friends append in call order, so a generated `constant Params kDefaults = {...};` naturally follows its `struct Params`.
 - **Editable bodies.** A `Block` supports standard array mutations — `.Append()`, `.InsertBefore()`, `.Replace()`, `.Remove()` — alongside fluent emit methods (`Let`, `Assign`, `If`, `For`, `Range`, `Switch`, ...) so passes can build and rewrite statement lists directly.
-- **No implicit inference.** The package performs no type checking and no operand validation. `msl.Verify` handles structural and revision-gating validation, but the `metal` frontend remains the verifier of record.
+- **No implicit inference.** The package performs no type checking and no operand validation. Structural correctness is the caller's responsibility; the `metal` frontend remains the verifier of record.
 - **Name hygiene as a pass, not a side effect.** `Resolve` disambiguates shadowed declarations (`sum`, `sum_1`, `sum_2`, ...) on demand, so splicing a detached function body into a module stays safe until you explicitly ask for renaming.
-- **Version is explicit.** `Version` maps directly to the `-std=` flag, the `__METAL_VERSION__` macro, and the feature floors `Verify` enforces. There is no default revision — `NewModule` requires one.
+- **Version is explicit.** `Version` maps directly to the `-std=` flag and the `__METAL_VERSION__` macro. There is no default revision — `NewModule` requires one.
 
 ## Quick Start
 
-The example below builds a module, declares a kernel with buffer-bound parameters, emits a bounds-checked body, verifies it, and renders the final source text.
+The example below builds a module, declares a kernel with buffer-bound parameters, emits a bounds-checked body, and renders the final source text.
 
 ```go
 package main
@@ -49,12 +49,6 @@ func main() {
 	body.Assign(c.At(tid), a.At(tid).Add(b.At(tid)))
 
 	m.Add(k)
-
-	// Verify checks structure and revision gating (e.g. an attribute that
-	// postdates the module's -std=).
-	for _, diag := range msl.Verify(m) {
-		log.Println(diag)
-	}
 
 	// Resolve disambiguates any shadowed names before printing.
 	msl.Resolve(m)
@@ -93,11 +87,11 @@ p.Attrs = append(p.Attrs, msl.RawAttr("some_new_attribute", "1"))
 t := msl.ScalarType("float8_e4m3")
 ```
 
-`RawAttr` and unlisted `ScalarType` spellings pass through `Verify` unchecked — they are accepted anywhere and never version-gated, since the package has no floor to check them against.
+`RawAttr` and unlisted `ScalarType` spellings are accepted anywhere — the package has no validation layer to gate them against.
 
 ### Version Gating
 
-`Version.GTE` and `Module.VersionGate` model MSL's `#if __METAL_VERSION__ >= N` convention directly, for code that must ship against more than one OS floor:
+`Module.VersionGate` models MSL's `#if __METAL_VERSION__ >= N` convention directly, for code that must ship against more than one OS floor:
 
 ```go
 m.VersionGate(msl.Metal40,
@@ -105,5 +99,3 @@ m.VersionGate(msl.Metal40,
 	[]msl.Decl{bufferFallbackPath},
 )
 ```
-
-`Verify` cross-checks version-gated attributes and types (`bfloat`, `auto`, tensors, cooperative tensors, `[[stitchable]]`, ...) against the module's declared `Version` and emits warnings — not errors — when a feature postdates the floor, since a `VersionGate` branch may intentionally target a newer revision than the module's baseline.
