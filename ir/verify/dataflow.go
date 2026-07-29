@@ -236,8 +236,6 @@ func checkTermReadsAssigned(t vir.Terminator, assigned map[string]bool, moduleSc
 	return nil
 }
 
-// --- valist lifetimes (§4.3 rule 5 addendum, §4.4) ----------------------
-
 // checkValistLifetimes runs two dataflows per valist name over the same
 // CFG: mustOpen (must-analysis, intersection — "started on every path,
 // not yet closed") backing va_arg/va_end legality, and mayOpen
@@ -338,7 +336,7 @@ func checkValistLifetimes(f *vir.Function, blocks []*vir.Block, byLabel map[stri
 				changed = true
 			}
 			if !setsEqual(yOut, mayOut[l]) {
-				yOut[l] = yOut
+				mayOut[l] = yOut
 				changed = true
 			}
 		}
