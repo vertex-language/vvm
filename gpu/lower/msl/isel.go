@@ -583,7 +583,7 @@ func (f *fnLower) compute(b *msl.Block, in *gvir.Instruction) error {
 		if err != nil {
 			return err
 		}
-		condT := msl.Bool
+		condT := msl.Type(msl.Bool)
 		if ct, err := f.srcType(in.Args[0]); err == nil {
 			condT = ct
 		}
