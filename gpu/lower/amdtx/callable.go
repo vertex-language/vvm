@@ -12,11 +12,11 @@ import (
 type bodyLowerer struct {
 	l *lowerer
 
-	kernel *gvir.Kernel // exactly one of kernel and fn is non-nil
-	fn     *gvir.Func
-	src    *gvir.Body
-	out    *amdtx.Body
-	regs   *amdtx.RegFile
+	kernel  *gvir.Kernel // exactly one of kernel and fn is non-nil
+	fn      *gvir.Func
+	srcBody *gvir.Body
+	out     *amdtx.Body
+	regs    *amdtx.RegFile
 
 	vals map[string]*value
 	uni  *uniformity
@@ -66,7 +66,7 @@ func (l *lowerer) kernel(k *gvir.Kernel) error {
 
 	b := l.newBody(out.Body)
 	b.kernel = k
-	b.src = &k.Body
+	b.srcBody = &k.Body
 	if k.GroupSize != nil {
 		b.wgConst = [3]int{k.GroupSize.X, k.GroupSize.Y, k.GroupSize.Z}
 		b.wgConstOK = true
@@ -245,7 +245,7 @@ func (l *lowerer) function(f *gvir.Func) error {
 	out := l.funcs[f.Name]
 	b := l.newBody(out.Body)
 	b.fn = f
-	b.src = &f.Body
+	b.srcBody = &f.Body
 
 	for _, p := range f.Params {
 		c, err := laneClass(p.Type)
@@ -288,7 +288,7 @@ func (l *lowerer) function(f *gvir.Func) error {
 
 // run structurizes, analyzes and emits one body.
 func (b *bodyLowerer) run() error {
-	root, err := structurize(b.src)
+	root, err := structurize(b.srcBody)
 	if err != nil {
 		return err
 	}
