@@ -59,10 +59,13 @@ func (k SourceKind) String() string {
 //   - .vbyte opens with its documented magic, "VBYT".
 //   - .vir text always opens with the "module" keyword (§ module decl is
 //     the first mandatory section).
-//   - .gvir text always opens with "version" — gvir's mandatory section
+//   - .gvir text always opens with "gvir" — gvir's mandatory section
 //     order is version, module, target, float profile, structs, consts,
-//     funcs, kernels (see ir/gvir/README.md), so the version decl is the
-//     first token in every well-formed device module.
+//     funcs, kernels (see ir/gvir/README.md), and the version-decl
+//     production itself is spelled `"gvir" int-literal "." int-literal`
+//     (format/gvbyte/text/decode.go's parseModule calls
+//     p.expectIdentVal("gvir") first, not "version") — so the literal
+//     token "gvir" is the first thing in every well-formed device module.
 //
 // Anything else is rejected here rather than handed to a decoder that
 // would produce a confusing syntax error deep in a grammar it was never
@@ -74,14 +77,14 @@ func SourceKindOf(src []byte) (SourceKind, error) {
 	switch firstWord(src) {
 	case "module":
 		return SourceHost, nil
-	case "version":
+	case "gvir":
 		return SourceDevice, nil
 	case "":
 		return 0, fmt.Errorf("empty source: expected a .vbyte, .vir, or .gvir module")
 	default:
 		return 0, fmt.Errorf(
 			"unrecognized source: expected the \"VBYT\" magic (.vbyte), a leading "+
-				"\"module\" keyword (.vir), or a leading \"version\" keyword (.gvir), got %q",
+				"\"module\" keyword (.vir), or a leading \"gvir\" keyword (.gvir), got %q",
 			firstWord(src))
 	}
 }
