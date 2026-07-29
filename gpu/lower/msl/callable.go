@@ -3,222 +3,270 @@ package msl
 
 import (
 	"fmt"
-	"strconv"
 
 	"github.com/vertex-language/vvm/gpu/ir/msl"
 	"github.com/vertex-language/vvm/ir/gvir"
 )
 
-// lowerKernel emits one dispatchable entry point (§6.1).
-func (l *lowerer) lowerKernel(k *gvir.Kernel) error {
-	fn := msl.NewKernel(k.Name)
-	f := newFn(l, fn, &k.Body, k)
-	prologue := msl.NewBlock()
+// fnLower carries the per-callable state: the emitted function, the value
+// bindings, the block table the structurizer walks, and the builtin
+// parameters §9 forces into the signature.
+type fnLower struct {
+	l    *lowerer
+	fn   *msl.Function
+	vals *values
 
-	if len(k.Params) > 0 {
-		if err := l.argBuffer(f, k, prologue); err != nil {
-			return err
+	kernel   *gvir.Kernel
+	blocks   map[string]*gvir.Block
+	visited  map[string]bool
+	builtins map[string]msl.Expr // attribute name -> parameter reference
+	prologue []msl.Stmt
+	temps    int
+}
+
+func (l *lowerer) newFn(fn *msl.Function) *fnLower {
+	return &fnLower{
+		l: l, fn: fn,
+		vals:     newValues(),
+		blocks:   map[string]*gvir.Block{},
+		visited:  map[string]bool{},
+		builtins: map[string]msl.Expr{},
+	}
+}
+
+func (f *fnLower) temp(prefix string) string {
+	f.temps++
+	return fmt.Sprintf("vv_%s%d", prefix, f.temps)
+}
+
+// ---------------------------------------------------------------------------
+// Funcs (§6.4)
+// ---------------------------------------------------------------------------
+
+// lowerFunc emits a device-side helper. Direct calls only, so there is no
+// declaration/definition split and no forward declaration: §2 requires
+// declare-before-use, which is exactly MSL's own rule.
+func (l *lowerer) lowerFunc(src *gvir.Func) error {
+	fn := msl.NewFunction(l.names.ident(src.Name))
+	ret, err := l.mapType(src.Ret)
+	if err != nil {
+		return fmt.Errorf("lower/msl: func %s return type: %w", src.Name, err)
+	}
+	fn.Ret = ret
+
+	f := l.newFn(fn)
+	for _, p := range src.Params {
+		mt, err := l.mapType(p.Type)
+		if err != nil {
+			return fmt.Errorf("lower/msl: func %s param %s: %w", src.Name, p.Name, err)
 		}
+		ref := fn.Param(l.names.ident(p.Name), mt)
+		f.vals.bind(p.Name, p.Type, mt, ref, nil)
 	}
 
-	// §6.1: on msl, group_size lowers to a thread-count bound only; the exact
-	// shape is the launcher's contract, enforced before dispatch.
-	switch {
-	case k.GroupSize != nil:
-		fn.Attr(msl.MaxTotalThreadsPerThreadgroup(k.GroupSize.Threads()))
-	case k.MaxGroupSize > 0:
-		fn.Attr(msl.MaxTotalThreadsPerThreadgroup(k.MaxGroupSize))
+	if err := f.body(&src.Body); err != nil {
+		return fmt.Errorf("lower/msl: func %s: %w", src.Name, err)
+	}
+	l.out.Add(fn)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Kernels (§6.1)
+// ---------------------------------------------------------------------------
+
+func (l *lowerer) lowerKernel(k *gvir.Kernel) error {
+	fn := msl.NewKernel(l.names.ident(k.Name))
+	f := l.newFn(fn)
+	f.kernel = k
+
+	if err := f.kernargs(k); err != nil {
+		return fmt.Errorf("lower/msl: kernel %s: %w", k.Name, err)
+	}
+	if err := f.groupMemory(k); err != nil {
+		return fmt.Errorf("lower/msl: kernel %s: %w", k.Name, err)
+	}
+	if err := f.threadgroupBound(k); err != nil {
+		return fmt.Errorf("lower/msl: kernel %s: %w", k.Name, err)
+	}
+	if err := f.body(&k.Body); err != nil {
+		return fmt.Errorf("lower/msl: kernel %s: %w", k.Name, err)
+	}
+	l.out.Add(fn)
+	return nil
+}
+
+// kernargs emits the §6.3 packed argument buffer as a struct whose offsets are
+// defined by that section rather than by Metal's own struct rules, and binds
+// each parameter to its field. The buffer sits at [[buffer(0)]] and requires
+// Argument Buffers Tier 2; [[id(n)]] carries the §6.2 parameter index, which
+// is the portable identity of a parameter and therefore the right thing for
+// the encoder to see.
+func (f *fnLower) kernargs(k *gvir.Kernel) error {
+	want, err := f.l.src.KernargLayout(k)
+	if err != nil {
+		return err
+	}
+	if len(k.Params) == 0 {
+		return nil
+	}
+
+	name := f.l.names.fresh("args_t")
+	s := msl.NewStruct(name)
+	handles := make([]*msl.Field, len(k.Params))
+
+	off, pads := 0, 0
+	for i, p := range want.Params {
+		ft, err := f.l.mapType(p.Type)
+		if err != nil {
+			return fmt.Errorf("param %d (%s): %w", i, p.Name, err)
+		}
+		size, align, err := f.l.mslSizeAlign(p.Type)
+		if err != nil {
+			return fmt.Errorf("param %d (%s): %w", i, p.Name, err)
+		}
+		off = alignUp(off, align)
+		if off > p.Offset {
+			return fmt.Errorf("param %d (%s): MSL places it at byte %d, §6.3 requires %d",
+				i, p.Name, off, p.Offset)
+		}
+		if off < p.Offset {
+			s.Field(fmt.Sprintf("vv_pad%d", pads), msl.Array(msl.UChar, p.Offset-off))
+			pads++
+			off = p.Offset
+		}
+		handles[i] = s.Field(f.l.names.ident(p.Name), ft, msl.ID(i))
+		off += size
+	}
+	if off < want.Size {
+		s.Field(fmt.Sprintf("vv_pad%d", pads), msl.Array(msl.UChar, want.Size-off))
+	}
+	f.l.out.Add(s)
+
+	argsName := f.l.names.fresh("args")
+	args := f.fn.Param(argsName, msl.Ref(msl.Constant, s.Type()), msl.Buffer(0))
+
+	for i, p := range k.Params {
+		mt, err := f.l.mapType(p.Type)
+		if err != nil {
+			return err
+		}
+		if st, ok := p.Type.(gvir.StructType); ok {
+			// §6.2 permits a struct by value; §4.7 forbids holding an
+			// aggregate in a named value. The name therefore binds to a
+			// thread-space copy, whose pointee is known, exactly as field.ptr
+			// on a struct parameter needs.
+			local := f.temp("param")
+			f.prologue = append(f.prologue,
+				&msl.VarDecl{Type: mt, Name: local, Init: args.Fld(handles[i])})
+			bp, err := bytePtr(gvir.SpacePrivate)
+			if err != nil {
+				return err
+			}
+			f.vals.bind(p.Name, gvir.PtrPrivate, bp,
+				msl.Call("vv_bytes", msl.Name(local).Addr()), st)
+			continue
+		}
+		f.vals.bind(p.Name, p.Type, mt, args.Fld(handles[i]), nil)
+	}
+	return nil
+}
+
+// groupMemory declares the kernel's static `group` objects as threadgroup
+// locals and its one `dynamic_group` as a threadgroup parameter, which is what
+// §8.2 says the msl realization is. Each name binds to the object's address as
+// a byte pointer; nothing in the IR ever names the object itself.
+func (f *fnLower) groupMemory(k *gvir.Kernel) error {
+	total := 0
+	for _, g := range k.Groups {
+		size, align, err := f.l.mslSizeAlign(g.Type)
+		if err != nil {
+			return fmt.Errorf("group %s: %w", g.Name, err)
+		}
+		if g.Align > 0 {
+			if !gvir.ValidAlign(g.Align) {
+				return fmt.Errorf("group %s: align %d is not a power of two in [1,1024] (§2)", g.Name, g.Align)
+			}
+			align = g.Align
+		}
+		st, err := storageType(size, align)
+		if err != nil {
+			return fmt.Errorf("group %s: %w", g.Name, err)
+		}
+		name := f.l.names.ident(g.Name)
+		obj := f.temp("tg")
+		f.prologue = append(f.prologue, &msl.VarDecl{
+			Space: msl.Threadgroup, Type: st, Name: obj,
+			Comment: fmt.Sprintf("group %s: %d bytes, align %d", g.Name, alignUp(size, align), align),
+		})
+		bp, err := bytePtr(gvir.SpaceGroup)
+		if err != nil {
+			return err
+		}
+		f.vals.bind(g.Name, gvir.PtrGroup, bp, bytesOf(msl.Name(obj)), g.Type)
+		_ = name
+		total = alignUp(total, align) + alignUp(size, align)
+	}
+
+	if limit := gvir.StaticGroupLimit(gvir.BackendMSL); total > limit {
+		return fmt.Errorf("static group footprint is %d bytes, over the msl budget of %d (§6.5)", total, limit)
 	}
 
 	if dg := k.DynamicGroup; dg != nil {
-		p := fn.Param(prefix+"dyn", msl.Ptr(msl.Threadgroup, msl.UChar), msl.ThreadgroupSlot(0))
-		b, err := f.defineParam(dg.Name, gvir.PtrGroup)
+		bp, err := bytePtr(gvir.SpaceGroup)
 		if err != nil {
 			return err
 		}
-		b.mname = prefix + "dyn" // the parameter is the binding; no copy needed
-		_ = p
-	}
-
-	for _, g := range k.Groups {
-		if err := f.groupVar(prologue, g); err != nil {
-			return fmt.Errorf("group %s: %w", g.Name, err)
-		}
-	}
-
-	body := msl.NewBlock()
-	if err := f.lowerBody(body); err != nil {
-		return err
-	}
-	fn.Body = f.assemble(prologue, body)
-	l.out.Add(fn)
-	return nil
-}
-
-// argBuffer realizes §6.3: a single argument buffer at [[buffer(0)]] whose
-// offsets and padding are defined by the specification, not by Metal's struct
-// rules. KernargLayout is the one derivation the launcher generator, ir/verify
-// and the differential suite also use.
-func (l *lowerer) argBuffer(f *fnLowerer, k *gvir.Kernel, prologue *msl.Block) error {
-	layout, err := l.src.KernargLayout(k)
-	if err != nil {
-		return err
-	}
-	name := l.unique(k.Name + "_args")
-	st := msl.NewStruct(name)
-
-	fields := map[string]*msl.Field{}
-	off := 0
-	for _, p := range layout.Params {
-		if p.Offset > off {
-			st.Field(fmt.Sprintf("_pad_%d", off), msl.Array(msl.UChar, p.Offset-off))
-		}
-		t, err := l.typeOf(p.Type)
-		if err != nil {
-			return fmt.Errorf("param %d (%s): %w", p.Index, p.Name, err)
-		}
-		fields[p.Name] = st.Field(p.Name, t)
-		off = p.Offset + p.Size
-	}
-	if layout.Size > off {
-		st.Field(fmt.Sprintf("_pad_%d", off), msl.Array(msl.UChar, layout.Size-off))
-	}
-	l.out.Add(&msl.CommentDecl{Text: fmt.Sprintf(
-		"§6.3 packed kernarg layout: %d bytes, %d-byte aligned", layout.Size, layout.Align)})
-	l.out.Add(st)
-
-	args := f.fn.Param(argsParam, msl.Ref(msl.Constant, msl.Named(name)), msl.Buffer(0))
-
-	// §7.3 counts parameters as entry-block assignments, and a parameter name
-	// may be reassigned, so each one becomes a local initialized in the
-	// prologue rather than an alias for the argument-buffer field.
-	for _, p := range layout.Params {
-		field := args.Fld(fields[p.Name])
-		if _, isStruct := p.Type.(gvir.StructType); isStruct {
-			// §4.7: an aggregate is never held in a named value. Copy it into
-			// thread space and bind the name to a pointer at it, so field.ptr
-			// works and the pointee is known.
-			storage := f.storageName(p.Name)
-			mt, err := l.typeOf(p.Type)
-			if err != nil {
-				return err
-			}
-			f.decls = append(f.decls, &msl.VarDecl{Type: mt, Name: storage})
-			prologue.Assign(msl.Name(storage), field)
-			b, err := f.define(p.Name, gvir.PtrPrivate)
-			if err != nil {
-				return err
-			}
-			b.pointee = p.Type
-			prologue.Assign(b.ref(), bytePtr(msl.Thread, msl.Name(storage).Addr()))
-			continue
-		}
-		b, err := f.define(p.Name, p.Type)
-		if err != nil {
-			return err
-		}
-		prologue.Assign(b.ref(), field)
+		ref := f.fn.Param(f.l.names.ident(dg.Name), bp, msl.ThreadgroupSlot(0))
+		f.vals.bind(dg.Name, gvir.PtrGroup, bp, ref, nil)
 	}
 	return nil
 }
 
-// groupVar declares one statically sized group allocation (§8.2). Zero
-// initialization is not emitted: §8.2 does not guarantee it.
-func (f *fnLowerer) groupVar(prologue *msl.Block, g *gvir.GroupVar) error {
-	mt, err := f.l.typeOf(g.Type)
-	if err != nil {
-		return err
+// threadgroupBound realizes §6.1's note that on msl `group_size` lowers to a
+// thread-count bound only: the exact shape stays a host-checked contract the
+// generated launcher enforces before dispatch.
+func (f *fnLower) threadgroupBound(k *gvir.Kernel) error {
+	n := 0
+	if k.GroupSize != nil {
+		n = k.GroupSize.Threads()
 	}
-	storage := f.storageName(g.Name)
-	decl := &msl.VarDecl{Space: msl.Threadgroup, Type: mt, Name: storage}
-	if g.Align > 0 {
-		if !gvir.ValidAlign(g.Align) {
-			return fmt.Errorf("align %d is not a power of two in [1,1024] (§2)", g.Align)
-		}
-		// MSL has no typed alignas node; RawAttr is the escape hatch.
-		decl.Attrs = append(decl.Attrs, msl.RawAttr("gnu::aligned", strconv.Itoa(g.Align)))
+	if k.MaxGroupSize > 0 && (n == 0 || k.MaxGroupSize < n) {
+		n = k.MaxGroupSize
 	}
-	f.decls = append(f.decls, decl)
-
-	b, err := f.define(g.Name, gvir.PtrGroup)
-	if err != nil {
-		return err
+	if n > 0 {
+		f.fn.Attr(msl.MaxTotalThreadsPerThreadgroup(n))
 	}
-	b.pointee = g.Type
-	prologue.Assign(b.ref(), bytePtr(msl.Threadgroup, addressOf(g.Type, msl.Name(storage))))
+	if k.GroupSize != nil && f.l.opt.Comments {
+		f.fn.Attr(msl.RawAttr("//")) // placeholder never emitted; see note below
+		f.fn.Attrs = f.fn.Attrs[:len(f.fn.Attrs)-1]
+		f.prologue = append(f.prologue, &msl.Comment{Text: fmt.Sprintf(
+			"group_size %d,%d,%d is enforced by the launcher (§6.1)",
+			k.GroupSize.X, k.GroupSize.Y, k.GroupSize.Z)})
+	}
+	// §9.2: subgroup_size is not expressible in MSL and is gated (§4.3), so a
+	// kernel carrying it never reaches this point.
+	if k.SubgroupSize != 0 {
+		return fmt.Errorf("subgroup_size is unavailable on msl (§9.2) — gating should have excluded this kernel")
+	}
 	return nil
 }
 
-// lowerFunc emits a device-side helper (§6.4). There is no inline/noinline
-// attribute because inlining is neither observable nor controllable.
-func (l *lowerer) lowerFunc(fd *gvir.Func) error {
-	fn := msl.NewFunction(fd.Name)
-	if !gvir.IsVoid(fd.Ret) {
-		ret, err := l.typeOf(fd.Ret)
-		if err != nil {
-			return err
-		}
-		fn.Ret = ret
-	}
-	f := newFn(l, fn, &fd.Body, nil)
+// ---------------------------------------------------------------------------
+// Bodies
+// ---------------------------------------------------------------------------
 
-	for _, p := range fd.Params {
-		if !gvir.IsFuncParamType(p.Type) {
-			return fmt.Errorf("parameter %s: %s is not a value type (§2)", p.Name, p.Type)
-		}
-		b, err := f.defineParam(p.Name, p.Type)
-		if err != nil {
-			return fmt.Errorf("parameter %s: %w", p.Name, err)
-		}
-		mt, err := l.typeOf(p.Type)
-		if err != nil {
-			return err
-		}
-		fn.Param(b.mname, mt)
-	}
-	if fd.Readonly {
-		// `readonly` is an assertion about arguments, not a qualifier: pointers
-		// here are untyped bytes, so there is nothing to spell const. Violating
-		// it stays UB (§12.8).
-		fn.Attrs = append(fn.Attrs)
-	}
-
-	body := msl.NewBlock()
-	if err := f.lowerBody(body); err != nil {
+// body structurizes the annotated CFG into the function's block and then
+// prepends the prologue: threadgroup objects and parameter copies first, then
+// one declaration per §7.3 value binding.
+func (f *fnLower) body(src *gvir.Body) error {
+	if err := f.emitBody(f.fn.Body, src); err != nil {
 		return err
 	}
-	fn.Body = f.assemble(msl.NewBlock(), body)
-	l.out.Add(fn)
+	head := append([]msl.Stmt{}, f.prologue...)
+	head = append(head, f.vals.declarations()...)
+	if len(head) > 0 {
+		f.fn.Body.InsertBefore(0, head...)
+	}
 	return nil
-}
-
-// assemble splices the hoisted §7.3 declarations in ahead of the prologue and
-// the structurized body. Declarations are collected while the body is built, so
-// this necessarily runs last.
-func (f *fnLowerer) assemble(prologue, body *msl.Block) *msl.Block {
-	out := msl.NewBlock()
-	out.Append(f.decls...)
-	if len(f.decls) > 0 && prologue.Len()+body.Len() > 0 {
-		out.Blank()
-	}
-	out.Append(prologue.Stmts()...)
-	if prologue.Len() > 0 && body.Len() > 0 {
-		out.Blank()
-	}
-	out.Append(body.Stmts()...)
-	return out
-}
-
-// bytePtr reinterprets an address as the untyped byte pointer every .gvir
-// pointer value is.
-func bytePtr(space msl.AddressSpace, e msl.Expr) msl.Expr {
-	return msl.TCall("reinterpret_cast", []msl.TypeArg{msl.TArg(msl.Ptr(space, msl.UChar))}, e)
-}
-
-// addressOf takes the address of a storage object: an array already decays.
-func addressOf(t gvir.Type, e msl.Expr) msl.Expr {
-	if _, isArray := t.(gvir.ArrayType); isArray {
-		return e
-	}
-	return e.Addr()
 }

@@ -4,13 +4,14 @@
 import lower "github.com/vertex-language/vvm/gpu/lower/msl"
 ```
 
-Lowers a verified `.gvir` device module (`ir/gvir.Module`) to a structured MSL IR
-module (`gpu/ir/msl.Module`). It produces **one artifact**: `.gvir` declares at
-most one `msl` arch, and that arch is a language floor rather than a binary
-target (§3), so a single translation unit covers everything at or above it.
+Lowers a verified `.gvir` device module (`ir/gvir.Module`) to an MSL IR module
+(`gpu/ir/msl.Module`). It produces **one artifact**: `.gvir` declares at most one
+`msl` arch, and the arch is a language floor rather than a binary target, so a
+single translation unit covers everything at or above it (§3).
 
-The result is IR, not text. Print it with `gpu/ir/msl/encoding/text`, rewrite it,
-or embed it — this package makes no formatting decisions.
+The result is IR, not text. Print it with `gpu/ir/msl/encoding/text`, which does
+not validate — run `msl.Verify` yourself, or leave `Options.Verify` on and let
+`Lower` do it.
 
 ```go
 res, err := lower.Lower(m) // m: *gvir.Module, already ir/verify'd
@@ -20,9 +21,7 @@ if err != nil {
 for _, x := range res.Excluded {
     log.Printf("kernel %s excluded: %s unavailable on %s", x.Kernel, x.Feature, res.Arch)
 }
-for _, d := range msl.Verify(res.Module) {
-    log.Println(d)
-}
+msl.Resolve(res.Module)
 src, _ := text.Print(res.Module)
 ```
 
@@ -36,277 +35,302 @@ src, _ := text.Print(res.Module)
 
 | File | Responsibility |
 | --- | --- |
-| `msl.go` | Entry point (`Lower`, `LowerOptions`), `Options`/`Result`, arch → `msl.Version` selection, float-profile realization, the module-level `lowerer`. |
-| `gating.go` | §4.3 capability gating: transitive feature use over the call graph, kernel exclusion, func reachability, struct availability. |
-| `types.go` | `gvir.Type` → `msl.Type`, address spaces, the unsigned-representation invariant's helpers. |
-| `value.go` | The §7.3 Join Convention: name → hoisted local, pointee tracking, operand and literal materialization, name hygiene. |
-| `consts.go` | Module `const`s → module-scope `constant` variables and the const-init grammar. |
-| `callable.go` | Kernel and func lowering: kernarg → argument buffer, `group` → threadgroup locals, `dynamic_group` → threadgroup parameter, attributes. |
-| `cfg.go` | Structurization: §7.2 merge annotations → `if`/`else if`/`switch`/`while`, `break`/`continue` selection, terminators. |
-| `isel.go` | Instruction selection: arithmetic, bitwise, float, comparisons, conversions, `select`, `call`. |
-| `isel_mem.go` | `alloca`, `load`/`store`, `index`/`field`, `memcopy`/`memset`, and the vector opcodes. |
+| `msl.go` | Entry point (`Lower`, `LowerOptions`), `Options`/`Result`, arch → language revision, the module-level `lowerer`, the runtime preamble, structs and `const`s. |
+| `gating.go` | §4.3 capability gating: per-kernel feature use over the call graph, kernel exclusion. |
+| `types.go` | `gvir.Type` → `msl.Type`, address spaces, the unsigned-twin table, MSL's own layout model, identifier mangling. |
+| `values.go` | The §7.3 Join Convention: name → binding, pointee tracking, operand materialization, the two pointer helpers. |
+| `callable.go` | Kernel and func lowering: the §6.3 argument buffer, `group` objects, `dynamic_group`, the threadgroup bound, the declaration prologue. |
+| `cfg.go` | The structurizer: annotated reducible CFG → `if` / `while` / `switch`. |
+| `isel.go` | Arithmetic, bitwise, float, comparisons, conversions, `select`, `call`. |
+| `isel_mem.go` | `alloca`, `load`/`store`, `index`/`field`, the vector opcodes, the bulk-memory loops. |
 | `isel_sync.go` | Barriers, fences, atomics, subgroup collectives, `submask` operations. |
-| `builtin.go` | §9 execution builtins → attributed kernel parameters, including the normative i64 linearization. |
+| `builtin.go` | §9 execution builtins, including the normative i64 linearization. |
 
-MSL is C++, so there is no register model and no instruction encoding here: this
-package builds a declaration/statement/expression tree and lets the Metal
-frontend do instruction selection. What it *does* own is the shape of that tree.
+There is no register model here at all. MSL is a source language: the Metal
+frontend does selection and allocation, and this package's whole job is to
+produce a C++ program whose *semantics* are the ones §11 and §12 pin down.
 
 ---
 
 ## 2. Value Model
 
-**One name, one hoisted local.** §7.3 merges values across blocks by same-name
-assignment. Structurization puts a block's statements inside `if`/`while` bodies,
-so a value assigned in one block and read in another cannot be a block-scoped
-declaration. `value.define` binds a name to a function-scope `msl.VarDecl` on
-first assignment and returns the same binding on every later one; the
-declarations are spliced in at the top of the body with `Block.InsertBefore`
-after the body is built. There is no phi insertion and no loop-carried-value
-special case anywhere in this package. Rebinding a name at a different type is
-rejected, not silently redeclared.
+**One name, one whole-body local.** §7.3 merges values across blocks by
+same-name assignment. In C++ that is a single declaration written more than
+once, so every binding is declared in a prologue at the top of the function and
+every instruction is an assignment to it. No phi insertion, no loop-carried
+special case, and — the reason it is done this way rather than with `Let` at
+first assignment — no question about which C++ scope a name that is first
+assigned inside an `if` belongs to. Rebinding a name at a different type is
+rejected rather than silently redeclared.
 
-Locals are declared uninitialized: §7.3 rule 3 guarantees every read is
-dominated by an assignment, and there is no `undef` to spell anyway.
+**Every pointer is a byte pointer.** `.gvir` pointers carry an address space but
+no pointee type, and MSL has no untyped pointer and no integer-to-pointer
+conversion. A pointer value is therefore `<space> uchar*`, which is exactly what
+§8.3 already writes `index.ptr` against, and every access reinterprets it:
 
-**Unsigned representation.** A value of type `iN` lives in the *unsigned* MSL
-type of that width — `uchar`, `ushort`, `uint`, `ulong`. Signed consumers
-(`sdiv`, `srem`, `ashr`, `abs`, `smin`/`smax`, the `s*` compares, `sext`,
-`inttos`) cast to the signed spelling for the operation and the result converts
-back on assignment, which is modulo and therefore exactly §11.1's "wrapping is
-modulo 2^N and always defined". This also makes 8- and 16-bit arithmetic correct
-for free: C++ promotes `uchar` operands to `int`, and the narrowing back to the
-declared `uchar` local is the truncation §11.1 asks for.
+```c
+template <typename T> inline device T *vv_at(device uchar *p) { return (device T *)p; }
+// ... one overload per address space
+```
 
-**`i1` is `bool`, `vec[i1,N]` is `boolN`.** Both are value-only in `.gvir` and
-non-storable in MSL practice, so nothing has to defend the invariant.
+`load.f32 p` is `*vv_at<float>(p)`. The overload set is resolved by the
+operand's address space, so the space survives lowering without appearing
+anywhere as a string. §12.3 already makes a misaligned access UB, which is
+exactly the precondition the reinterpretation needs.
 
-**Pointers are untyped bytes.** `.gvir` pointers carry an address space but no
-pointee type, so every pointer value is `SPACE uchar*` and each access
-`reinterpret_cast`s at the point of use. `index.ptr` is therefore plain pointer
-arithmetic with no scaling. `value` carries a best-effort `pointee`, propagated
-from `alloca`, `group` declarations, struct parameters, and chains of
-`field.ptr`/`index.ptr`; a `field.ptr` through a pointer whose provenance is a
-raw kernel argument is a lowering error with an explicit message (§9).
+**Pointee tracking.** `field.ptr p, k` cannot be lowered from the pointer's type
+alone. Bindings carry a best-effort `pointee`, propagated from `alloca`, `group`
+declarations, struct parameters and `field.ptr`/`index.ptr`. Through a raw
+`ptr[global]` kernel argument there is nothing in the IR to name the struct, and
+the error says so.
 
-**`submask` is `simd_vote::vote_t`.** The module aliases it as `gvir_submask`.
-§4.6 makes the width runtime-determined, which is exactly why the mask
-constants (`mask_lt`, …) are computed from `thread_index_in_simdgroup` and
-`threads_per_simdgroup` rather than read out of a special register.
+**`submask` is `ulong`.** §4.6 keeps the mask opaque because its width is the
+runtime subgroup width; `simd_vote::vote_t` is 64 bits, the widest that width
+can be, so a `ulong` holds any mask Metal produces exactly.
+
+**Vectors are vectors.** Unlike the other two backends, MSL has real vector
+types, so `vec[T,N]` is one value. `vec[T,3]` is `T3`, which MSL lays out as
+four elements — the same rule §4.4 states, which is why the two layout models
+in `types.go` agree without a special case.
 
 ---
 
-## 3. Address Spaces and Parameters
+## 3. Signedness
+
+`.gvir` puts signedness in the opcode (`udiv` vs `sdiv`); MSL puts it in the
+type. Integers map to the signed MSL spellings, and every `u*` opcode reads both
+operands through `as_type` at the unsigned twin and reads the result back:
+
+```text
+udiv.i32 a, b   ->   as_type<int>(as_type<uint>(b) == 0u ? 0u
+                                                         : as_type<uint>(a) / as_type<uint>(b))
+```
+
+`as_type` is a bit-level reinterpretation with no code behind it, so this costs
+nothing in the compiled artifact. The affected opcodes are `udiv`, `urem`,
+`umulh`, `umin`, `umax`, `lshr`, `rotl`/`rotr`, the `u*` compares, `zext`,
+`inttou`, `utoint`, and the two unsigned atomics.
+
+---
+
+## 4. Address Spaces, Parameters and Group Memory
 
 | `.gvir` | MSL | Bound by |
 | --- | --- | --- |
 | `global` | `device` | argument-buffer field |
 | `constant` | `constant` | argument-buffer field |
-| `group` | `threadgroup` | `group` decl → threadgroup local; `dynamic_group` → `[[threadgroup(0)]]` parameter |
-| `private` | `thread` | `alloca` → function-scope local; struct parameter → prologue copy |
+| `group` | `threadgroup` | `group` decl → threadgroup local; `dynamic_group` → `[[threadgroup(0)]]` |
+| `private` | `thread` | `alloca` → function-scope local |
 
-There is no generic pointer in either language, so no space-cast ever appears.
-`§5`'s "a value's space is fixed at first binding" is enforced by the binding's
-type, which includes the space.
+**The argument buffer.** §6.3's packed layout is emitted as a struct whose
+offsets are computed from the specification and whose padding is explicit, then
+bound as `constant vv_args_t& [[buffer(0)]]`. MSL's own layout of the same
+parameter list is computed independently in `types.go` and compared field by
+field; a divergence is a lowering error, never a different buffer. This is the
+Tier 2 requirement §6.3 states, and `[[id(n)]]` carries the §6.2 parameter
+index, which is the portable identity of a parameter and therefore the right
+thing for the encoder to see.
 
-### 3.1 The argument buffer
+**`group` and `alloca` objects are declared by size and alignment, not by
+type.** Nothing in the IR ever names one — naming a `group` yields its address
+(§8.2), and `alloca` yields a `ptr[private]` (§8.1) — so only the byte count and
+the alignment are observable. `storageType` picks the MSL type with exactly
+those two properties (`uchar`, `ushort`, `uint`, `uint2`, `uint4`), which is how
+`align 16` is expressed without an `alignas` this IR cannot spell. Alignments
+above 16 have no vector type to express them and are a lowering error.
 
-§6.3 pins the kernarg layout and requires it to be byte-identical across all
-three backends, so the generated struct is **not** left to Metal's struct rules:
-`gvir.Module.KernargLayout` is the single derivation, and explicit
-`uchar _padN[k]` fields realize every gap and the trailing padding.
+**Struct parameters** (§6.2 permits them; §4.7 forbids holding an aggregate in a
+named value) are copied into a `thread` local in the prologue, and the name
+binds to a byte pointer at that copy — so `field.ptr` works on it and the
+pointee is known.
 
-```text
-struct vector_add_args {
-    device float *a;
-    device float *b;
-    device float *c;
-    uint          n;
-    uchar         _pad_tail[4];
-};
-
-kernel void vector_add(
-    constant vector_add_args &gvir_args [[buffer(0)]],
-    uint3                     gvir_tid  [[thread_position_in_grid]])
-```
-
-This requires **Argument Buffers Tier 2**; on Tier 1 pipeline creation fails and
-the launcher reports `GVIR_ERR_UNAVAILABLE`, exactly as §6.3 says.
-
-Kernel parameters become prologue-initialized locals rather than direct uses of
-`gvir_args.x`, because §7.3 counts parameters as entry-block assignments and
-permits reassignment. `func` parameters are MSL parameters directly — C++ passes
-by value, so they are already assignable locals.
-
-A struct parameter is copied into a `thread` local in the prologue and the name
-binds to a `thread uchar*` into that copy, so `field.ptr` works on it and the
-pointee is known (§4.7 forbids holding an aggregate in a named value).
-
-### 3.2 Group memory
-
-`group` declarations become `threadgroup` locals at the top of the kernel body;
-`align N` rides along as `[[gnu::aligned(N)]]`, since MSL has no typed
-`alignas` node and `RawAttr` is the escape hatch for exactly this. Zero
-initialization is not emitted — §8.2 does not guarantee it.
+**`dynamic_group_size`.** §6.3 says every backend carries the dynamic group size
+natively. On Metal the threadgroup allocation's length is set by the host with
+`setThreadgroupMemoryLength` and is *not* readable from the shader, so this
+backend takes it in a backend-private one-word buffer at `[[buffer(1)]]`. That
+is outside the §6.3 buffer, which stays byte-identical; the generated launcher
+fills it.
 
 ---
 
-## 4. Control Flow
+## 5. Control Flow
 
-This is the backend §7.2 exists for. Merge annotations are **consumed**, not
-dropped: they are what makes a one-pass structurizer possible without a
-relooper.
+MSL is C++: no `goto`, no label, no fallback. §7.2's merge annotations are not
+just required here, they are the entire input to `cfg.go`.
 
-* `loop_merge Lexit, Lcontinue` → `while (true) { … }`, continuing at `Lexit`.
-* `merge L` on a `br_if` → `if (c) { … } else { … }`, continuing at `L`. An
-  empty else arm is omitted; the printer already collapses `else { if … }` into
-  `else if`.
-* `merge L` on a `switch` → `switch` with one arm per distinct successor label
-  and an implicit `break` per arm. A `default` equal to the merge label emits no
-  default arm.
-* `br` is fallthrough; `br_if` with one distinct successor (§ `Successors`
-  deduplicates) is fallthrough.
-* `return` → `return;` / `return x;`. `unreachable` → `__builtin_unreachable();`,
-  which is the least surprising realization of §12.6 in a language with no trap.
+* `loop_merge Lexit, Lcontinue` → `while (true) { ... }`, with the header's own
+  lines at the top of every iteration. A header that tests and exits becomes
+  `if (c) { body } else { break; }` with no extra structure.
+* `merge L` on a `br_if` → `if` / `else`, both arms stopping at `L`, which the
+  caller emits once afterwards. When one arm *is* `L`, the condition is inverted
+  rather than an empty branch emitted.
+* `merge L` on a `switch` → a C++ `switch`; case labels sharing a target become
+  one arm with several labels.
+* A branch to the loop exit is `break`, to the header `continue`.
+* `return` needs no special handling — unlike `s_endpgm` on amdgcn, a `return`
+  under divergent control flow is ordinary C++.
+* `unreachable` → `return` with a comment. §12.6 makes executing one UB, so any
+  realization conforms and this one keeps the function well-formed.
 
-**Latches.** When the continue target is empty and branches back to the header,
-the loop is emitted plainly and `br Lcontinue` becomes `continue`. When the
-latch carries instructions, C's `continue` would skip them, so the body is
-wrapped:
+Two things are lowering errors with explicit messages rather than approximations:
 
-```text
-gvir_brk0 = false;
-while (true) {
-    do { … body … } while (false);   // `continue` -> break
-    if (gvir_brk0) { break; }
-    … latch …                        // back edge -> fallthrough
-}
-```
+* **A branch to the loop exit from inside a `switch`.** C++ `break` would leave
+  the switch, not the loop. (`continue` is unambiguous and is fine.)
+* **A separate continue block that is not a straight-line latch.** MSL's
+  `continue` jumps *past* the latch, so the latch is tail-duplicated at each
+  edge that reaches it — correct for a plain block, and refused for one carrying
+  its own merge annotation.
 
-**Non-local transfers are a lowering error, not a miscompile.** A `break` or
-`continue` emitted from inside an intervening `switch` or inner loop would bind
-to the wrong construct, so the structurizer tracks break depth and fails with an
-explicit message instead (§9). Selections do not count — `if` is not breakable —
-which is the overwhelmingly common case.
+A block reachable from two regions is refused too, naming the block: the CFG is
+reducible and annotated (§7.1, §7.2), so that means the annotations do not
+describe the graph.
 
-A block reachable from two structured paths, or a multi-successor block with no
-merge annotation, is likewise a lowering error rather than silent duplication.
+Non-terminating loops are emitted as written; nothing here deletes or reorders
+around a side-effect-free cycle (§7.1).
 
 ---
 
-## 5. Semantic Corners
+## 6. Semantic Corners
 
-Where MSL's default behaviour and `.gvir`'s pinned behaviour disagree, and
-selection therefore emits more than one operation:
+Where Metal's defaults and `.gvir`'s pinned behaviour disagree, selection emits
+more than the obvious thing:
 
-* **Division and remainder (§11.1).** MSL leaves division by zero undefined;
-  `.gvir` requires `0`. Every `udiv`/`sdiv`/`urem`/`srem` is guarded branchlessly
-  with `select`: the divisor is replaced by `1` under the guard and the result
-  forced to `0` under the same guard. `sdiv`/`srem` fold `INT_MIN / -1` into it.
-* **`ctlz`/`cttz` of zero (§11.2).** MSL's `clz`/`ctz` already return the type's
-  bit width for a zero operand, which is §11.2 exactly — emitted as-is, no clamp.
-* **Shifts and rotates (§11.2).** The count is masked with `N-1` explicitly
-  rather than relying on the OpenCL-inherited masking. `rotr` is
-  `rotate(x, (N - c) & (N-1))`, which is correct at `c ≡ 0` because `N & (N-1)`
-  is zero.
-* **`min`/`max` (§11.3).** Emitted as `fmin`/`fmax`, which are NaN-quieting.
-  MSL's `min`/`max` are the comparison forms and would not satisfy `minNum`.
-* **`round`/`round_even` (§11.3).** MSL `round` is already half-away-from-zero;
+* **Division and remainder (§11.1).** Metal leaves division by zero undefined;
+  `.gvir` requires `0`. Both guards fold into one predicate — `b == 0`, or the
+  `INT_MIN / -1` overflow — the divisor is replaced by `1` so the machine
+  division is always defined, and the result forced to `0`.
+* **Shift and rotate counts (§11.2).** C++ leaves a count at or above the width
+  undefined; `.gvir` masks it. The `& (N-1)` is emitted.
+* **`ctlz`/`cttz` of zero (§11.2).** MSL follows OpenCL: `clz`/`ctz` of zero
+  already yield the operand width, which is what §11.2 pins. Nothing extra.
+* **`bswap` (§11.2).** No MSL builtin at any width; the byte permutation is
+  generated, which is mechanical and correct at 8/16/32/64.
+* **`min`/`max` (§11.3).** MSL's `min`/`max` are not NaN-quieting; `fmin`/`fmax`
+  are, and are what IEEE `minNum`/`maxNum` means. `fmin`/`fmax` is emitted.
+* **`div` and `sqrt` (§11.3).** Metal's `/` and `sqrt` are approximations under
+  fast math. `precise::divide` and `precise::sqrt` are the spellings that are
+  not, and are always emitted — `approx` buys `fast::` forms for the §11.6
+  opcodes and nothing else.
+* **`round` (§11.3).** `round` is already half-away-from-zero in MSL;
   `round_even` is `rint`, `trunc_f` is `trunc`.
-* **Float-to-int (§11.5).** MSL conversion is neither saturating nor total, so
-  `stoint`/`utoint` emit a three-`select` sequence against `±2^(N-1)` (exactly
-  representable) plus an `isnan` arm yielding `0` — the §11.5 table verbatim.
-* **`one` (§11.4).** Ordered not-equal is `(a < b) || (a > b)`; C++ `!=` is the
-  *unordered* predicate and is true for NaN.
-* **Atomics (§10.2).** Every atomic is `atomic_*_explicit(…, memory_order_relaxed)`
-  through a `reinterpret_cast` to `SPACE atomic_uint*` / `atomic_int*` /
-  `atomic_ulong*` / `atomic_float*`, since `.gvir` pointers have no pointee. The
-  §10.2 **scope operand is dropped**: MSL expresses scope through the address
-  space and the barrier's `mem_flags`, not per operation. Ordering is likewise
-  never attached, because the IR expresses it only through `fence`.
-* **`cmpxchg` (§10.2).** MSL offers only the weak, flag-returning form, and
-  §10.2 requires the old value and forbids spurious failure. Emitted as a retry
-  loop that spins only while the compare-exchange failed *and* the expected slot
-  is unchanged, then binds the slot as the result.
-* **`shuffle_up`/`shuffle_down` (§10.3).** §10.3 says shifted-out lanes return
-  the source value; MSL leaves them unspecified. Emitted as
-  `select(v, simd_shuffle_up(v, d), lane >= d)` — `select`, not a ternary,
-  because the shuffle must not end up under divergent control.
-* **Barriers (§10.1).** `barrier.group` is `threadgroup_barrier`,
-  `barrier.subgroup` is `simdgroup_barrier`. Memory scope maps `none` →
-  `mem_none`, `subgroup`/`group` → `mem_threadgroup`, `grid` →
-  `mem_device | mem_threadgroup`.
-* **`group_size` (§6.1).** Lowers to `[[max_total_threads_per_threadgroup(X*Y*Z)]]`
-  — a thread-count bound only. The exact shape is the launcher's contract, which
-  is what §6.1 already says for this backend.
-* **Float profile (§11.6).** Metal compiles with fast math by default, so
-  `contract` off emits `#pragma METAL fp math_mode(safe)` behind a
-  `__METAL_VERSION__ >= 320` gate and a comment recording that `metal3.0`/`3.1`
-  artifacts need `-fno-fast-math`. `approx` selects the `fast::` namespace for
-  `rcp`/`rsqrt`/`sin`/`cos`/`exp2`/`log2`; emitting one without the flag is a
-  lowering error, not a silent strict substitution.
-* **Name hygiene.** §2 gives `.gvir` a flat module-wide namespace with no
-  shadowing, so `msl.Resolve` is never run: there is nothing to disambiguate.
-  Value names that collide with an MSL keyword or a stdlib spelling get a
-  trailing underscore, and every synthesized name carries the `gvir_` prefix
-  (user names starting with it are mangled the same way).
+* **Ordered not-equal (§11.4).** C++ `!=` is the *unordered* form and is true for
+  a NaN operand. `one` is emitted as `a < b || a > b`.
+* **Bool vectors (§4.5).** `&&`, `||` and `!` do not apply elementwise to a
+  `bool` vector; `&`, `|` and `^` do. Every predicate combination picks between
+  them on the value's shape.
+* **Float-to-int (§11.5).** Metal's conversion is undefined out of range;
+  §11.5's table is saturating and total. The clamp and the NaN case are emitted,
+  against bounds that are exact powers of two and therefore exactly
+  representable in every float format.
+* **`select` (§11.7).** Scalar conditions become the ternary; a `vec[i1,N]`
+  condition becomes MSL's `select(a, b, c)`, whose arms are written in the
+  opposite order. The ternary does not evaluate both arms, which §11.7 says it
+  may — the operands are already-computed values, so nothing is observable.
+* **`cmpxchg` (§10.2).** It yields the old value, not a flag, and does not fail
+  spuriously. Metal's `atomic_compare_exchange_weak_explicit` does both of the
+  opposite things: the loop retries only a spurious failure, and the old value
+  is read out of the expected slot the call updates.
+* **`shuffle_up`/`shuffle_down` (§10.3).** §10.3 pins shifted-out lanes to the
+  source value; Metal leaves the result unspecified when the source lane does not
+  exist. The lane guard is part of the lowering.
+* **`mask_lt`/`le`/`gt`/`ge`/`eq` (§10.3).** Metal has no lane-mask special
+  registers; they are computed from `thread_index_in_simdgroup` in `ulong`,
+  exact at any width Metal reports.
 
 ---
 
-## 6. Capability Gating
+## 7. Synchronization
 
-`gating.go` implements §4.3 rules 1–4 for this one artifact. Feature use is
-collected transitively — signature, `group` declarations, every instruction type
-suffix, and every reachable `func`'s signature and body — and checked against
-`gvir.Supports(BackendMSL, arch, f)`.
+`.gvir` atomics are relaxed and express ordering only through `fence` (§10.2),
+which is precisely Metal's model — `memory_order_relaxed` is the only order the
+atomic functions accept — so nothing sits in between.
 
+The §10.2 **scope operand is carried by the address space**, because that is
+where Metal keeps it: a threadgroup atomic is threadgroup-scoped by
+construction, and a device atomic is device-scoped. A `group`-scoped atomic
+through a `device` pointer is therefore stronger than asked and conforming; a
+`grid`-scoped atomic through a `ptr[group]` is impossible and is a lowering
+error.
+
+`fence relaxed` emits nothing (§10.2 makes it a no-op). Any other ordering emits
+`atomic_thread_fence` with `memory_order_seq_cst` — stronger than acquire,
+release or acqrel, and a stronger fence conforms. That function needs Metal 3.1,
+so a non-relaxed `fence` in a `metal30` artifact is a lowering error naming the
+revision rather than something weaker emitted quietly.
+
+`barrier.group` is `threadgroup_barrier`, `barrier.subgroup` is
+`simdgroup_barrier`, and the memory scope becomes the `mem_flags` argument
+(`none` → `mem_none`, `subgroup`/`group` → `mem_threadgroup`, `grid` →
+`mem_device | mem_threadgroup`). §7.4 already guarantees uniform reachability,
+so no guard is needed around either.
+
+---
+
+## 8. Capability Gating
+
+`gating.go` implements §4.3 rules 1–4 for this artifact. Unlike the other two
+backends, where only `bf16` ever actually bites, **two of the three gated
+features are unconditional here**: there is no `f64` on any Metal target (§4.2)
+and no expressible subgroup width (§9.2). A kernel touching either lowers on
+`ptx` and `amdgcn` and is excluded here.
+
+* Feature use is collected transitively over the call graph — signature, `group`
+  declarations, every instruction suffix, and every reachable `func`'s signature
+  and body.
 * An excluded kernel is **not emitted** and appears in `Result.Excluded`. It is
-  not an error: rule 4 makes exclusion from *every* artifact a gating error, and
-  that is a whole-module judgement `ir/verify` makes.
+  not an error: §4.3 rule 4 makes exclusion from *every* artifact a gating
+  error, and that is a whole-module judgement `ir/verify` makes.
 * A `func` is emitted only if some emitted kernel reaches it (rule 3).
-* All three §4.3 features actually bite here: `f64` and `subgroup_size` are
-  unavailable on every `msl` artifact, and `bf16` needs `metal31`. A struct
-  whose fields need an unavailable feature is replaced by a comment — only an
-  excluded kernel could have referenced it.
-
-`msl.Verify` will additionally warn if a `bfloat` reaches a `metal3.0` module;
-gating means it should not, and a warning there is a bug in this package.
+* `bf16` needs `metal31`, which is the one gate that depends on the declared
+  arch.
 
 ---
 
-## 7. Missing Against the Spec (Todos)
+## 9. Float Profile
+
+`float_profile` (§11.6) is module-wide and both flags default off.
+
+* `approx` gates `rcp`/`rsqrt`/`sin`/`cos`/`exp2`/`log2`/`tanh`, which lower to
+  `fast::divide(1, x)`, `fast::rsqrt`, `fast::sin`, `fast::cos`, `fast::exp2`,
+  `fast::log2` and `precise::tanh`. Emitting one without the flag is a lowering
+  error, not a silent strict substitution.
+* Explicit `fma` is always `fma` — a single rounding by definition (§11.3).
+* `contract` off means no `mul`+`add` fusion. This package never contracts on
+  its own, but the Metal frontend fuses under fast math and MSL has no in-source
+  switch this backend can version-gate honestly below Metal 3.2. The artifact
+  therefore carries a comment recording that it must be compiled with
+  `-fno-fast-math`, and the requirement belongs to the toolchain invocation in
+  `gvir_arch.md` §6.
+
+---
+
+## 10. Missing Against the Spec (Todos)
 
 Valid IR this backend does not yet lower; each returns an error at `Lower` time
 rather than emitting something approximate.
 
-* **`memmove`.** `memcopy` and `memset` emit forward byte loops. `memmove` needs
-  a direction test, and `dst < src` is not even expressible when the operands sit
-  in different address spaces (§5 forbids the comparison); unimplemented.
-* **`field.ptr` through an untyped pointer.** Lowerable only when the pointee is
-  recoverable from provenance (`alloca`, a `group` declaration, a struct
-  parameter, or a chain of `field.ptr`/`index.ptr` from one of those). Through a
-  raw `ptr[global]` kernel argument there is nothing in the IR to name the
-  struct, and the error says so.
-* **`bswap` on `i64`.** 8/16/32 are implemented; the 64-bit form needs an
-  eight-term shift/mask sequence.
-* **Atomics on `ptr[*]`.** §10.2 permits them; realizing one needs a
-  pointer↔integer round trip whose conformance in MSL is not established, so
-  nothing is emitted instead.
-* **Non-local `break`/`continue`.** A loop exit or continue crossing an
-  intervening `switch` or inner loop needs flag propagation through each nested
-  construct (§4); currently a lowering error.
-* **Multi-successor blocks with no merge annotation**, including an entry block
-  ending in a two-way `br_if` — §2's grammar attaches `merge-decl` to labelled
-  blocks only, and this backend cannot invent the reconvergence point.
-* **Execution builtins inside a `func`.** §9 builtins lower to attributed kernel
-  parameters; a `func` has no such surface, so they must be passed in. Reaching
-  one from a `func` body is a lowering error.
-* **`dynamic_group_size`.** §6.3 asserts every backend carries the dynamic group
-  size natively — "a threadgroup length on `msl`". That mechanism has no typed
-  MSL spelling, so the length arrives as a `RawAttr`-attributed parameter and is
-  the one construct here whose acceptance by the Metal frontend is not
-  established. It is emitted only when the kernel actually reads it.
-* **Under-alignment.** `align N` on `load`/`store`/atomics is not expressible in
-  MSL; the clause is dropped and violating natural alignment stays §12.3 UB.
-* **64-bit atomics** lower to `atomic_ulong`, which needs `metal3.1` and
-  hardware support; nothing here gates it, because §4.3's list is closed.
+* **§9 builtins inside a `func`.** MSL delivers every builtin as an attributed
+  *kernel parameter*, so a `func` has no way to read one without changing the
+  calling convention. Threading them through as ordinary parameters is the fix
+  and touches every call site.
+* **64-bit `umulh`/`smulh`.** `mulhi` is 32-bit; the 64-bit form needs a split
+  sequence.
+* **Atomics on pointer values.** §10.2 makes them legal on `ptr[*]`; MSL has no
+  atomic pointer type and no pointer-to-integer conversion to build one from.
+* **`f16`/`bf16` atomics and `atomic_add` on `f64`.** The first has no Metal
+  type; the second is gated away here anyway.
+* **`alloca`/`group` alignment above 16 bytes.** §2 admits `align` up to 1024;
+  the largest MSL vector is 16 bytes, and `alignas` is not expressible in the
+  `msl` IR. Both halves need doing together.
+* **`loc` as `#line`.** Locations are emitted as comments. Real `#line`
+  directives would let the Metal frontend's diagnostics point at the original
+  source, but they must print at column zero, which is a printer concern.
+* **Non-constant `align` interactions.** `align N` is accepted and used to pick
+  the storage type for `alloca`/`group`; on `load`/`store`/atomics it is
+  currently discarded, since the reinterpretation carries the accessed type's
+  natural alignment and §12.3 makes any mismatch UB.
+* **`readonly`.** MSL has no equivalent qualifier, so the §6.4 assertion is
+  dropped rather than translated. It costs an optimization, not correctness.
+* **Multi-level exits.** A branch from inside a `switch` to an enclosing loop's
+  exit is refused (§5). A flag variable would express it; whether that is better
+  than refusing is unsettled.

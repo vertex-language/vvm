@@ -4,173 +4,152 @@ package msl
 import (
 	"fmt"
 
-	"github.com/vertex-language/vvm/gpu/ir/msl"
 	"github.com/vertex-language/vvm/ir/gvir"
 )
 
-// gate implements §4.3 rules 1-4 for this one artifact.
-//
-// Rule 4 — exclusion from *every* declared artifact — is a whole-module
-// judgement ir/verify makes; a kernel excluded here is recorded, not rejected.
-func (l *lowerer) gate() error {
-	for _, k := range l.src.Kernels {
-		feats, err := l.kernelFeatures(k)
-		if err != nil {
-			return fmt.Errorf("kernel %s: %w", k.Name, err)
-		}
-		excluded := false
-		for _, f := range feats {
-			ok, err := gvir.Supports(gvir.BackendMSL, l.arch, f)
-			if err != nil {
-				return err
-			}
-			if !ok {
-				l.excluded = append(l.excluded, Exclusion{Kernel: k.Name, Feature: f})
-				excluded = true
-				break
-			}
-		}
-		if !excluded {
-			l.emit[k.Name] = true
-		}
-	}
+// §4.3 capability gating for this one artifact. Two of the three gated
+// features are unconditional on msl — there is no f64 and no expressible
+// subgroup width on any Metal target (§4.2, §9.2) — so unlike the other two
+// backends this is not a formality: a kernel touching either is excluded here
+// and lowers only on ptx and amdgcn.
 
-	// Rule 3: a func is emitted if any emitted kernel reaches it.
-	for _, k := range l.src.Kernels {
-		if l.emit[k.Name] {
-			l.reach(&k.Body)
-		}
-	}
-	return nil
+type gating struct {
+	m        *gvir.Module
+	arch     string
+	calls    map[string][]string // func or kernel name -> called funcs
+	excluded []Exclusion
 }
 
-func (l *lowerer) reach(b *gvir.Body) {
-	for _, callee := range calls(b) {
-		if l.emit[callee] {
-			continue
-		}
-		f := l.src.FuncByName(callee)
-		if f == nil {
-			continue // ir/verify's diagnostic, not ours
-		}
-		l.emit[callee] = true
-		l.reach(&f.Body)
+func newGating(m *gvir.Module, arch string) (*gating, error) {
+	g := &gating{m: m, arch: arch, calls: map[string][]string{}}
+	for _, f := range m.Funcs {
+		g.calls[f.Name] = callees(&f.Body)
 	}
+	for _, k := range m.Kernels {
+		g.calls[k.Name] = callees(&k.Body)
+	}
+	return g, nil
 }
 
-func calls(b *gvir.Body) []string {
+func callees(b *gvir.Body) []string {
 	var out []string
+	seen := map[string]bool{}
 	for _, blk := range b.AllBlocks() {
 		for _, in := range blk.Lines {
-			if in.Op == gvir.OpCall && len(in.Args) > 0 && in.Args[0].Kind == gvir.OperandIdent {
-				out = append(out, in.Args[0].Ident)
+			if in.Op != gvir.OpCall || len(in.Args) == 0 {
+				continue
+			}
+			name := in.Args[0].Ident
+			if name != "" && !seen[name] {
+				seen[name] = true
+				out = append(out, name)
 			}
 		}
 	}
 	return out
 }
 
-// kernelFeatures collects a kernel's gated feature use per §4.3 rule 1:
-// signature, group declarations, body, and the body of every reachable func.
-func (l *lowerer) kernelFeatures(k *gvir.Kernel) ([]gvir.Feature, error) {
+// reach walks the call graph from one entry point. Recursion is illegal
+// (§6.4), but the visited set costs nothing and keeps a malformed module from
+// hanging the backend.
+func (g *gating) reach(name string, seen map[string]bool) {
+	for _, c := range g.calls[name] {
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		g.reach(c, seen)
+	}
+}
+
+func (g *gating) reachedBy(keep map[string]bool) map[string]bool {
+	live := map[string]bool{}
+	for _, k := range g.m.Kernels {
+		if keep[k.Name] {
+			g.reach(k.Name, live)
+		}
+	}
+	return live
+}
+
+// features collects every §4.3 feature a kernel uses, transitively over the
+// call graph: its signature, its group declarations, every instruction suffix
+// in its body, and the signature and body of every func it reaches (rule 1).
+func (g *gating) features(k *gvir.Kernel) []gvir.Feature {
 	set := map[gvir.Feature]bool{}
 	if k.SubgroupSize != 0 {
-		// §9.2: not expressible on msl, and therefore gated.
 		set[gvir.FeatureSubgroupSize] = true
 	}
 	for _, p := range k.Params {
-		l.addFeatures(set, p.Type)
+		g.addTypeFeatures(p.Type, set)
 	}
-	for _, g := range k.Groups {
-		l.addFeatures(set, g.Type)
+	for _, gv := range k.Groups {
+		g.addTypeFeatures(gv.Type, set)
 	}
-	if err := l.bodyFeatures(set, &k.Body, map[string]bool{}); err != nil {
-		return nil, err
+	g.addBodyFeatures(&k.Body, set)
+
+	reached := map[string]bool{}
+	g.reach(k.Name, reached)
+	for name := range reached {
+		f := g.m.FuncByName(name)
+		if f == nil {
+			continue
+		}
+		for _, p := range f.Params {
+			g.addTypeFeatures(p.Type, set)
+		}
+		g.addTypeFeatures(f.Ret, set)
+		g.addBodyFeatures(&f.Body, set)
 	}
+
 	var out []gvir.Feature
 	for _, f := range gvir.GatedFeatures {
 		if set[f] {
 			out = append(out, f)
 		}
 	}
-	return out, nil
+	return out
 }
 
-func (l *lowerer) bodyFeatures(set map[gvir.Feature]bool, b *gvir.Body, seen map[string]bool) error {
-	for _, blk := range b.AllBlocks() {
-		for _, in := range blk.Lines {
-			l.addFeatures(set, in.Suffix)
-			if in.Op != gvir.OpCall || len(in.Args) == 0 || in.Args[0].Kind != gvir.OperandIdent {
-				continue
-			}
-			name := in.Args[0].Ident
-			if seen[name] {
-				continue
-			}
-			seen[name] = true
-			f := l.src.FuncByName(name)
-			if f == nil {
-				return fmt.Errorf("call to undeclared func %q (§6.4)", name)
-			}
-			l.addFeatures(set, f.Ret)
-			for _, p := range f.Params {
-				l.addFeatures(set, p.Type)
-			}
-			if err := l.bodyFeatures(set, &f.Body, seen); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func (l *lowerer) addFeatures(set map[gvir.Feature]bool, t gvir.Type) {
+func (g *gating) addTypeFeatures(t gvir.Type, set map[gvir.Feature]bool) {
 	if t == nil {
 		return
 	}
-	for _, f := range l.src.TypeFeatures(t) {
+	for _, f := range g.m.TypeFeatures(t) {
 		set[f] = true
 	}
 }
 
-// available reports whether every gated feature t implies is available here.
-func (l *lowerer) available(t gvir.Type) (bool, error) {
-	for _, f := range l.src.TypeFeatures(t) {
-		ok, err := gvir.Supports(gvir.BackendMSL, l.arch, f)
-		if err != nil {
-			return false, err
-		}
-		if !ok {
-			return false, nil
+func (g *gating) addBodyFeatures(b *gvir.Body, set map[gvir.Feature]bool) {
+	for _, blk := range b.AllBlocks() {
+		for _, in := range blk.Lines {
+			g.addTypeFeatures(in.Suffix, set)
 		}
 	}
-	return true, nil
 }
 
-// lowerStructs emits every struct whose fields are available on this artifact.
-// One that is not can only be referenced by an excluded kernel, so it is
-// replaced by a comment rather than dropped silently.
-func (l *lowerer) lowerStructs() error {
-	for _, s := range l.src.Structs {
-		ok, err := l.available(gvir.StructType{Name: s.Name})
-		if err != nil {
-			return err
-		}
-		if !ok {
-			l.out.Add(&msl.CommentDecl{Text: fmt.Sprintf(
-				"struct %s omitted: a field uses a feature unavailable on %s (§4.3)", s.Name, l.arch)})
-			continue
-		}
-		ms := msl.NewStruct(s.Name)
-		for _, f := range s.Fields {
-			t, err := l.typeOf(f.Type)
+// kernels partitions the module's kernels into those this artifact emits and
+// those §4.3 rule 2 excludes. Exclusion is not an error here: rule 4 makes
+// exclusion from *every* artifact a gating error, and that is a whole-module
+// judgement ir/verify makes.
+func (g *gating) kernels() (map[string]bool, error) {
+	keep := map[string]bool{}
+	for _, k := range g.m.Kernels {
+		excluded := false
+		for _, f := range g.features(k) {
+			ok, err := gvir.Supports(gvir.BackendMSL, g.arch, f)
 			if err != nil {
-				return fmt.Errorf("struct %s field %s: %w", s.Name, f.Name, err)
+				return nil, fmt.Errorf("lower/msl: %w", err)
 			}
-			ms.Field(f.Name, t)
+			if !ok {
+				g.excluded = append(g.excluded, Exclusion{Kernel: k.Name, Feature: f})
+				excluded = true
+				break
+			}
 		}
-		l.out.Add(ms)
-		l.structs[s.Name] = s
+		if !excluded {
+			keep[k.Name] = true
+		}
 	}
-	return nil
+	return keep, nil
 }
