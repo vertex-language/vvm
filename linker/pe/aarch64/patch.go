@@ -12,8 +12,8 @@ type arm64Patcher struct {
 	addr64s  []pe.BaseRelocSite
 }
 
-func (p *arm64Patcher) SetCoreBase(v uint64)                { p.coreBase = v }
-func (p *arm64Patcher) BaseRelocSites() []pe.BaseRelocSite   { return p.addr64s }
+func (p *arm64Patcher) SetCoreBase(v uint64)              { p.coreBase = v }
+func (p *arm64Patcher) BaseRelocSites() []pe.BaseRelocSite { return p.addr64s }
 
 func (p *arm64Patcher) Apply(data []byte, off int, relType uint32, P, S uint64, A int64) error {
 	switch relType {
@@ -104,9 +104,6 @@ func (p *arm64Patcher) Apply(data []byte, off int, relType uint32, P, S uint64, 
 }
 
 // ── A64 instruction encoders ─────────────────────────────────────────────────
-// Each of these reads the existing instruction word (to preserve Rd/Rn/Rt and,
-// for LDR/STR, to recover the access-size scale — the relocation itself
-// carries no size information) and rewrites only the immediate field.
 
 func readU32(data []byte, off int) (uint32, error) {
 	if off < 0 || off+4 > len(data) {
@@ -166,9 +163,6 @@ func patchAddImm12(data []byte, off int, imm12 uint64) error {
 	return nil
 }
 
-// patchLdrStrImm12 patches the 12-bit unsigned, size-scaled immediate on an
-// LDR/STR (unsigned offset) instruction. The scale (1/2/4/8/16 bytes) is
-// read from the instruction's own size/opc bits, not from the relocation.
 func patchLdrStrImm12(data []byte, off int, byteOffset uint64) error {
 	insn, err := readU32(data, off)
 	if err != nil {

@@ -49,7 +49,6 @@ const (
 
 // ── Subsystem ─────────────────────────────────────────────────────────────────
 
-// Subsystem mirrors the IMAGE_SUBSYSTEM_* values in winnt.h exactly.
 type Subsystem uint16
 
 const (
@@ -61,8 +60,6 @@ const (
 	SubsystemEFIROM               Subsystem = 13
 )
 
-// defaultSubsystem picks WindowsCUI/EFIApplication from Target.OS, unless
-// overridden by Linker.SetSubsystem.
 func defaultSubsystem(t Target) Subsystem {
 	if t.OS == OSUEFI {
 		return SubsystemEFIApplication
@@ -80,18 +77,7 @@ const (
 	imageDllCharTerminalServerAware = uint16(0x8000)
 )
 
-// ── COFF symbol storage classes ───────────────────────────────────────────────
-
-const (
-	symClassExternal     = uint8(2)
-	symClassStatic       = uint8(3)
-	symClassWeakExternal = uint8(105)
-)
-
 // ── AMD64 COFF relocation types ───────────────────────────────────────────────
-// Exported: this is the single source of truth, used both by object.go's
-// addend-stripping (in-package) and by the x64 subpackage's Patcher (out of
-// package) — no duplicate unexported copies.
 
 const (
 	RelAMD64Absolute = uint32(0x0000)
@@ -111,7 +97,6 @@ const (
 )
 
 // ── ARM64 COFF relocation types ───────────────────────────────────────────────
-// Exported for the same reason as the AMD64 block above.
 
 const (
 	RelARM64Absolute      = uint32(0x0000)
@@ -150,6 +135,8 @@ const (
 	sizeOptHdr64       = 240
 	sizeSectionHdr     = 40
 	sizeImportDesc     = 20
+	sizeExportDir      = 40 // sizeof(IMAGE_EXPORT_DIRECTORY)
+	sizeImportObjHdr   = 20 // sizeof(IMPORT_OBJECT_HEADER)
 	sizeBaseRelocBlock = 8
 )
 
@@ -160,7 +147,6 @@ const (
 	peSectAlign = uint64(0x1000)
 )
 
-// imageBaseFor returns the preferred PE image base for the given output type.
 func imageBaseFor(ot OutputType) uint64 {
 	switch ot {
 	case OutputExec:
@@ -172,7 +158,6 @@ func imageBaseFor(ot OutputType) uint64 {
 	}
 }
 
-// coreBaseVA returns the base VA that AssignLayout used.
 func coreBaseVA(ot OutputType) uint64 {
 	if ot == OutputExec {
 		return 0x400000
@@ -180,5 +165,4 @@ func coreBaseVA(ot OutputType) uint64 {
 	return 0
 }
 
-// toRVA converts a core-layout virtual address to a PE RVA.
 func toRVA(va, base uint64) uint32 { return uint32(va - base) }

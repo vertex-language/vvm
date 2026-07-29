@@ -6,8 +6,8 @@ func init() {
 	pe.RegisterPatcher(pe.ArchARM64EC, func(t pe.Target) pe.Patcher {
 		return &arm64ecPatcher{}
 	})
-	pe.RegisterPLTPatcher(pe.ArchARM64EC, func(t pe.Target) pe.PLTPatcher {
-		return &arm64ecPLTPatcher{}
+	pe.RegisterImportPatcher(pe.ArchARM64EC, func(t pe.Target) pe.ImportPatcher {
+		return &arm64ecImportPatcher{}
 	})
 	pe.RegisterDefaultEntryPoint(pe.ArchARM64EC, func(t pe.Target) string {
 		return "mainCRTStartup"

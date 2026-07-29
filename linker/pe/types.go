@@ -1,14 +1,5 @@
 package pe
 
-// OutputType controls what kind of output binary is produced.
-type OutputType int
-
-const (
-	OutputExec   OutputType = iota // position-dependent executable
-	OutputPIE                      // position-independent executable
-	OutputShared                   // shared library (.dll)
-)
-
 // ── Section ──────────────────────────────────────────────────────────────────
 
 // SectionFlags are format-agnostic section attributes used by the layout engine.
@@ -38,26 +29,22 @@ type ObjectSection struct {
 
 // ── Symbol ───────────────────────────────────────────────────────────────────
 
-// SymBinding mirrors ELF STB_* binding semantics.
-type SymBinding uint8
+// COFFStorageClass mirrors the raw IMAGE_SYM_CLASS_* values from the COFF
+// symbol table directly — decoded once, at parse time, and never translated
+// into an ELF-shaped binding taxonomy (an earlier version of this package
+// used an STB_*-mimicking SymBinding enum; COFF has its own storage classes
+// and there's no reason to launder them through ELF's vocabulary).
+type COFFStorageClass uint8
 
 const (
-	BindLocal  SymBinding = 0
-	BindGlobal SymBinding = 1
-	BindWeak   SymBinding = 2
+	StorageClassExternal     COFFStorageClass = 2   // IMAGE_SYM_CLASS_EXTERNAL
+	StorageClassStatic       COFFStorageClass = 3   // IMAGE_SYM_CLASS_STATIC
+	StorageClassWeakExternal COFFStorageClass = 105 // IMAGE_SYM_CLASS_WEAK_EXTERNAL
 )
 
-// SymType mirrors ELF STT_* type semantics.
-type SymType uint8
-
-const (
-	SymTypeNone    SymType = 0
-	SymTypeObject  SymType = 1
-	SymTypeFunc    SymType = 2
-	SymTypeSection SymType = 3
-	SymTypeFile    SymType = 4
-	SymTypeTLS     SymType = 6
-)
+func (c COFFStorageClass) IsExternal() bool { return c == StorageClassExternal }
+func (c COFFStorageClass) IsWeak() bool     { return c == StorageClassWeakExternal }
+func (c COFFStorageClass) IsLocal() bool    { return !c.IsExternal() && !c.IsWeak() }
 
 // SectionIdx sentinels for ObjectSymbol — negative to distinguish from real indices (≥ 0).
 const (
@@ -68,19 +55,25 @@ const (
 
 // ObjectSymbol is one symbol from an input object's symbol table.
 type ObjectSymbol struct {
-	Name        string
-	Value       uint64
-	Size        uint64
-	Binding     SymBinding
-	Type        SymType
-	Vis         uint8
-	SectionIdx  int
-	SectionName string
+	Name         string
+	Value        uint64
+	Size         uint64
+	StorageClass COFFStorageClass
+	IsFunction   bool // COFF symbol-type field's function bit (0x20), read directly
+	Vis          uint8
+	SectionIdx   int
+	SectionName  string
 }
 
 // ── Relocation ───────────────────────────────────────────────────────────────
 
-// ObjectReloc is one RELA-style relocation entry from an input object.
+// ObjectReloc is one relocation entry from an input object, in COFF's native
+// REL-style shape: the addend lives inline in the instruction bytes at parse
+// time, not as an explicit field the format natively carries (that's a RELA
+// convention — ELF's, not COFF's). Addend below is populated by extracting
+// and zeroing that inline value during parsing (see object.go's
+// coffReadAddend), purely for the patcher's convenience; it is not something
+// COFF stores as a separate field on disk.
 type ObjectReloc struct {
 	TargetSectionIdx int
 	Offset           uint64
@@ -102,25 +95,42 @@ type Object struct {
 	Relocs   []*ObjectReloc
 }
 
-// ── Shared library ───────────────────────────────────────────────────────────
+// ── Shared library (direct DLL parse) ────────────────────────────────────────
 
-// SharedExport is one symbol exported from a dynamic library.
+// SharedExport is one symbol exported from a dynamic library, read from its
+// real export directory.
 type SharedExport struct {
 	Name    string
 	Value   uint64
 	Size    uint64
-	Binding SymBinding
-	Type    SymType
+	Type    ExportKind
 	Version string // export ordinal hint e.g. "@3"; empty if unavailable
 }
 
-// SharedLib is a parsed dynamic library (.dll).
+// ExportKind is deliberately small — COFF/PE doesn't have ELF's STT_* symbol
+// taxonomy, and the only distinction that ever matters here is "is this
+// callable code."
+type ExportKind uint8
+
+const (
+	ExportKindData ExportKind = iota
+	ExportKindFunc
+)
+
+// SharedLib is a parsed dynamic library (.dll), opened directly via
+// AddDynamicLibrary. Its Exports come from the real export directory — that
+// part of parseDLL was always correct. Its ImportName does NOT: earlier
+// versions used the export directory's own self-reported Name field as the
+// string written into an importer's import table (ELF DT_SONAME semantics).
+// PE has no equivalent convention any real linker honors this way, so that
+// field is now purely diagnostic (InternalName) and never drives linking
+// decisions — see shared.go's name-resolution priority.
 type SharedLib struct {
-	Name    string
-	Soname  string
-	Needed  []string
-	Rpaths  []string
-	Exports map[string]*SharedExport
+	Name         string // the filename actually passed to AddDynamicLibrary
+	InternalName string // the DLL's own self-reported export-directory name — informational only
+	ImportName   string // the string written into the import table — see priority order in shared.go
+	Needed       []string
+	Exports      map[string]*SharedExport
 }
 
 // ── Base relocations ─────────────────────────────────────────────────────────

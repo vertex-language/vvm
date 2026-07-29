@@ -19,18 +19,16 @@ func parseObject(name string, data []byte) (obj *Object, err error) {
 
 	r := newReader(data, name)
 
-	machine   := r.u16()
+	machine := r.u16()
 	nSections := int(r.u16())
 	r.skip(4)
-	symOff  := r.u32()
-	nSyms   := int(r.u32())
+	symOff := r.u32()
+	nSyms := int(r.u32())
 	optSize := int(r.u16())
 	r.skip(2)
 
 	switch machine {
 	case imageMachineAMD64, imageMachineARM64, imageMachineI386, imageMachineARMNT:
-		// recognized COFF machines; codegen support is checked separately
-		// via Linker.Supported(), not here — this function only parses.
 	default:
 		return nil, fmt.Errorf("%s: unsupported COFF machine 0x%04X", name, machine)
 	}
@@ -77,7 +75,7 @@ func parseObject(name string, data []byte) (obj *Object, err error) {
 	sections := make([]*ObjectSection, nSections+1)
 	for i, rs := range raws {
 		isBSS := rs.ch&imageSCNCntUninitializedData != 0
-		skip   := coffSkipSection(rs.name, rs.ch)
+		skip := coffSkipSection(rs.name, rs.ch)
 
 		var secData []byte
 		if !isBSS && rs.rawSize > 0 && !skip {
@@ -139,8 +137,8 @@ func parseObject(name string, data []byte) (obj *Object, err error) {
 			if off+10 > len(data) {
 				break
 			}
-			rOff  := binary.LittleEndian.Uint32(data[off:])
-			rSym  := binary.LittleEndian.Uint32(data[off+4:])
+			rOff := binary.LittleEndian.Uint32(data[off:])
+			rSym := binary.LittleEndian.Uint32(data[off+4:])
 			rType := binary.LittleEndian.Uint16(data[off+8:])
 
 			var addend int64
@@ -188,6 +186,9 @@ func coffSecName(b []byte, strtab []byte) string {
 	return strings.TrimRight(s, " ")
 }
 
+// coffParseSymbol reads a raw COFF symbol record and decodes its storage
+// class directly into COFFStorageClass — no intermediate ELF-shaped
+// binding enum, and no ELF-shaped symbol-type enum for the function bit.
 func coffParseSymbol(b []byte, strtab []byte, sections []*ObjectSection, symIdx int) *ObjectSymbol {
 	var symName string
 	if b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 {
@@ -207,59 +208,56 @@ func coffParseSymbol(b []byte, strtab []byte, sections []*ObjectSection, symIdx 
 		symName = s
 	}
 
-	value        := binary.LittleEndian.Uint32(b[8:12])
-	secNumRaw    := binary.LittleEndian.Uint16(b[12:14])
-	symType      := b[14]
-	storageClass := b[16]
+	value := binary.LittleEndian.Uint32(b[8:12])
+	secNumRaw := binary.LittleEndian.Uint16(b[12:14])
+	symType := b[14]
+	rawStorageClass := b[16]
 
-	var binding SymBinding
-	switch storageClass {
-	case symClassExternal:
-		binding = BindGlobal
-	case symClassWeakExternal:
-		binding = BindWeak
+	var storageClass COFFStorageClass
+	switch rawStorageClass {
+	case uint8(StorageClassExternal):
+		storageClass = StorageClassExternal
+	case uint8(StorageClassWeakExternal):
+		storageClass = StorageClassWeakExternal
 	default:
-		binding = BindLocal
+		storageClass = StorageClassStatic
 	}
 
-	var sType SymType
-	if symType == 0x20 {
-		sType = SymTypeFunc
-	}
+	isFunction := symType == 0x20
 
 	var secIdx int
 	var secName string
 
 	switch secNumRaw {
 	case 0:
-		if binding == BindGlobal && value > 0 {
-			secIdx  = SymSecCommon
+		if storageClass.IsExternal() && value > 0 {
+			secIdx = SymSecCommon
 			secName = ""
 		} else {
-			secIdx  = SymSecUndef
+			secIdx = SymSecUndef
 			secName = ""
 		}
 	case 0xFFFF:
-		secIdx  = SymSecAbs
+		secIdx = SymSecAbs
 		secName = "*ABS*"
 	case 0xFFFE:
-		secIdx  = SymSecUndef
+		secIdx = SymSecUndef
 		secName = ""
 	default:
 		sn := int(secNumRaw)
 		if sn > 0 && sn < len(sections) && sections[sn] != nil {
-			secIdx  = sn
+			secIdx = sn
 			secName = sections[sn].Name
 		}
 	}
 
 	return &ObjectSymbol{
-		Name:        symName,
-		Value:       uint64(value),
-		Binding:     binding,
-		Type:        sType,
-		SectionIdx:  secIdx,
-		SectionName: secName,
+		Name:         symName,
+		Value:        uint64(value),
+		StorageClass: storageClass,
+		IsFunction:   isFunction,
+		SectionIdx:   secIdx,
+		SectionName:  secName,
 	}
 }
 
@@ -299,17 +297,6 @@ func coffSkipSection(name string, ch uint32) bool {
 	return false
 }
 
-// coffReadAddend reads and clears an inline addend from the section data.
-//
-// AMD64 and ARM64 COFF relocation type constants share numeric values
-// (e.g. RelAMD64Addr64 == RelARM64Addr32 == 1), so we must branch on
-// machine before switching on relType — a combined switch causes duplicate
-// case compile errors.
-//
-// i686/ARMNT are accepted by the parser (see the machine switch above) but
-// have no addend-extraction logic yet — no codegen backend consumes their
-// relocations until x86/arm subpackages exist, so falling through to the
-// zero-addend default is correct, not a silent bug.
 func coffReadAddend(data []byte, off int, relType uint32, machine uint16) int64 {
 	switch machine {
 	case imageMachineAMD64:

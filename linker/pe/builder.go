@@ -16,10 +16,7 @@ var dosStub = [sizeDOSStub]byte{
 	0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00,
 }
 
-// EmitImports carries the import-directory geometry computed by
-// computeIdataGeom/fillImports so emitPE can populate the IMPORT and IAT
-// data directory entries without recomputing anything. Nil when the link
-// has no PLT symbols (no .idata was ever injected).
+// EmitImports carries the import-directory geometry into emitPE.
 type EmitImports struct {
 	ImportDirRVA  uint32
 	ImportDirSize uint32
@@ -27,11 +24,14 @@ type EmitImports struct {
 	IATSize       uint32
 }
 
-// EmitRequest is everything emitPE needs to serialise a laid-out image. It is
-// built by Linker.Link once AssignLayout, ResolveSymbolAddresses, PatchPLT,
-// fillImports, PatchAll, and (conditionally) buildBaseRelocSection have all
-// run — emitPE itself invents no addresses and performs no further linking
-// work, it only packs file offsets and writes bytes.
+// EmitExports carries the export-directory geometry into emitPE. Nil for
+// any build that isn't OutputShared with an output name set — see
+// Linker.SetOutputName.
+type EmitExports struct {
+	ExportDirRVA  uint32
+	ExportDirSize uint32
+}
+
 type EmitRequest struct {
 	OutputType OutputType
 	Target     Target
@@ -39,12 +39,13 @@ type EmitRequest struct {
 	Entry      string
 	Symtab     *SymbolTable
 	Imports    *EmitImports
+	Exports    *EmitExports
 
-	MajorOSVersion         uint16
-	MinorOSVersion         uint16
-	MajorSubsystemVersion  uint16
-	MinorSubsystemVersion  uint16
-	Subsystem              Subsystem
+	MajorOSVersion        uint16
+	MinorOSVersion        uint16
+	MajorSubsystemVersion uint16
+	MinorSubsystemVersion uint16
+	Subsystem             Subsystem
 }
 
 type peSection struct {
@@ -58,16 +59,11 @@ type peSection struct {
 	chars   uint32
 }
 
-// emitPE serialises an already-laid-out image. It is mechanical: section RVAs
-// come straight from Layout, file offsets are packed in a single pass, and
-// data directories are looked up from placed sections by name. It invents no
-// addresses and emits exactly the set of allocatable sections the layout placed.
 func emitPE(req *EmitRequest) ([]byte, error) {
 	imgBase := imageBaseFor(req.OutputType)
 	coreBase := coreBaseVA(req.OutputType)
 	machine := req.Target.Arch.machine()
 
-	// ── 1. Every allocatable section, in layout-assigned address order ────
 	var sects []*peSection
 	for _, ms := range req.Layout.Sections {
 		if ms.Flags&SecAlloc == 0 {
@@ -90,7 +86,6 @@ func emitPE(req *EmitRequest) ([]byte, error) {
 	}
 	sort.Slice(sects, func(i, j int) bool { return sects[i].rva < sects[j].rva })
 
-	// ── 2. File offsets — the writer's only placement responsibility ──────
 	nSections := len(sects)
 	headerSize := sizeDOSStub + sizePESig + sizeCOFFHdr + sizeOptHdr64 + nSections*sizeSectionHdr
 	fileOff := alignUp32(uint32(headerSize), uint32(peFileAlign))
@@ -103,7 +98,6 @@ func emitPE(req *EmitRequest) ([]byte, error) {
 		fileOff += ps.rawSize
 	}
 
-	// ── 3. Image metrics ──────────────────────────────────────────────────
 	sizeOfHeaders := uint32(alignUp64(uint64(headerSize), peFileAlign))
 	sizeOfImage := sizeOfHeaders
 	for _, ps := range sects {
@@ -139,13 +133,18 @@ func emitPE(req *EmitRequest) ([]byte, error) {
 		}
 	}
 
-	// ── 4. Data directories, derived from placed sections by name ─────────
 	var importDirRVA, importDirSize, iatDirRVA, iatDirSize uint32
 	if req.Imports != nil {
 		importDirRVA = req.Imports.ImportDirRVA
 		importDirSize = req.Imports.ImportDirSize
 		iatDirRVA = req.Imports.IATRVA
 		iatDirSize = req.Imports.IATSize
+	}
+
+	var exportDirRVA, exportDirSize uint32
+	if req.Exports != nil {
+		exportDirRVA = req.Exports.ExportDirRVA
+		exportDirSize = req.Exports.ExportDirSize
 	}
 
 	var exceptionDirRVA, exceptionDirSize, relocDirRVA, relocDirSize uint32
@@ -165,15 +164,11 @@ func emitPE(req *EmitRequest) ([]byte, error) {
 		fileChars |= imageFileDLL
 	}
 
-	// Advertise ASLR only when a .reloc section was actually emitted: a PIE/DLL
-	// claiming HIGH_ENTROPY_VA with no relocation table is rejected by the
-	// loader with ERROR_BAD_EXE_FORMAT.
 	dllChars := imageDllCharNXCompat | imageDllCharTerminalServerAware
 	if req.OutputType != OutputExec && relocPresent {
 		dllChars |= imageDllCharHighEntropyVA | imageDllCharDynamicBase
 	}
 
-	// ── 5. Serialise ──────────────────────────────────────────────────────
 	buf := make([]byte, int(fileOff))
 	put := func(off int, b []byte) { copy(buf[off:], b) }
 	le16 := func(off int, v uint16) { binary.LittleEndian.PutUint16(buf[off:], v) }
@@ -226,6 +221,8 @@ func emitPE(req *EmitRequest) ([]byte, error) {
 	le32(ws+84, dirCount)
 
 	dd := opt + 112
+	le32(dd+dirExport*8, exportDirRVA)
+	le32(dd+dirExport*8+4, exportDirSize)
 	le32(dd+dirImport*8, importDirRVA)
 	le32(dd+dirImport*8+4, importDirSize)
 	le32(dd+dirException*8, exceptionDirRVA)
@@ -261,8 +258,6 @@ func emitPE(req *EmitRequest) ([]byte, error) {
 
 	return buf, nil
 }
-
-// ── helpers ───────────────────────────────────────────────────────────────────
 
 func findSect(sects []*peSection, name string) *peSection {
 	for _, ps := range sects {

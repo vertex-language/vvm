@@ -2,14 +2,12 @@ package pe
 
 import "fmt"
 
-// Piece records where one input section's data lands within a MergedSection.
 type Piece struct {
 	Obj    *Object
 	Sec    *ObjectSection
 	Offset uint64
 }
 
-// MergedSection is the result of combining all same-named input sections.
 type MergedSection struct {
 	Name     string
 	Flags    SectionFlags
@@ -25,13 +23,11 @@ type MergedSection struct {
 	FileOffset uint64
 }
 
-// Layout holds the complete set of merged output sections.
 type Layout struct {
 	Sections  []*MergedSection
 	secByName map[string]*MergedSection
 }
 
-// SectionByName looks up a merged output section by name.
 func (l *Layout) SectionByName(name string) (*MergedSection, bool) {
 	s, ok := l.secByName[name]
 	return s, ok
@@ -39,8 +35,6 @@ func (l *Layout) SectionByName(name string) (*MergedSection, bool) {
 
 const layoutPageSize = uint64(0x1000)
 
-// MergeSections groups input sections from all objects by name and concatenates
-// their data, respecting per-section alignment requirements.
 func MergeSections(objects []*Object) (*Layout, error) {
 	var order []string
 	byKey := make(map[string]*MergedSection)
@@ -95,11 +89,6 @@ func MergeSections(objects []*Object) (*Layout, error) {
 	return &Layout{Sections: sections, secByName: byKey}, nil
 }
 
-// AppendAllocSection places a newly generated allocatable section contiguously
-// after the highest allocated VAddr, using the same page-rounding rule as
-// AssignLayout. It is the single placement primitive for sections whose size
-// is only known after AssignLayout has run (e.g. .reloc, sized post-relocation).
-// File offset is left to the writer, which packs all sections in one pass.
 func (l *Layout) AppendAllocSection(name string, data []byte, flags SectionFlags, align uint64) *MergedSection {
 	var maxEnd uint64
 	for _, ms := range l.Sections {
@@ -123,20 +112,6 @@ func (l *Layout) AppendAllocSection(name string, data []byte, flags SectionFlags
 	return sec
 }
 
-// AssignLayout assigns VAddr and FileOffset to every merged section.
-// Sections are grouped into RX, RO, and RW PT_LOAD segments; non-allocatable
-// sections (debug info etc.) are placed at end-of-file.
-//
-// Virtual addresses tile contiguously from the first section up to
-// SizeOfImage with no gaps: the NT loader validates, during image-section
-// creation, that each section's VirtualAddress equals the previous section's
-// VirtualAddress plus its page-rounded VirtualSize. A hole (an RVA range
-// covered by no section header) is rejected with ERROR_BAD_EXE_FORMAT (Win32
-// 193) before any code runs. We therefore advance vaddr by the page-rounded
-// section size, not the raw size.
-//
-// File offsets are repacked densely by the writer at peFileAlign; ms.FileOffset
-// set here is advisory and never read by the writer.
 func AssignLayout(outputType OutputType, layout *Layout, baseVA uint64) error {
 	if baseVA == 0 && outputType == OutputExec {
 		baseVA = 0x400000
@@ -192,8 +167,6 @@ func AssignLayout(outputType OutputType, layout *Layout, baseVA uint64) error {
 	return nil
 }
 
-// ResolveSymbolAddresses fills in VAddr for every defined symbol using the
-// section addresses assigned by AssignLayout.
 func ResolveSymbolAddresses(symtab *SymbolTable, layout *Layout) error {
 	for _, sym := range symtab.All() {
 		if !sym.IsDefined() || sym.RawSym == nil {

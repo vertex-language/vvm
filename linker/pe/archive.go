@@ -12,7 +12,68 @@ const (
 	arFmag    = "`\n"
 )
 
-// ArchiveMember is one relocatable object inside a static archive.
+// arEntry is one raw, uninterpreted ar-container member: header parsed,
+// name resolved through the long-name table if needed, contents sliced —
+// but nothing about the *meaning* of those bytes decided yet. Shared
+// between ParseArchive (static archives: real COFF object members) and
+// ParseImportLibrary (import libraries: IMPORT_OBJECT_HEADER members) —
+// both are the same ar container on this platform; see README, "Two kinds
+// of .lib." Only the member contents differ, so only the parsers of those
+// contents differ.
+type arEntry struct {
+	hdrOffset int
+	rawName   string
+	data      []byte
+}
+
+// rawArEntries splits an ar (`!<arch>\n`-magic) container into its member
+// entries. It does not interpret any member's contents.
+func rawArEntries(name string, data []byte) ([]arEntry, []byte, error) {
+	if len(data) < len(arMagic) || string(data[:len(arMagic)]) != arMagic {
+		return nil, nil, fmt.Errorf("archive %q: bad magic", name)
+	}
+
+	var entries []arEntry
+	var longNameTable []byte
+
+	pos := len(arMagic)
+	for pos+arHdrSize <= len(data) {
+		hdrOffset := pos
+		hdr := data[pos : pos+arHdrSize]
+
+		if string(hdr[58:60]) != arFmag {
+			return nil, nil, fmt.Errorf("archive %q: bad ar_fmag at offset 0x%x", name, pos)
+		}
+
+		rawName := strings.TrimRight(string(hdr[0:16]), " ")
+		sizeStr := strings.TrimRight(string(hdr[48:58]), " ")
+		size, err := strconv.Atoi(sizeStr)
+		if err != nil || size < 0 {
+			return nil, nil, fmt.Errorf("archive %q: invalid ar_size %q at 0x%x", name, sizeStr, pos)
+		}
+
+		dataStart := pos + arHdrSize
+		dataEnd := dataStart + size
+		if dataEnd > len(data) {
+			return nil, nil, fmt.Errorf("archive %q: member data out of bounds at 0x%x", name, pos)
+		}
+
+		memberData := data[dataStart:dataEnd]
+		if rawName == "//" {
+			longNameTable = make([]byte, size)
+			copy(longNameTable, memberData)
+		}
+		entries = append(entries, arEntry{hdrOffset, rawName, memberData})
+		pos = dataEnd
+		if pos%2 != 0 {
+			pos++
+		}
+	}
+	return entries, longNameTable, nil
+}
+
+// ── Static archives ──────────────────────────────────────────────────────────
+
 type ArchiveMember struct {
 	Name  string
 	data  []byte
@@ -20,7 +81,6 @@ type ArchiveMember struct {
 	parse func(name string, data []byte) (*Object, error)
 }
 
-// Object parses and returns the Object for this member. Result is cached.
 func (m *ArchiveMember) Object() (*Object, error) {
 	if m.obj != nil {
 		return m.obj, nil
@@ -33,15 +93,12 @@ func (m *ArchiveMember) Object() (*Object, error) {
 	return obj, nil
 }
 
-// Archive is a parsed static archive (.a file).
 type Archive struct {
 	Name     string
 	Members  []*ArchiveMember
-	symIndex map[string]int // global symbol name → Members index
+	symIndex map[string]int
 }
 
-// MemberForSymbol returns the member that provides a global definition for sym,
-// or nil if the archive has no such definition.
 func (a *Archive) MemberForSymbol(sym string) *ArchiveMember {
 	if idx, ok := a.symIndex[sym]; ok {
 		return a.Members[idx]
@@ -49,60 +106,19 @@ func (a *Archive) MemberForSymbol(sym string) *ArchiveMember {
 	return nil
 }
 
-// ParseArchive parses a GNU/SysV ar archive.
-// parseObject is called lazily when a member is materialised into an *Object.
+// ParseArchive parses a static archive (real COFF object members). For
+// import libraries, see ParseImportLibrary in importlib.go instead —
+// they share this same container format but not this parser, since their
+// members aren't COFF objects at all.
 func ParseArchive(name string, data []byte, parseObject func(string, []byte) (*Object, error)) (*Archive, error) {
-	if len(data) < len(arMagic) || string(data[:len(arMagic)]) != arMagic {
-		return nil, fmt.Errorf("archive %q: bad magic", name)
+	entries, longNameTable, err := rawArEntries(name, data)
+	if err != nil {
+		return nil, err
 	}
 
 	ar := &Archive{Name: name, symIndex: make(map[string]int)}
-
-	type rawEntry struct {
-		hdrOffset  int
-		rawName    string
-		memberData []byte
-	}
-
-	var entries []rawEntry
-	var longNameTable []byte
-
-	pos := len(arMagic)
-	for pos+arHdrSize <= len(data) {
-		hdrOffset := pos
-		hdr := data[pos : pos+arHdrSize]
-
-		if string(hdr[58:60]) != arFmag {
-			return nil, fmt.Errorf("archive %q: bad ar_fmag at offset 0x%x", name, pos)
-		}
-
-		rawName := strings.TrimRight(string(hdr[0:16]), " ")
-		sizeStr := strings.TrimRight(string(hdr[48:58]), " ")
-		size, err := strconv.Atoi(sizeStr)
-		if err != nil || size < 0 {
-			return nil, fmt.Errorf("archive %q: invalid ar_size %q at 0x%x", name, sizeStr, pos)
-		}
-
-		dataStart := pos + arHdrSize
-		dataEnd := dataStart + size
-		if dataEnd > len(data) {
-			return nil, fmt.Errorf("archive %q: member data out of bounds at 0x%x", name, pos)
-		}
-
-		memberData := data[dataStart:dataEnd]
-		if rawName == "//" {
-			longNameTable = make([]byte, size)
-			copy(longNameTable, memberData)
-		}
-		entries = append(entries, rawEntry{hdrOffset, rawName, memberData})
-		pos = dataEnd
-		if pos%2 != 0 {
-			pos++
-		}
-	}
-
-	// Pass 1: build Members and hdrOffset→index map.
 	offsetToMemberIdx := make(map[int]int)
+
 	for _, e := range entries {
 		switch e.rawName {
 		case "/", "/SYM64/", "__.SYMDEF", "__.SYMDEF_64", "//":
@@ -114,24 +130,18 @@ func ParseArchive(name string, data []byte, parseObject func(string, []byte) (*O
 		}
 		idx := len(ar.Members)
 		offsetToMemberIdx[e.hdrOffset] = idx
-		ar.Members = append(ar.Members, &ArchiveMember{
-			Name:  n,
-			data:  e.memberData,
-			parse: parseObject,
-		})
+		ar.Members = append(ar.Members, &ArchiveMember{Name: n, data: e.data, parse: parseObject})
 	}
 
-	// Pass 2: parse symbol index.
 	for _, e := range entries {
 		switch e.rawName {
 		case "/", "__.SYMDEF":
-			arParseSymIndex32(e.memberData, ar, offsetToMemberIdx)
+			arParseSymIndex32(e.data, ar, offsetToMemberIdx)
 		case "/SYM64/", "__.SYMDEF_64":
-			arParseSymIndex64(e.memberData, ar, offsetToMemberIdx)
+			arParseSymIndex64(e.data, ar, offsetToMemberIdx)
 		}
 	}
 
-	// Fallback: exhaustive scan when no symbol table is present.
 	if len(ar.symIndex) == 0 {
 		for idx, m := range ar.Members {
 			obj, err := m.Object()
@@ -142,7 +152,7 @@ func ParseArchive(name string, data []byte, parseObject func(string, []byte) (*O
 				if sym == nil || sym.Name == "" {
 					continue
 				}
-				if sym.Binding != BindGlobal && sym.Binding != BindWeak {
+				if !sym.StorageClass.IsExternal() && !sym.StorageClass.IsWeak() {
 					continue
 				}
 				if sym.SectionIdx == SymSecUndef {

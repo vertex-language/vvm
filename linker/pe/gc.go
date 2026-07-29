@@ -1,16 +1,10 @@
 package pe
 
-// GC performs dead-section elimination by traversing the reachability graph
-// from the entry point (executables) or all exported symbols (shared libraries).
-// Unreachable SHF_ALLOC sections are removed before address assignment.
 func GC(layout *Layout, symtab *SymbolTable, objects []*Object, outputType OutputType, entry string) {
 	var roots []string
 	if outputType == OutputShared {
-		for _, sym := range symtab.All() {
-			if sym.IsDefined() && !sym.Weak && sym.RawSym != nil &&
-				sym.RawSym.Binding == BindGlobal && sym.RawSym.SectionName != "" {
-				roots = append(roots, sym.Name)
-			}
+		for _, sym := range ExportCandidates(symtab) {
+			roots = append(roots, sym.Name)
 		}
 	} else if entry != "" {
 		roots = []string{entry}
@@ -97,9 +91,6 @@ func GC(layout *Layout, symtab *SymbolTable, objects []*Object, outputType Outpu
 
 	kept := layout.Sections[:0]
 	for _, ms := range layout.Sections {
-		// Keep non-allocatable sections (debug info etc.) and reachable sections
-		// unconditionally. Also keep sections that the OS loader requires but
-		// that code never directly references via relocations.
 		if ms.Flags&SecAlloc == 0 || reachable[ms] || isEssentialSection(ms.Name) {
 			kept = append(kept, ms)
 		}
@@ -112,12 +103,9 @@ func GC(layout *Layout, symtab *SymbolTable, objects []*Object, outputType Outpu
 	}
 }
 
-// isEssentialSection reports whether a section must survive GC regardless of
-// reachability. These sections are not referenced by code relocations but are
-// required by the OS loader or debugger at runtime.
 func isEssentialSection(name string) bool {
 	switch name {
-	case ".pdata", ".xdata": // Windows x64 structured exception handling (SEH)
+	case ".pdata", ".xdata":
 		return true
 	}
 	return false

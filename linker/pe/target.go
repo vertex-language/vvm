@@ -5,8 +5,6 @@ import (
 	"strings"
 )
 
-// Arch identifies a target CPU architecture, spelled the way clang-cl
-// / rustc spell LLVM triples (aarch64, not arm64).
 type Arch uint8
 
 const (
@@ -34,9 +32,6 @@ func (a Arch) String() string {
 	}
 }
 
-// machine returns the final-image IMAGE_FILE_MACHINE_* value for a. Note
-// arm64ec collapses to AMD64 here — see README "arm64ec is not a distinct
-// final-image machine type".
 func (a Arch) machine() uint16 {
 	switch a {
 	case ArchX86_64, ArchARM64EC:
@@ -70,7 +65,6 @@ func (o OS) String() string {
 	}
 }
 
-// ABI is meaningless (zero value) under OSUEFI.
 type ABI uint8
 
 const (
@@ -90,16 +84,12 @@ func (a ABI) String() string {
 	}
 }
 
-// Target is the arch-pc-windows-abi / arch-unknown-uefi triple this
-// package's Linker builds for.
 type Target struct {
 	Arch Arch
 	OS   OS
 	ABI  ABI
 }
 
-// ParseTarget parses an LLVM-style triple, e.g. "aarch64-pc-windows-msvc"
-// or "x86_64-unknown-uefi".
 func ParseTarget(s string) (Target, error) {
 	parts := strings.Split(s, "-")
 	if len(parts) < 2 {
@@ -148,7 +138,6 @@ func parseArch(s string) (Arch, error) {
 	}
 }
 
-// String round-trips ParseTarget.
 func (t Target) String() string {
 	if t.OS == OSUEFI {
 		return fmt.Sprintf("%s-unknown-uefi", t.Arch)
@@ -156,8 +145,6 @@ func (t Target) String() string {
 	return fmt.Sprintf("%s-pc-windows-%s", t.Arch, t.ABI)
 }
 
-// Valid reports whether t is a real arch×os×abi combination. It does not
-// check whether a codegen backend is registered for it — see Linker.Supported.
 func (t Target) Valid() error {
 	switch t.OS {
 	case OSUEFI:

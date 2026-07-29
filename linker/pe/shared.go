@@ -6,7 +6,21 @@ import (
 	"strings"
 )
 
-func parseDLL(name string, data []byte) (lib *SharedLib, err error) {
+// parseDLL reads a real DLL's export directory for its symbol list (that
+// part is unchanged — a DLL's exports genuinely live there) and resolves
+// the import-table string via a fixed priority, never trusting the DLL's
+// own self-reported export-directory Name for that decision:
+//
+//  1. importNameOverride, if the caller supplied one (AddDynamicLibrary's
+//     WithImportName option).
+//  2. name — the literal filename/string the caller passed to
+//     AddDynamicLibrary.
+//
+// The export directory's own Name field is still read and kept as
+// InternalName for diagnostics, but it is never consulted here — that
+// was the root of the v1 bug where a target file's internal self-report
+// silently overrode the name actually requested.
+func parseDLL(name string, data []byte, importNameOverride string) (lib *SharedLib, err error) {
 	defer func() {
 		if p := recover(); p != nil {
 			err = fmt.Errorf("%s: DLL parse panic: %v", name, p)
@@ -33,10 +47,10 @@ func parseDLL(name string, data []byte) (lib *SharedLib, err error) {
 		return nil, fmt.Errorf("%s: bad PE signature", name)
 	}
 
-	machine   := r.u16()
+	machine := r.u16()
 	nSections := int(r.u16())
 	r.skip(4 + 4 + 4)
-	optSize   := int(r.u16())
+	optSize := int(r.u16())
 	r.skip(2)
 
 	switch machine {
@@ -56,10 +70,10 @@ func parseDLL(name string, data []byte) (lib *SharedLib, err error) {
 	r.skip(22)
 	imageBase := r.u64()
 	r.skip(4 + 4)
-	r.skip(2+2+2+2+2+2)
+	r.skip(2 + 2 + 2 + 2 + 2 + 2)
 	r.skip(4 + 4 + 4 + 4)
 	r.skip(2 + 2)
-	r.skip(8+8+8+8)
+	r.skip(8 + 8 + 8 + 8)
 	r.skip(4)
 	numDirs := int(r.u32())
 	_ = optStart
@@ -67,7 +81,7 @@ func parseDLL(name string, data []byte) (lib *SharedLib, err error) {
 	type dataDir struct{ rva, size uint32 }
 	dirs := make([]dataDir, numDirs)
 	for i := range dirs {
-		dirs[i].rva  = r.u32()
+		dirs[i].rva = r.u32()
 		dirs[i].size = r.u32()
 	}
 
@@ -109,29 +123,34 @@ func parseDLL(name string, data []byte) (lib *SharedLib, err error) {
 		return string(data[start:off])
 	}
 
-	soname := name
+	internalName := "" // informational only — see doc comment above
 	if numDirs > dirExport && dirs[dirExport].rva != 0 {
-		if eoff, ok := rvaToOff(dirs[dirExport].rva); ok && eoff+40 <= len(data) {
+		if eoff, ok := rvaToOff(dirs[dirExport].rva); ok && eoff+sizeExportDir <= len(data) {
 			nameRVA := binary.LittleEndian.Uint32(data[eoff+12:])
 			if noff, ok := rvaToOff(nameRVA); ok {
-				soname = readCStr(noff)
+				internalName = readCStr(noff)
 			}
 		}
+	}
+
+	importName := importNameOverride
+	if importName == "" {
+		importName = name
 	}
 
 	exports := make(map[string]*SharedExport)
 	if numDirs > dirExport && dirs[dirExport].rva != 0 {
 		eoff, ok := rvaToOff(dirs[dirExport].rva)
-		if ok && eoff+40 <= len(data) {
-			ordBase      := binary.LittleEndian.Uint32(data[eoff+16:])
-			nFuncs       := int(binary.LittleEndian.Uint32(data[eoff+20:]))
-			nNames       := int(binary.LittleEndian.Uint32(data[eoff+24:]))
-			rvaFuncs     := binary.LittleEndian.Uint32(data[eoff+28:])
-			rvaNames     := binary.LittleEndian.Uint32(data[eoff+32:])
-			rvaOrdinals  := binary.LittleEndian.Uint32(data[eoff+36:])
+		if ok && eoff+sizeExportDir <= len(data) {
+			ordBase := binary.LittleEndian.Uint32(data[eoff+16:])
+			nFuncs := int(binary.LittleEndian.Uint32(data[eoff+20:]))
+			nNames := int(binary.LittleEndian.Uint32(data[eoff+24:]))
+			rvaFuncs := binary.LittleEndian.Uint32(data[eoff+28:])
+			rvaNames := binary.LittleEndian.Uint32(data[eoff+32:])
+			rvaOrdinals := binary.LittleEndian.Uint32(data[eoff+36:])
 
-			funcsOff, funcsOK   := rvaToOff(rvaFuncs)
-			namesOff, namesOK   := rvaToOff(rvaNames)
+			funcsOff, funcsOK := rvaToOff(rvaFuncs)
+			namesOff, namesOK := rvaToOff(rvaNames)
 			ordinalsOff, ordsOK := rvaToOff(rvaOrdinals)
 
 			if funcsOK && namesOK && ordsOK {
@@ -157,8 +176,7 @@ func parseDLL(name string, data []byte) (lib *SharedLib, err error) {
 					exports[fnName] = &SharedExport{
 						Name:    fnName,
 						Value:   imageBase + uint64(fnRVA),
-						Binding: BindGlobal,
-						Type:    SymTypeFunc,
+						Type:    ExportKindFunc,
 						Version: fmt.Sprintf("@%d", int(ordBase)+ordIdx),
 					}
 				}
@@ -188,10 +206,10 @@ func parseDLL(name string, data []byte) (lib *SharedLib, err error) {
 	}
 
 	return &SharedLib{
-		Name:    name,
-		Soname:  soname,
-		Needed:  needed,
-		Rpaths:  nil,
-		Exports: exports,
+		Name:         name,
+		InternalName: internalName,
+		ImportName:   importName,
+		Needed:       needed,
+		Exports:      exports,
 	}, nil
 }

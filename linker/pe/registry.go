@@ -2,22 +2,23 @@ package pe
 
 import "sync"
 
-// PatcherFactory builds the relocation Patcher for a given target.
 type PatcherFactory func(t Target) Patcher
-
-// PLTPatcherFactory builds the import-thunk PLTPatcher for a given target.
-type PLTPatcherFactory func(t Target) PLTPatcher
+type ImportPatcherFactory func(t Target) ImportPatcher
 
 var (
-	regMu           sync.RWMutex
-	patcherReg      = map[Arch]PatcherFactory{}
-	pltPatcherReg   = map[Arch]PLTPatcherFactory{}
-	entryPointReg   = map[Arch]func(t Target) string{}
-	searchDirsReg   = map[ABI]func() []string{}
+	regMu             sync.RWMutex
+	patcherReg        = map[Arch]PatcherFactory{}
+	importPatcherReg  = map[Arch]ImportPatcherFactory{}
+	entryPointReg     = map[Arch]func(t Target) string{}
+	searchDirsReg     = map[ABI]func() []string{}
 )
 
-func RegisterPatcher(a Arch, f PatcherFactory)             { regMu.Lock(); patcherReg[a] = f; regMu.Unlock() }
-func RegisterPLTPatcher(a Arch, f PLTPatcherFactory)        { regMu.Lock(); pltPatcherReg[a] = f; regMu.Unlock() }
+func RegisterPatcher(a Arch, f PatcherFactory) { regMu.Lock(); patcherReg[a] = f; regMu.Unlock() }
+func RegisterImportPatcher(a Arch, f ImportPatcherFactory) {
+	regMu.Lock()
+	importPatcherReg[a] = f
+	regMu.Unlock()
+}
 func RegisterDefaultEntryPoint(a Arch, f func(t Target) string) {
 	regMu.Lock()
 	entryPointReg[a] = f
@@ -35,9 +36,9 @@ func LookupPatcher(t Target) (Patcher, bool) {
 	return f(t), true
 }
 
-func LookupPLTPatcher(t Target) (PLTPatcher, bool) {
+func LookupImportPatcher(t Target) (ImportPatcher, bool) {
 	regMu.RLock()
-	f, ok := pltPatcherReg[t.Arch]
+	f, ok := importPatcherReg[t.Arch]
 	regMu.RUnlock()
 	if !ok {
 		return nil, false
@@ -67,10 +68,7 @@ func lookupSearchDirs(abi ABI) []string {
 
 // SearchDirs returns the registered DLL search directories for abi, or nil
 // if none are registered. Exported so vvm's own link-dependency resolver
-// (linkdeps.go's resolvePELinkDependencies) can locate real system DLLs on
-// disk — this package validates a `link shared` declaration against a real
-// parsed export directory (see shared.go's parseDLL), so it needs a real
-// file path to read, not just a name.
+// can locate real system DLLs on disk for AddDynamicLibrary.
 func SearchDirs(abi ABI) []string {
 	return lookupSearchDirs(abi)
 }

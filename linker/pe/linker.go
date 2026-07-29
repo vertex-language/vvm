@@ -4,28 +4,42 @@ import (
 	"fmt"
 )
 
+// DynLibOption configures a single AddDynamicLibrary call.
+type DynLibOption func(*dynLibOptions)
+
+type dynLibOptions struct {
+	importName string
+}
+
+// WithImportName pins the string written into the import table for this
+// DLL, overriding the default (the literal name/filename passed to
+// AddDynamicLibrary). Never derived from the DLL's own export-directory
+// self-report — see shared.go.
+func WithImportName(name string) DynLibOption {
+	return func(o *dynLibOptions) { o.importName = name }
+}
+
 // Linker constructs the PE32+ link pipeline.
 type Linker struct {
 	target      Target
 	outputType  OutputType
 	entry       string
 	subsystem   Subsystem
-	dllName     string
+	outputName  string // used as the export directory's own Name, for OutputShared builds
 	majorOS     uint16
 	minorOS     uint16
 	majorSubsys uint16
 	minorSubsys uint16
 	libPaths    []string
 
-	objects        []*Object
-	archives       []*Archive
-	shared         []*SharedLib
-	explicitNeeded []string
+	objects    []*Object
+	archives   []*Archive
+	importLibs []*ImportLibrary
+	shared     []*SharedLib
 
 	symtab *SymbolTable
 }
 
-// NewLinker initializes a PE32+ linker for the given target with standard defaults.
 func NewLinker(t Target) *Linker {
 	l := &Linker{
 		target:      t,
@@ -45,28 +59,23 @@ func NewLinker(t Target) *Linker {
 	return l
 }
 
-// SetOutputType sets the kind of binary to produce (executable, PIE, or shared).
 func (l *Linker) SetOutputType(ot OutputType) { l.outputType = ot }
+func (l *Linker) SetEntryPoint(entry string)   { l.entry = entry }
+func (l *Linker) SetSubsystem(sub Subsystem)   { l.subsystem = sub }
 
-// SetEntryPoint sets the entry symbol name.
-func (l *Linker) SetEntryPoint(entry string) { l.entry = entry }
+// SetOutputName sets the name written into this image's own export
+// directory (only meaningful for OutputShared builds). Supersedes v1's
+// SetDLLName, which was stored but never reached EmitRequest — this one
+// actually flows into emitPE.
+func (l *Linker) SetOutputName(name string) { l.outputName = name }
 
-// SetSubsystem sets the Windows/UEFI subsystem.
-func (l *Linker) SetSubsystem(sub Subsystem) { l.subsystem = sub }
-
-// SetDLLName records the DLL name, though currently unused in the final export directory.
-func (l *Linker) SetDLLName(name string) { l.dllName = name }
-
-// SetMinOSVersion updates both OS and Subsystem versions simultaneously.
 func (l *Linker) SetMinOSVersion(major, minor uint16) {
 	l.majorOS, l.minorOS = major, minor
 	l.majorSubsys, l.minorSubsys = major, minor
 }
 
-// AddLibraryPath adds a directory to the library search path.
 func (l *Linker) AddLibraryPath(path string) { l.libPaths = append(l.libPaths, path) }
 
-// AddObject parses and adds a COFF object file to the link.
 func (l *Linker) AddObject(name string, data []byte) error {
 	obj, err := parseObject(name, data)
 	if err != nil {
@@ -76,7 +85,7 @@ func (l *Linker) AddObject(name string, data []byte) error {
 	return nil
 }
 
-// AddArchive parses and adds a static archive (.lib/.a) to the link.
+// AddArchive parses and adds a static archive (real COFF object members).
 func (l *Linker) AddArchive(name string, data []byte) error {
 	ar, err := ParseArchive(name, data, parseObject)
 	if err != nil {
@@ -86,9 +95,29 @@ func (l *Linker) AddArchive(name string, data []byte) error {
 	return nil
 }
 
-// AddDynamicLibrary parses and adds a shared library (.dll) to the link.
-func (l *Linker) AddDynamicLibrary(name string, data []byte) error {
-	lib, err := parseDLL(name, data)
+// AddImportLibrary parses and adds a short-format import library — the
+// .lib normally generated alongside a DLL. Unlike AddDynamicLibrary, the
+// DLL doesn't need to be present: the library carries author-chosen DLL
+// names for each symbol.
+func (l *Linker) AddImportLibrary(name string, data []byte) error {
+	lib, err := ParseImportLibrary(name, data)
+	if err != nil {
+		return err
+	}
+	l.importLibs = append(l.importLibs, lib)
+	return nil
+}
+
+// AddDynamicLibrary parses a real DLL directly: its export directory
+// supplies the symbol list, and (per WithImportName, or else the literal
+// name argument) the import-table string — never the export directory's
+// own self-reported name.
+func (l *Linker) AddDynamicLibrary(name string, data []byte, opts ...DynLibOption) error {
+	var o dynLibOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	lib, err := parseDLL(name, data, o.importName)
 	if err != nil {
 		return err
 	}
@@ -96,28 +125,21 @@ func (l *Linker) AddDynamicLibrary(name string, data []byte) error {
 	return nil
 }
 
-// AddDLLNeeded explicitly adds a required DLL name to the import directory.
-func (l *Linker) AddDLLNeeded(name string) {
-	l.explicitNeeded = append(l.explicitNeeded, name)
-}
-
-// Supported reports whether a codegen backend is registered for the linker's target.
 func (l *Linker) Supported() bool {
 	_, patcherOk := LookupPatcher(l.target)
 	return patcherOk
 }
 
-// Link runs the end-to-end linker pipeline and returns the serialized PE32+ image.
 func (l *Linker) Link() ([]byte, error) {
 	if !l.Supported() {
 		return nil, fmt.Errorf("no codegen backend registered for %s", l.target)
 	}
 
-	// 1. walkSharedDeps
-	// Skipped here as it requires filesystem traversal outside package scope; relies on explicit AddDynamicLibrary calls for now.
+	// 1. walkSharedDeps — not implemented; relies on explicit
+	// AddDynamicLibrary/AddImportLibrary/AddArchive calls.
 
 	// 2. SymbolTable.Ingest
-	if err := l.symtab.Ingest(l.objects, l.archives, l.shared); err != nil {
+	if err := l.symtab.Ingest(l.objects, l.archives, l.importLibs, l.shared); err != nil {
 		return nil, err
 	}
 
@@ -127,34 +149,44 @@ func (l *Linker) Link() ([]byte, error) {
 		return nil, err
 	}
 
-	// 4. CollectPLTSymbols
-	pltSyms := CollectPLTSymbols(l.symtab, l.objects)
+	// 4. CollectImportSymbols
+	importSyms := CollectImportSymbols(l.symtab, l.objects)
 
-	// 5. GC (Dead-section elimination)
+	// 5. GC (dead-section elimination)
 	GC(layout, l.symtab, l.objects, l.outputType, l.entry)
 
-	// 6. [If PLT] computeIATLayout, InjectPLTSections, computeIdataGeom, inject .idata
+	// 6. [If imports] computeIATLayout, InjectImportSections, computeIdataGeom, inject .idata
 	var iatLayout *IATLayout
 	var iGeom idataGeom
 	var idataSec *MergedSection
-	hasPLT := len(pltSyms) > 0
+	hasImports := len(importSyms) > 0
 
-	if hasPLT {
-		// The slot layout is computed first: InjectPLTSections needs its
-		// totalGOTSlots() to size .got.plt, since the IAT carries a
-		// null-terminator slot per DLL beyond the imports themselves.
-		iatLayout = computeIATLayout(pltSyms)
-		InjectPLTSections(layout, pltSyms, iatLayout)
+	if hasImports {
+		iatLayout = computeIATLayout(importSyms)
+		InjectImportSections(layout, importSyms, iatLayout)
 
-		var pltNames []string
-		for _, s := range pltSyms {
-			pltNames = append(pltNames, s.Name)
+		var importNames []string
+		for _, s := range importSyms {
+			importNames = append(importNames, s.Name)
 		}
-
-		iGeom = computeIdataGeom(l.symtab, pltNames, iatLayout)
+		iGeom = computeIdataGeom(l.symtab, importNames, iatLayout)
 
 		idataFlags := SecAlloc | SecWrite
 		idataSec = layout.AppendAllocSection(".idata", make([]byte, iGeom.size()), idataFlags, 4)
+	}
+
+	// 6b. [If exporting] compute the export directory's geometry — same
+	// "append after GC, before AssignLayout" pattern as .idata above.
+	var eGeom exportGeom
+	var edataSec *MergedSection
+	hasExports := l.outputType == OutputShared && l.outputName != ""
+	if hasExports {
+		var syms []ExportSymbol
+		for _, c := range ExportCandidates(l.symtab) {
+			syms = append(syms, ExportSymbol{Name: c.Name, Sym: c})
+		}
+		eGeom = computeExportGeom(l.outputName, syms)
+		edataSec = layout.AppendAllocSection(".edata", make([]byte, eGeom.total), SecAlloc, 4)
 	}
 
 	// 7. AssignLayout
@@ -168,29 +200,23 @@ func (l *Linker) Link() ([]byte, error) {
 		return nil, err
 	}
 
-	// 9. [If PLT] PatchPLT & fillImports
+	// 9. [If imports] PatchImportThunks & fillImports
 	var imports *EmitImports
-	if hasPLT {
-		pp, _ := LookupPLTPatcher(l.target)
+	if hasImports {
+		pp, _ := LookupImportPatcher(l.target)
 		if setter, ok := pp.(IATLayoutSetter); ok {
 			setter.SetIATLayout(iatLayout)
 		}
 
-		if err := PatchPLT(pp, layout, pltSyms); err != nil {
+		if err := PatchImportThunks(pp, layout, importSyms); err != nil {
 			return nil, err
 		}
 
-		gotSec, _ := layout.SectionByName(".got.plt")
+		iatSec, _ := layout.SectionByName(".iat")
 		idataRVA := toRVA(idataSec.VAddr, baseVA)
-		gotRVA := toRVA(gotSec.VAddr, baseVA)
+		iatRVA := toRVA(iatSec.VAddr, baseVA)
 
-		// The IAT proper begins past .got.plt's reserved header slots. Every
-		// consumer of this address — each descriptor's FirstThunk, the IAT
-		// data directory, and the PLT thunks' indirect jump targets — must
-		// agree on it, so it's computed once here and passed down.
-		iatRVA := gotRVA + uint32(GOTReserved*GOTEntrySize)
-
-		dirSz, iatSz := fillImports(idataSec.Data, gotSec.Data, idataRVA, iatRVA, iGeom)
+		dirSz, iatSz := fillImports(idataSec.Data, iatSec.Data, idataRVA, iatRVA, iGeom)
 
 		imports = &EmitImports{
 			ImportDirRVA:  idataRVA,
@@ -198,6 +224,14 @@ func (l *Linker) Link() ([]byte, error) {
 			IATRVA:        iatRVA,
 			IATSize:       iatSz,
 		}
+	}
+
+	// 9b. [If exporting] fillExportDirectory
+	var exports *EmitExports
+	if hasExports {
+		edataRVA := toRVA(edataSec.VAddr, baseVA)
+		fillExportDirectory(edataSec.Data, edataRVA, baseVA, l.outputName, eGeom)
+		exports = &EmitExports{ExportDirRVA: edataRVA, ExportDirSize: uint32(eGeom.total)}
 	}
 
 	// 10. PatchAll
@@ -230,6 +264,7 @@ func (l *Linker) Link() ([]byte, error) {
 		Entry:                 l.entry,
 		Symtab:                l.symtab,
 		Imports:               imports,
+		Exports:               exports,
 		MajorOSVersion:        l.majorOS,
 		MinorOSVersion:        l.minorOS,
 		MajorSubsystemVersion: l.majorSubsys,

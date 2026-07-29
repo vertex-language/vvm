@@ -2,44 +2,26 @@ package pe
 
 import "fmt"
 
-// Patcher applies a single relocation to a byte slice.
-//
-//   data    — the merged output section's data (writable)
-//   off     — byte offset within data of the storage unit to patch
-//   relType — arch+format-specific relocation type
-//   P       — virtual address of the storage unit being patched
-//   S       — virtual address of the referenced symbol
-//   A       — explicit addend
 type Patcher interface {
 	Apply(data []byte, off int, relType uint32, P, S uint64, A int64) error
 }
 
-// BaseRelocCollector is an optional extension of Patcher that exposes the set
-// of absolute-address writes performed during PatchAll.
 type BaseRelocCollector interface {
 	BaseRelocSites() []BaseRelocSite
 }
 
-// CoreBaseSetter is an optional extension a Patcher can implement to receive
-// the output type's core layout base VA after construction. That value
-// (0x400000 for OutputExec, 0 otherwise) is a per-link property, not a
-// per-arch one, so it can't be threaded through the registry's
-// func(Target) Patcher factory signature — Linker.Link injects it via this
-// interface immediately after building the patcher.
 type CoreBaseSetter interface {
 	SetCoreBase(uint64)
 }
 
-// IATLayoutSetter is the PLTPatcher analogue of CoreBaseSetter: the IAT slot
-// layout is computed at Link() time from the actual set of PLT symbols
-// gathered for this link, so — like CoreBaseSetter — it can't flow through
-// the factory's Target parameter alone.
+// IATLayoutSetter lets an ImportPatcher receive the computed IAT slot
+// layout at Link() time — it's a genuine per-link property (depends on the
+// actual set of imported symbols this link gathered), same reasoning as
+// CoreBaseSetter.
 type IATLayoutSetter interface {
 	SetIATLayout(*IATLayout)
 }
 
-// PatchAll applies every relocation from every input object to the merged
-// output section data. Must be called after AssignLayout and ResolveSymbolAddresses.
 func PatchAll(layout *Layout, symtab *SymbolTable, objects []*Object, patcher Patcher) error {
 	for _, obj := range objects {
 		for _, rel := range obj.Relocs {
@@ -104,9 +86,7 @@ func resolveRelocSym(layout *Layout, rel *ObjectReloc, obj *Object, symtab *Symb
 		return 0, nil
 	}
 
-	// Local symbols are not in the global symbol table — resolve them
-	// directly through the layout using their section and value offset.
-	if raw.Binding == BindLocal {
+	if raw.StorageClass.IsLocal() {
 		if raw.SectionName == "" {
 			return int64(raw.Value), nil
 		}
@@ -124,13 +104,13 @@ func resolveRelocSym(layout *Layout, rel *ObjectReloc, obj *Object, symtab *Symb
 
 	sym := symtab.Lookup(raw.Name)
 	if sym == nil {
-		if raw.Binding == BindWeak {
+		if raw.StorageClass.IsWeak() {
 			return 0, nil
 		}
 		return 0, fmt.Errorf("undefined symbol %q", raw.Name)
 	}
 	switch sym.Kind {
-	case kindDefined, kindCommon, kindShared:
+	case kindDefined, kindCommon, kindShared, kindImport:
 		return int64(sym.VAddr), nil
 	case kindUndefined:
 		if sym.Weak {

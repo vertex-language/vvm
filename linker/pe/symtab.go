@@ -7,12 +7,12 @@ type symKind int
 const (
 	kindUndefined symKind = iota
 	kindLazy
-	kindShared
+	kindImport // sourced from an AddImportLibrary short-format descriptor
+	kindShared // sourced from a directly-parsed DLL via AddDynamicLibrary
 	kindCommon
 	kindDefined
 )
 
-// TableSymbol is the linker's global view of one symbol.
 type TableSymbol struct {
 	Name string
 	Kind symKind
@@ -24,23 +24,24 @@ type TableSymbol struct {
 	Archive *Archive
 	Member  *ArchiveMember
 
-	Lib    *SharedLib
+	Lib    *SharedLib // set when Kind == kindShared
 	Export *SharedExport
+
+	ImportLib *ImportLibrary // set when Kind == kindImport
+	Import    *ImportSymbol
 
 	VAddr uint64
 }
 
 func (s *TableSymbol) IsDefined() bool   { return s.Kind == kindDefined || s.Kind == kindCommon }
 func (s *TableSymbol) IsUndefined() bool { return s.Kind == kindUndefined }
-func (s *TableSymbol) IsShared() bool    { return s.Kind == kindShared }
+func (s *TableSymbol) IsImported() bool  { return s.Kind == kindShared || s.Kind == kindImport }
 
-// SymbolTable is the linker's global symbol table.
 type SymbolTable struct {
 	entries   map[string]*TableSymbol
 	objUndefs map[string]bool
 }
 
-// NewSymbolTable returns an empty SymbolTable.
 func NewSymbolTable() *SymbolTable {
 	return &SymbolTable{
 		entries:   make(map[string]*TableSymbol),
@@ -48,10 +49,8 @@ func NewSymbolTable() *SymbolTable {
 	}
 }
 
-// Lookup returns the TableSymbol for name, or nil.
 func (t *SymbolTable) Lookup(name string) *TableSymbol { return t.entries[name] }
 
-// All returns every symbol in the table (order unspecified).
 func (t *SymbolTable) All() []*TableSymbol {
 	out := make([]*TableSymbol, 0, len(t.entries))
 	for _, s := range t.entries {
@@ -60,17 +59,24 @@ func (t *SymbolTable) All() []*TableSymbol {
 	return out
 }
 
-// Ingest processes all inputs and performs symbol resolution.
-// Follows classical Unix left-to-right semantics:
+// Ingest processes all inputs and performs symbol resolution:
 //  1. Object files define the initial symbol set.
-//  2. Shared libraries contribute symbols only if not already defined.
-//  3. Archives are iterated until no new members are extracted.
-//  4. Unresolved strong undefs from object files produce an error.
-func (t *SymbolTable) Ingest(objects []*Object, archives []*Archive, shared []*SharedLib) error {
+//  2. Import libraries (AddImportLibrary) contribute symbols with
+//     author-supplied DLL names — checked before direct DLL parses so an
+//     explicit import library always wins over whatever a same-named
+//     direct DLL parse would resolve to.
+//  3. Directly-parsed shared libraries (AddDynamicLibrary) fill in
+//     anything still undefined or lazy.
+//  4. Archives are iterated until no new members are extracted.
+//  5. Unresolved strong undefs from object files produce an error.
+func (t *SymbolTable) Ingest(objects []*Object, archives []*Archive, importLibs []*ImportLibrary, shared []*SharedLib) error {
 	for _, obj := range objects {
 		if err := t.ingestObject(obj); err != nil {
 			return err
 		}
+	}
+	for _, lib := range importLibs {
+		t.ingestImportLibrary(lib)
 	}
 	for _, lib := range shared {
 		t.ingestShared(lib)
@@ -100,13 +106,13 @@ func (t *SymbolTable) Ingest(objects []*Object, archives []*Archive, shared []*S
 
 func (t *SymbolTable) ingestObject(obj *Object) error {
 	for _, raw := range obj.Symbols {
-		if raw == nil || raw.Name == "" || raw.Binding == BindLocal {
+		if raw == nil || raw.Name == "" || raw.StorageClass.IsLocal() {
 			continue
 		}
 		switch raw.SectionIdx {
 		case SymSecUndef:
 			t.objUndefs[raw.Name] = true
-			t.ensureUndefined(raw.Name, raw.Binding == BindWeak)
+			t.ensureUndefined(raw.Name, raw.StorageClass.IsWeak())
 		case SymSecCommon:
 			if err := t.resolveCommon(raw.Name, raw, obj); err != nil {
 				return err
@@ -120,11 +126,22 @@ func (t *SymbolTable) ingestObject(obj *Object) error {
 	return nil
 }
 
+func (t *SymbolTable) ingestImportLibrary(lib *ImportLibrary) {
+	for name, imp := range lib.Symbols {
+		existing := t.entries[name]
+		if existing == nil || existing.Kind == kindUndefined || existing.Kind == kindLazy {
+			t.entries[name] = &TableSymbol{
+				Name:      name,
+				Kind:      kindImport,
+				ImportLib: lib,
+				Import:    imp,
+			}
+		}
+	}
+}
+
 func (t *SymbolTable) ingestShared(lib *SharedLib) {
 	for name, exp := range lib.Exports {
-		if exp.Binding != BindGlobal && exp.Binding != BindWeak {
-			continue
-		}
 		existing := t.entries[name]
 		if existing == nil || existing.Kind == kindUndefined || existing.Kind == kindLazy {
 			t.entries[name] = &TableSymbol{
@@ -132,7 +149,6 @@ func (t *SymbolTable) ingestShared(lib *SharedLib) {
 				Kind:   kindShared,
 				Lib:    lib,
 				Export: exp,
-				Weak:   exp.Binding == BindWeak,
 			}
 		}
 	}
@@ -173,7 +189,7 @@ func (t *SymbolTable) resolveDefinition(name string, raw *ObjectSymbol, obj *Obj
 		Kind:   kindDefined,
 		Object: obj,
 		RawSym: raw,
-		Weak:   raw.Binding == BindWeak,
+		Weak:   raw.StorageClass.IsWeak(),
 	}
 	existing := t.entries[name]
 	if existing == nil {
@@ -181,7 +197,7 @@ func (t *SymbolTable) resolveDefinition(name string, raw *ObjectSymbol, obj *Obj
 		return nil
 	}
 	switch existing.Kind {
-	case kindUndefined, kindLazy, kindShared, kindCommon:
+	case kindUndefined, kindLazy, kindImport, kindShared, kindCommon:
 		t.entries[name] = incoming
 	case kindDefined:
 		switch {
@@ -207,10 +223,10 @@ func (t *SymbolTable) resolveCommon(name string, raw *ObjectSymbol, obj *Object)
 		return nil
 	}
 	switch existing.Kind {
-	case kindUndefined, kindLazy, kindShared:
+	case kindUndefined, kindLazy, kindImport, kindShared:
 		t.entries[name] = incoming
 	case kindCommon:
-		if raw.Value > existing.RawSym.Value { // larger common wins
+		if raw.Value > existing.RawSym.Value {
 			t.entries[name] = incoming
 		}
 	case kindDefined:

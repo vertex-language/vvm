@@ -21,7 +21,7 @@ type arm64ecPatcher struct {
 	addr64s  []pe.BaseRelocSite
 }
 
-func (p *arm64ecPatcher) SetCoreBase(v uint64)              { p.coreBase = v }
+func (p *arm64ecPatcher) SetCoreBase(v uint64)               { p.coreBase = v }
 func (p *arm64ecPatcher) BaseRelocSites() []pe.BaseRelocSite { return p.addr64s }
 
 func (p *arm64ecPatcher) Apply(data []byte, off int, relType uint32, P, S uint64, A int64) error {
