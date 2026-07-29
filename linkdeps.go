@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/vertex-language/vvm/ir/vir"
 	linkelf "github.com/vertex-language/vvm/linker/elf"
@@ -167,25 +168,27 @@ func resolveMachOLinkDependencies(l *linkmacho.Linker, modules []*vir.Module, t 
 }
 
 // resolvePELinkDependencies is linkdeps.go's third resolver, alongside
-// resolveELFLinkDependencies and resolveMachOLinkDependencies. Unlike
-// those two, linker/pe's AddDynamicLibrary has no "pass nil for a stub"
-// path — parseDLL genuinely reads a real PE32+ export directory (see
-// linker/pe/shared.go) — so this resolver locates and reads the actual
-// .dll off disk, sourced from whichever directories the target's ABI
-// registered via linker/pe's own RegisterSearchDirs (see linker/pe/x64's
-// register.go). This mirrors mingw/cygwin ld's own documented "link
-// directly against the DLL, no import library" mode, not a workaround.
+// resolveELFLinkDependencies and resolveMachOLinkDependencies.
 //
-// This only resolves on a machine that actually has the target DLLs
-// available (i.e. building for windows on windows, or with a manually
-// populated search dir) — there is no Go-style "just write the import
-// name, resolve at load time" path implemented here yet, so cross-
-// compiling x86_64-windows-msvc from a non-Windows host will fail here
-// with a clear "not found" error rather than silently produce a binary
-// with a broken import table.
+// Unlike a direct DLL parse, an import library (`.lib`) carries
+// author-chosen DLL names per symbol independent of whether the real DLL
+// is ever read at all (see linker/pe's README, "Linking against DLLs:
+// three sources, one priority order" — an explicit import library always
+// wins over a same-named direct DLL parse, since SymbolTable.Ingest only
+// falls through to a later source if a symbol is still undefined). This
+// resolver now goes straight to that preferred source: it locates and
+// reads the *.lib* off disk and hands it to l.AddImportLibrary, rather
+// than parsing the real `.dll`'s export directory via AddDynamicLibrary.
+//
+// This only resolves on a machine that actually has the target import
+// libraries available (i.e. building for windows on windows with an SDK/
+// mingw-w64 lib directory populated, or with a manually populated search
+// dir) — cross-compiling x86_64-windows-msvc from a host with no such
+// directory will fail here with a clear "not found" error rather than
+// silently produce a binary with a broken import table.
 func resolvePELinkDependencies(l *linkpe.Linker, modules []*vir.Module, t Target) error {
 	format := vir.FormatOf(t.OS)
-	seenDLL := map[string]bool{}
+	seenLib := map[string]bool{}
 	dirs := linkpe.SearchDirs(peABI(t))
 
 	for _, m := range modules {
@@ -196,18 +199,24 @@ func resolvePELinkDependencies(l *linkpe.Linker, modules []*vir.Module, t Target
 				if err != nil {
 					return fmt.Errorf("vvm: link shared %q: %w", link.Name, err)
 				}
-				if seenDLL[file] {
+				// vir.DeriveLinkFile derives the *.dll* spelling (e.g.
+				// "kernel32.dll") the same way it does for ELF/Mach-O —
+				// swap that for the matching short-format import-library
+				// name ("kernel32.lib") rather than reading the DLL
+				// itself.
+				libFile := strings.TrimSuffix(file, filepath.Ext(file)) + ".lib"
+				if seenLib[libFile] {
 					continue
 				}
-				data, path, err := findAndReadDLL(file, dirs)
+				data, path, err := findAndReadFile(libFile, dirs)
 				if err != nil {
 					return fmt.Errorf(
 						"vvm: link shared %q: %w (searched: %v)", link.Name, err, dirs)
 				}
-				if err := l.AddDynamicLibrary(file, data); err != nil {
+				if err := l.AddImportLibrary(libFile, data); err != nil {
 					return fmt.Errorf("vvm: link shared %q (%s): %w", link.Name, path, err)
 				}
-				seenDLL[file] = true
+				seenLib[libFile] = true
 
 			case vir.LinkStatic:
 				// linker/pe.ParseArchive reads plain GNU/SysV ar containers
@@ -247,7 +256,10 @@ func peABI(t Target) linkpe.ABI {
 	}
 }
 
-func findAndReadDLL(name string, dirs []string) (data []byte, path string, err error) {
+// findAndReadFile is the PE resolver's search-path scan — shared by the
+// import-library lookup above. Named generically (not findAndReadDLL)
+// since it now serves .lib lookups rather than reading a real .dll.
+func findAndReadFile(name string, dirs []string) (data []byte, path string, err error) {
 	for _, dir := range dirs {
 		p := filepath.Join(dir, name)
 		if b, err := os.ReadFile(p); err == nil {
