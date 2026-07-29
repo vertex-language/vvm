@@ -170,26 +170,35 @@ func resolveMachOLinkDependencies(l *linkmacho.Linker, modules []*vir.Module, t 
 // resolvePELinkDependencies is linkdeps.go's third resolver, alongside
 // resolveELFLinkDependencies and resolveMachOLinkDependencies.
 //
-// Unlike a direct DLL parse, an import library (`.lib`) carries
-// author-chosen DLL names per symbol independent of whether the real DLL
-// is ever read at all (see linker/pe's README, "Linking against DLLs:
-// three sources, one priority order" — an explicit import library always
-// wins over a same-named direct DLL parse, since SymbolTable.Ingest only
-// falls through to a later source if a symbol is still undefined). This
-// resolver now goes straight to that preferred source: it locates and
-// reads the *.lib* off disk and hands it to l.AddImportLibrary, rather
-// than parsing the real `.dll`'s export directory via AddDynamicLibrary.
+// Which of the two PE-native dependency kinds ("real DLL" vs. "import
+// library") a `link shared` line resolves as is decided by the *name
+// written in source*, never by probing the filesystem to see what
+// happens to exist. §7.4/README: a short name (no "." or path
+// separator) is derived into the OS-conventional form — for PE that's
+// always a ".dll" — so any short name is, by construction, a DLL
+// dependency, resolved against the OS's own system directories
+// (linkpe.SearchDirs), the same set every OS-shipped library
+// (kernel32, user32, the NVIDIA driver's nvcuda.dll, ...) is guaranteed
+// to be found in on any machine with that component installed.
 //
-// This only resolves on a machine that actually has the target import
-// libraries available (i.e. building for windows on windows with an SDK/
-// mingw-w64 lib directory populated, or with a manually populated search
-// dir) — cross-compiling x86_64-windows-msvc from a host with no such
-// directory will fail here with a clear "not found" error rather than
-// silently produce a binary with a broken import table.
+// An *exact* name (vir.DeriveLinkFile emits it verbatim because it
+// contains a "." or path separator — §7.4) is never re-derived, so
+// writing `link shared "nvcuda.lib"` in the .vir source is what commits
+// this dependency to the import-library path, resolved against
+// importLibSearchDirs — an entirely different directory set (SDK/
+// toolkit installs), because that's where an import library actually
+// lives; the real nvcuda.dll on System32 is never even consulted for a
+// name ending in ".lib".
+//
+// There is no fallback between the two paths in either direction. That
+// is deliberate: which mechanism resolves a given `link shared` must be
+// readable straight off the source line, not dependent on what a given
+// build machine happens to have installed that day.
 func resolvePELinkDependencies(l *linkpe.Linker, modules []*vir.Module, t Target) error {
 	format := vir.FormatOf(t.OS)
 	seenLib := map[string]bool{}
-	dirs := linkpe.SearchDirs(peABI(t))
+	dllDirs := linkpe.SearchDirs(peABI(t))
+	libDirs := importLibSearchDirs(t)
 
 	for _, m := range modules {
 		for _, link := range m.Links {
@@ -199,24 +208,41 @@ func resolvePELinkDependencies(l *linkpe.Linker, modules []*vir.Module, t Target
 				if err != nil {
 					return fmt.Errorf("vvm: link shared %q: %w", link.Name, err)
 				}
-				// vir.DeriveLinkFile derives the *.dll* spelling (e.g.
-				// "kernel32.dll") the same way it does for ELF/Mach-O —
-				// swap that for the matching short-format import-library
-				// name ("kernel32.lib") rather than reading the DLL
-				// itself.
-				libFile := strings.TrimSuffix(file, filepath.Ext(file)) + ".lib"
-				if seenLib[libFile] {
+				if seenLib[file] {
 					continue
 				}
-				data, path, err := findAndReadFile(libFile, dirs)
-				if err != nil {
-					return fmt.Errorf(
-						"vvm: link shared %q: %w (searched: %v)", link.Name, err, dirs)
+
+				switch strings.ToLower(filepath.Ext(file)) {
+				case ".lib":
+					// Exact name explicitly ending in .lib, e.g.
+					// `link shared "nvcuda.lib"` — always the
+					// import-library path, always searched against SDK/
+					// toolkit dirs, never against System32/SysWOW64/System.
+					data, path, err := findAndReadFile(file, libDirs)
+					if err != nil {
+						return fmt.Errorf(
+							"vvm: link shared %q: %w (searched: %v — set CUDA_PATH, "+
+								"run from a Developer Command Prompt so LIB is set, "+
+								"or pass --lib-path)", link.Name, err, libDirs)
+					}
+					if err := l.AddImportLibrary(file, data); err != nil {
+						return fmt.Errorf("vvm: link shared %q (%s): %w", link.Name, path, err)
+					}
+
+				default:
+					// Short name (derives to .dll) or an exact name given
+					// as .dll — always the real-DLL path, always searched
+					// against the OS's own system directories.
+					data, path, err := findAndReadFile(file, dllDirs)
+					if err != nil {
+						return fmt.Errorf(
+							"vvm: link shared %q: %w (searched: %v)", link.Name, err, dllDirs)
+					}
+					if err := l.AddDynamicLibrary(file, data); err != nil {
+						return fmt.Errorf("vvm: link shared %q (%s): %w", link.Name, path, err)
+					}
 				}
-				if err := l.AddImportLibrary(libFile, data); err != nil {
-					return fmt.Errorf("vvm: link shared %q (%s): %w", link.Name, path, err)
-				}
-				seenLib[libFile] = true
+				seenLib[file] = true
 
 			case vir.LinkStatic:
 				// linker/pe.ParseArchive reads plain GNU/SysV ar containers
@@ -240,6 +266,49 @@ func resolvePELinkDependencies(l *linkpe.Linker, modules []*vir.Module, t Target
 	return nil
 }
 
+// importLibSearchDirs is the .lib-resolution counterpart to
+// linkpe.SearchDirs's .dll-resolution dirs — a disjoint directory set,
+// since import libraries never live in System32/SysWOW64/System.
+//
+// Sources, checked in order (all are appended; findAndReadFile scans
+// them in this order too, so an explicit --lib-path wins over $LIB,
+// which wins over an auto-detected CUDA_PATH):
+//
+//  1. --lib-path CLI flag value(s), if the caller threaded any in via
+//     the (not-yet-added) Target field / build option — left as a TODO
+//     hook below.
+//  2. The LIB environment variable, semicolon-separated, exactly as
+//     vcvarsall.bat / a Developer Command Prompt populates it with the
+//     Windows SDK's and MSVC's lib directories.
+//  3. CUDA_PATH, if set (the NVIDIA CUDA installer sets this
+//     unconditionally) — probes its conventional lib\x64 subdirectory.
+//
+// Deliberately does *not* fall back to scanning Program Files: an
+// unbounded recursive search is slow and can silently pick up the wrong
+// architecture's .lib. Every source here is either explicit or an
+// environment variable a real toolchain already relies on.
+func importLibSearchDirs(t Target) []string {
+	var dirs []string
+
+	if lib := os.Getenv("LIB"); lib != "" {
+		for _, d := range strings.Split(lib, ";") {
+			if d = strings.TrimSpace(d); d != "" {
+				dirs = append(dirs, d)
+			}
+		}
+	}
+
+	if cuda := os.Getenv("CUDA_PATH"); cuda != "" {
+		sub := "lib\\x64"
+		if t.baseArch() != "x86_64" {
+			sub = "lib\\Win32"
+		}
+		dirs = append(dirs, filepath.Join(cuda, sub))
+	}
+
+	return dirs
+}
+
 // peABI converts vvm.Target's own string ABI ("msvc", "gnu", or "") into
 // linker/pe's ABI enum. vvm.Target and linker/pe.Target deliberately don't
 // share a type here (§10.3/"no shared types across format boundaries" —
@@ -256,9 +325,10 @@ func peABI(t Target) linkpe.ABI {
 	}
 }
 
-// findAndReadFile is the PE resolver's search-path scan — shared by the
-// import-library lookup above. Named generically (not findAndReadDLL)
-// since it now serves .lib lookups rather than reading a real .dll.
+// findAndReadFile is the PE resolver's search-path scan, shared by both
+// the DLL and import-library lookups above — same linear "first dir
+// that has it wins" semantics either way, just against different dir
+// sets and different filenames.
 func findAndReadFile(name string, dirs []string) (data []byte, path string, err error) {
 	for _, dir := range dirs {
 		p := filepath.Join(dir, name)
