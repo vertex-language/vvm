@@ -5,16 +5,16 @@ import "strings"
 // Item is one entry in an instruction body.
 type Item interface{ item() }
 
-// Pred is an optional guard predicate on an instruction.
-type Pred struct {
+// Predicate is an optional guard predicate on an instruction.
+type Predicate struct {
 	Reg Reg
 	Neg bool
 }
 
 // IsSet reports whether the predicate is present.
-func (p Pred) IsSet() bool { return p.Reg.IsValid() }
+func (p Predicate) IsSet() bool { return p.Reg.IsValid() }
 
-func (p Pred) Text() string {
+func (p Predicate) Text() string {
 	if !p.IsSet() {
 		return ""
 	}
@@ -27,7 +27,7 @@ func (p Pred) Text() string {
 // Instr is a single PTX instruction. The mnemonic is not stored; it is
 // derived from Op, Q and Types in canonical order by Mnemonic.
 type Instr struct {
-	Pred    Pred
+	Pred    Predicate
 	Op      Op
 	Q       Quals
 	Types   [2]Type
@@ -42,10 +42,10 @@ type Instr struct {
 func (*Instr) item() {}
 
 // If guards the instruction on p.
-func (i *Instr) If(p Reg) *Instr { i.Pred = Pred{Reg: p}; return i }
+func (i *Instr) If(p Reg) *Instr { i.Pred = Predicate{Reg: p}; return i }
 
 // IfNot guards the instruction on the negation of p.
-func (i *Instr) IfNot(p Reg) *Instr { i.Pred = Pred{Reg: p, Neg: true}; return i }
+func (i *Instr) IfNot(p Reg) *Instr { i.Pred = Predicate{Reg: p, Neg: true}; return i }
 
 // Note attaches a trailing comment. Comments are whitespace in PTX and are
 // emitted only when the printer is configured to include them.
