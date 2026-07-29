@@ -96,6 +96,24 @@ func ParseDeviceSelectors(list string) ([]DeviceSelector, error) {
 	return out, nil
 }
 
+// toGvirBackend converts vvm's own backend string into gvir's
+// BackendKind — the boundary conversion declaredArtifacts does in the
+// other direction, needed here because gvir.ArchAlias is keyed by
+// BackendKind (aliases are per-backend: "gfx11" only means anything for
+// amdgcn). Returns "" for anything outside the three known backends,
+// which simply won't match any entry in gvir.ArchAliases.
+func toGvirBackend(b string) gvir.BackendKind {
+	switch b {
+	case BackendPTX:
+		return gvir.BackendPTX
+	case BackendAMDGCN:
+		return gvir.BackendAMDGCN
+	case BackendMSL:
+		return gvir.BackendMSL
+	}
+	return ""
+}
+
 // declaredArtifacts converts the module's own target section into the
 // ordered list of artifacts a full build would produce.
 //
@@ -103,8 +121,15 @@ func ParseDeviceSelectors(list string) ([]DeviceSelector, error) {
 // ptx, then amdgcn archs in declaration order, then msl — the order the
 // availability bitmask depends on (ir/gvir/README.md §4). Anything that
 // reorders this list is wrong even if it produces the same set.
+//
+// Artifacts() lives on *gvir.Target, not *gvir.Module (targets.go) — a
+// module with no target section at all has m.Target == nil, and
+// (*gvir.Target).Artifacts() already handles a nil receiver by
+// returning nil, so a malformed module falls through cleanly to
+// BuildDeviceModule's own "declares no target artifacts" check rather
+// than panicking here.
 func declaredArtifacts(m *gvir.Module) ([]DeviceSelector, error) {
-	arts := m.Artifacts()
+	arts := m.Target.Artifacts()
 	out := make([]DeviceSelector, 0, len(arts))
 	for _, a := range arts {
 		var backend string
@@ -171,7 +196,7 @@ func selectArtifacts(declared, sels []DeviceSelector) ([]DeviceSelector, error) 
 // rather than a genuinely absent target.
 func unmatchedSelectorError(sel DeviceSelector, declared []DeviceSelector) error {
 	if sel.Arch != "" {
-		if canon, isAlias := gvir.ResolveArchAlias(sel.Arch); isAlias {
+		if canon, isAlias := gvir.ArchAlias(toGvirBackend(sel.Backend), sel.Arch); isAlias {
 			return fmt.Errorf(
 				"vvm: %s: %q is an alias spelling — write %q (§3)",
 				sel, sel.Arch, canon)
