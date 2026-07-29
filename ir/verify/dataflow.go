@@ -168,16 +168,22 @@ func checkDefiniteAssignment(f *vir.Function, blocks []*vir.Block, byLabel map[s
 }
 
 // checkReadsAssigned checks one body-line's value-reading operands.
-// OpField's struct/field-name idents (args 1,2) and OpCall's callee ident
-// (arg 0) are name references, not value reads, and are skipped. A name
-// found in moduleScope (global/const, §6.2) is always legal to read,
-// independent of the path-sensitive `assigned` set.
+// OpField's struct/field-name idents (args 1,2) are name references, not
+// value reads, and are skipped. OpCall's first operand is a name
+// reference ONLY for the direct-call form (Sig == "") — there, Args[0]
+// names a declared fn/extern fn and never needs prior local assignment,
+// same as a global. For the indirect form (Sig != "", §4.2 `call.<fnsig>`),
+// Args[0] is an ordinary function-pointer *value* (e.g. produced by
+// GetProcAddress) and must be checked like any other operand — skipping
+// it unconditionally would let a call read an unassigned pointer with no
+// diagnostic. A name found in moduleScope (global/const, §6.2) is always
+// legal to read, independent of the path-sensitive `assigned` set.
 func checkReadsAssigned(line *vir.Instruction, assigned map[string]bool, moduleScope map[string]bool) error {
 	for idx, a := range line.Args {
 		if line.Op == vir.OpField && idx > 0 {
 			continue
 		}
-		if line.Op == vir.OpCall && idx == 0 {
+		if line.Op == vir.OpCall && idx == 0 && line.Sig == "" {
 			continue
 		}
 		if a.Kind != vir.OperandIdent || a.IsQualified() {
@@ -214,13 +220,10 @@ func checkTermReadsAssigned(t vir.Terminator, assigned map[string]bool, moduleSc
 		// An indirect tailcall (Sig != "") carries its callee function
 		// pointer in Args[0], the exact same position/shape OpCall uses
 		// for its own indirect-call callee — and checkReadsAssigned above
-		// already exempts OpCall's idx-0 callee operand from this check
-		// (a callee reference, direct or indirect, isn't a "read" in the
-		// local-dataflow sense; a bare fn name used this way takes its
-		// address, same as a global, never requiring prior local
-		// assignment). A direct tailcall never puts its callee in Args at
-		// all (it's the separate Callee field), so this carve-out only
-		// ever applies to the indirect shape.
+		// now applies the identical rule (skip only when it's a name
+		// reference, i.e. the direct form). A direct tailcall never puts
+		// its callee in Args at all (it's the separate Callee field), so
+		// this carve-out only ever applies to the indirect shape.
 		for i, a := range x.Args {
 			if x.Sig != "" && i == 0 {
 				continue
@@ -335,7 +338,7 @@ func checkValistLifetimes(f *vir.Function, blocks []*vir.Block, byLabel map[stri
 				changed = true
 			}
 			if !setsEqual(yOut, mayOut[l]) {
-				mayOut[l] = yOut
+				yOut[l] = yOut
 				changed = true
 			}
 		}

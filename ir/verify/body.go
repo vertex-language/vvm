@@ -210,6 +210,23 @@ func resultTypeSpecial(i *vir.Instruction, ctx *fnCtx) (vir.Type, error) {
 		if len(i.Args) < 1 {
 			return nil, fmt.Errorf("call: expects a callee operand")
 		}
+		// Indirect call (§4.2 `call.<fnsig>`): Args[0] is a function-
+		// pointer *value*, not a callee name — it's whatever local/param
+		// binding produced the pointer (e.g. from GetProcAddress), so it
+		// must NOT be resolved against ctx.fns/ctx.externs. Its legality
+		// as a read is instead the definite-assignment pass's job
+		// (dataflow.go's checkReadsAssigned, which special-cases this
+		// same condition). The result type comes from the named fnsig,
+		// which must have been declared (§2.1 fnsig-decls come before
+		// fn-defs, so every fnsig is already visible by the time any
+		// function body is checked).
+		if i.Sig != "" {
+			sig, ok := ctx.fnsigs[i.Sig]
+			if !ok {
+				return nil, fmt.Errorf("call.%s: undeclared fnsig (§2.2 declare-before-use)", i.Sig)
+			}
+			return sig.Ret, nil
+		}
 		callee := i.Args[0]
 		if callee.Kind != vir.OperandIdent {
 			return nil, fmt.Errorf("call: first operand must be a callee identifier")
@@ -308,7 +325,10 @@ func checkTailcallTarget(f *vir.Function, t vir.TailCall, ctx *fnCtx) error {
 // followed (after loc lines) by unreachable, or itself precede a
 // trap/unreachable terminator. Purely structural — no analysis of the
 // callee's body. Qualified (imported) callees are exempt; importer checks
-// those once it can see the real callee's attributes.
+// those once it can see the real callee's attributes. Indirect calls
+// (Sig != "") are naturally exempt too: Args[0] is a local pointer value,
+// which the flat namespace (§2.2) guarantees can never collide with a
+// noreturn function's name, so the lookups below simply miss for them.
 func checkNoreturnCallSites(b *vir.Block, ctx *fnCtx) error {
 	for i, ln := range b.Lines {
 		if ln.Op != vir.OpCall || len(ln.Args) == 0 {
