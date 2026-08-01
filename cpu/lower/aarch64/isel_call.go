@@ -81,10 +81,26 @@ func (s *sel) selCall(in *vir.Instruction) error {
 		if len(in.Args) == 0 || in.Args[0].Kind != vir.OperandIdent {
 			return fmt.Errorf("call has no callee operand")
 		}
+		if in.Args[0].IsQualified() {
+			return fmt.Errorf("qualified callee %s: importer.Rewrite has not run", in.Args[0])
+		}
+		ident := in.Args[0].Ident
 		var ok bool
-		callee, ok = s.ix.funcs[in.Args[0].Ident]
+		callee, ok = s.ix.funcs[ident]
 		if !ok {
-			return fmt.Errorf("undeclared callee %s", in.Args[0].Ident)
+			// Not a function/extern declared in *this* module. That's
+			// exactly the shape importer.Rewrite leaves for a validated
+			// cross-module call: the qualified ident is gone, replaced by
+			// the real mangled symbol of a function declared in a
+			// different module of this build (importer's own per-kind
+			// summary: fn -> "the real mangled symbol, extern-style").
+			// importer.CheckReferences already validated arity/export
+			// against the real declaration before Rewrite ran, so the
+			// call is known-good; this package just never sees that
+			// other module's declaration (Lower takes one *vir.Module at
+			// a time). Treat it like an extern: an opaque symbol for the
+			// linker to resolve.
+			callee = &callable{sym: ident, unknownShape: true}
 		}
 		args = in.Args[1:]
 	}
@@ -197,6 +213,19 @@ func (s *sel) describeArgs(c *callable, sig *vir.FunctionSignature, args []vir.O
 	for i, a := range args {
 		d := ArgDesc{Named: true}
 		switch {
+		case c != nil && c.unknownShape:
+			// No declared parameter list to consult for a cross-module
+			// symbol this package never saw the declaration of. Every
+			// argument is treated as an ordinary named position — never
+			// as the unnamed variadic tail, which under the stack-varargs
+			// convention (macOS, aapcs64) would force it onto the stack
+			// instead of into an argument register and corrupt an
+			// otherwise perfectly ordinary call. Arity was already
+			// checked by importer.CheckReferences before Rewrite ran, so
+			// the operand list here is already known to be the right
+			// shape; only its per-argument register/stack class is being
+			// decided.
+			d.Type = s.typeOfOperand(a, vir.I64)
 		case c != nil && i < len(c.params):
 			d.Type, d.ByVal, d.SRet = c.params[i].Type, c.params[i].ByVal, c.params[i].SRet
 		case sig != nil && i < len(sig.Params):
@@ -301,6 +330,11 @@ func (s *sel) selSwitch(x vir.Switch) error {
 // the incoming argument area directly can destroy a parameter that has not
 // been read yet whenever argument i overlaps parameter j > i, and staging
 // them below the frame needs a frame that is about to be torn down.
+//
+// A tailcall's callee is always a plain, unqualified ident (README/rewrite.go:
+// the grammar gives tailcall no qualified-ident form at all), so there is no
+// cross-module symbol case here the way selCall has: an undeclared tailcall
+// target is a real error, not a rewritten cross-module reference.
 func (s *sel) selTailCall(x vir.TailCall) error {
 	var (
 		callee   *callable

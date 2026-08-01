@@ -162,6 +162,18 @@ type callable struct {
 	params   []vir.Param
 	variadic bool
 	ret      vir.Type
+
+	// unknownShape marks a callable synthesized at a call site for a bare
+	// ident that names neither a function/extern declared in *this*
+	// module. That is exactly the shape importer.Rewrite leaves behind for
+	// a validated cross-module call (importer's own per-kind summary: fn
+	// -> "the real mangled symbol, extern-style") — the real declaration,
+	// with its real parameter list, lives in a different module in this
+	// build, one this package never sees (Lower takes one *vir.Module at a
+	// time). params/variadic/ret are meaningless here; callers must not
+	// consult them and must fall back to the call site's own operand types
+	// instead (see describeArgs and typefix.go's resultType).
+	unknownShape bool
 }
 
 type index struct {

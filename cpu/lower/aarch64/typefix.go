@@ -96,11 +96,25 @@ func resultType(ix *index, types map[string]vir.Type, in *vir.Instruction) (vir.
 		if in.Args[0].IsQualified() {
 			return nil, fmt.Errorf("qualified callee %s: importer.Rewrite has not run", in.Args[0])
 		}
-		c, ok := ix.funcs[in.Args[0].Ident]
-		if !ok {
-			return nil, fmt.Errorf("undeclared callee %s", in.Args[0].Ident)
+		if c, ok := ix.funcs[in.Args[0].Ident]; ok {
+			return c.ret, nil
 		}
-		return c.ret, nil
+		// Not declared in this module: importer.Rewrite already validated
+		// this cross-module call and rewrote it to the real mangled
+		// symbol (extern-style) — its declaration, and therefore its Ret
+		// type, lives in a different module in this build, one Lower
+		// never sees (it takes one *vir.Module at a time). lower/vir is
+		// responsible for carrying the checked result type through onto
+		// the instruction's own Suffix for exactly this case, the same
+		// way every ruleSuffix opcode already relies on Suffix rather
+		// than a local declaration; use it here instead of failing.
+		if in.Suffix != nil {
+			return in.Suffix, nil
+		}
+		return nil, fmt.Errorf(
+			"undeclared callee %s, and no result-type suffix to fall back on "+
+				"(a cross-module call's Suffix must carry its checked result type)",
+			in.Args[0].Ident)
 
 	case vir.OpSyscall, vir.OpVaArg:
 		return in.Suffix, nil
