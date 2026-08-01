@@ -110,10 +110,25 @@ func (s *sel) selCall(in *vir.Instruction) error {
 	if plan.Reserve != 0 {
 		s.addImm(encoder.SPr, encoder.SPr, -int64(plan.Reserve), true, true)
 	}
+	
 	for i, slot := range plan.Slots {
 		if slot.Class != ClassStack {
 			continue
 		}
+		if descs[i].ByVal != "" {
+			if err := s.value(RegAddr, args[i], vir.Ptr); err != nil {
+				return err
+			}
+			if slot.Bytes > 8 {
+				s.emit(Inst{Op: "ldp", D: R(RegA), A: R(RegB), M: Mem(RegAddr, 0)})
+				s.emit(Inst{Op: "stp", D: R(RegA), A: R(RegB), M: Mem(encoder.SPr, int64(slot.Off))})
+			} else {
+				s.emit(Inst{Op: "ldr", D: R(RegA), M: Mem(RegAddr, 0)})
+				s.emit(Inst{Op: "str", D: R(RegA), M: Mem(encoder.SPr, int64(slot.Off))})
+			}
+			continue
+		}
+		
 		if vir.IsFloat(descs[i].Type) {
 			if err := s.valueFP(RegFA, args[i], descs[i].Type); err != nil {
 				return err
@@ -134,6 +149,18 @@ func (s *sel) selCall(in *vir.Instruction) error {
 	for i, slot := range plan.Slots {
 		switch slot.Class {
 		case ClassReg, ClassIndirect:
+			if descs[i].ByVal != "" {
+				if err := s.value(RegAddr, args[i], vir.Ptr); err != nil {
+					return err
+				}
+				if slot.Bytes > 8 {
+					// AAPCS64 rules: load up to 16 bytes into xN and x(N+1)
+					s.emit(Inst{Op: "ldp", D: R(slot.Reg), A: R(slot.Reg + 1), M: Mem(RegAddr, 0)})
+				} else {
+					s.emit(Inst{Op: "ldr", D: R(slot.Reg), M: Mem(RegAddr, 0)})
+				}
+				continue
+			}
 			if err := s.value(slot.Reg, args[i], descs[i].Type); err != nil {
 				return err
 			}

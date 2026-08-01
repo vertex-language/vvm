@@ -110,20 +110,31 @@ func LayoutArgs(l *Layout, args []ArgDesc, stackVarargs bool) (ArgLayout, error)
 			continue
 
 		case a.ByVal != "":
-			// AAPCS64 splits a composite two ways: <=16 bytes goes in up to
-			// two consecutive argument registers, and anything larger is
-			// copied to caller-allocated memory and *replaced by a pointer*
-			// to the copy — not laid flat on the stack the way SysV x86-64
-			// does it. Neither path is implemented; the hook is here so
-			// adding them does not reshape the layout.
 			sz, err := l.Size(vir.StructType{Name: a.ByVal})
 			if err != nil {
 				return out, err
 			}
-			if sz <= 16 {
-				return out, todo("byval[%s] (%d bytes) needs AAPCS64 register classification", a.ByVal, sz)
+			if sz > 16 {
+				return out, todo("byval[%s] (%d bytes) needs a caller-allocated copy passed indirectly", a.ByVal, sz)
 			}
-			return out, todo("byval[%s] (%d bytes) needs a caller-allocated copy passed indirectly", a.ByVal, sz)
+			
+			words := roundUp(sz, ArgWordBytes) / ArgWordBytes
+			if words == 0 {
+				continue
+			}
+			
+			toStack := !a.Named && stackVarargs
+			if !toStack && out.GPUsed+int(words) <= NumIntArgRegs {
+				out.Slots[i] = ArgSlot{Class: ClassReg, Reg: IntArgRegs[out.GPUsed], Bytes: words * ArgWordBytes}
+				out.GPUsed += int(words)
+				continue
+			} else if !toStack && out.GPUsed < NumIntArgRegs {
+				return out, todo("byval split between registers and stack")
+			}
+			
+			out.Slots[i] = ArgSlot{Class: ClassStack, Off: out.StackBytes, Bytes: words * ArgWordBytes}
+			out.StackBytes += words * ArgWordBytes
+			continue
 
 		case vir.IsFloat(a.Type):
 			toStack := !a.Named && stackVarargs
