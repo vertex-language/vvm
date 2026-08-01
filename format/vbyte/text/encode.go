@@ -29,28 +29,48 @@ func Encode(m *vir.Module) ([]byte, error) {
 		b.WriteString("\n")
 	}
 
-	for _, s := range m.Structs {
-		writeStruct(&b, s)
+	if len(m.Structs) > 0 {
+		b.WriteString("\n")
+		for _, s := range m.Structs {
+			writeStruct(&b, s)
+		}
 	}
-	for _, fs := range m.FunctionSignatures {
-		writeFnSig(&b, fs)
+	if len(m.FunctionSignatures) > 0 {
+		b.WriteString("\n")
+		for _, fs := range m.FunctionSignatures {
+			writeFnSig(&b, fs)
+		}
 	}
-	for _, c := range m.Constants {
-		writeConst(&b, c)
+	if len(m.Constants) > 0 {
+		b.WriteString("\n")
+		for _, c := range m.Constants {
+			writeConst(&b, c)
+		}
 	}
-	for _, g := range m.Globals {
-		writeGlobal(&b, g)
+	if len(m.Globals) > 0 {
+		b.WriteString("\n")
+		for _, g := range m.Globals {
+			writeGlobal(&b, g)
+		}
 	}
-	for _, l := range m.Links {
-		fmt.Fprintf(&b, "link %s %s\n", string(l.Kind), strconv.Quote(l.Name))
+	if len(m.Links) > 0 {
+		b.WriteString("\n")
+		for _, l := range m.Links {
+			fmt.Fprintf(&b, "link %s %s\n", string(l.Kind), strconv.Quote(l.Name))
+		}
 	}
 	for _, eg := range m.Externs {
+		b.WriteString("\n")
 		writeExternGroup(&b, eg)
 	}
-	for _, im := range m.Imports {
-		fmt.Fprintf(&b, "import %s\n", strconv.Quote(im.Path))
+	if len(m.Imports) > 0 {
+		b.WriteString("\n")
+		for _, im := range m.Imports {
+			fmt.Fprintf(&b, "import %s\n", strconv.Quote(im.Path))
+		}
 	}
 	for _, f := range m.Functions {
+		b.WriteString("\n")
 		writeFunction(&b, f)
 	}
 
