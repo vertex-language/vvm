@@ -3,8 +3,6 @@ package aarch64
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 
 	"github.com/vertex-language/vvm/ir/vir"
 	encoder "github.com/vertex-language/vvm/cpu/isa/aarch64/encoder"
@@ -169,8 +167,8 @@ type callable struct {
 	// a validated cross-module call (importer's own per-kind summary: fn
 	// -> "the real mangled symbol, extern-style") — the real declaration,
 	// with its real parameter list, lives in a different module in this
-	// build, one this package never sees (Lower takes one *vir.Module at a
-	// time). params/variadic/ret are meaningless here; callers must not
+	// build, one this package never sees (Lower takes one *vir.Module at
+	// a time). params/variadic/ret are meaningless here; callers must not
 	// consult them and must fall back to the call site's own operand types
 	// instead (see describeArgs and typefix.go's resultType).
 	unknownShape bool
@@ -214,7 +212,7 @@ func newIndex(m *vir.Module) (*index, error) {
 	}
 	for _, g := range m.Globals {
 		ix.globals[g.Name] = g
-		ix.symOf[g.Name] = ix.symbolFor(g.Name, g.Export, nil)
+		ix.symOf[g.Name] = g.Name
 	}
 	for _, grp := range m.Externs {
 		for _, f := range grp.Functions {
@@ -225,44 +223,10 @@ func newIndex(m *vir.Module) (*index, error) {
 		}
 	}
 	for _, f := range m.Functions {
-		sym := ix.symbolFor(f.Name, f.Export, f.Attrs)
-		ix.funcs[f.Name] = &callable{sym: sym, params: f.Params, variadic: f.Variadic, ret: f.Ret}
-		ix.symOf[f.Name] = sym
+		ix.funcs[f.Name] = &callable{sym: f.Name, params: f.Params, variadic: f.Variadic, ret: f.Ret}
+		ix.symOf[f.Name] = f.Name
 	}
 	return ix, nil
-}
-
-// symbolFor computes the ABI-visible symbol for an export (§6.3). An
-// unnamespaced module, an `entry` function, and an `extern_c` function all
-// emit a bare name; anything else in a namespaced module mangles
-// length-prefixed Itanium-style.
-func (ix *index) symbolFor(name string, export bool, attrs []vir.FunctionAttribute) string {
-	if !export || ix.m.Namespace == "" {
-		return name
-	}
-	for _, a := range attrs {
-		if a == vir.AttributeEntry || a == vir.AttributeExternC {
-			return name
-		}
-	}
-	return mangle(ix.m.Namespace, ix.m.Name, name)
-}
-
-func mangle(ns, mod, name string) string {
-	var b strings.Builder
-	b.WriteString("_M")
-	for _, part := range strings.Split(ns, "/") {
-		if part == "" {
-			continue
-		}
-		b.WriteString(strconv.Itoa(len(part)))
-		b.WriteString(part)
-	}
-	b.WriteString(strconv.Itoa(len(mod)))
-	b.WriteString(mod)
-	b.WriteString(strconv.Itoa(len(name)))
-	b.WriteString(name)
-	return b.String()
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +237,27 @@ func mangle(ns, mod, name string) string {
 // passed vir.Verify and, for multi-file modules, importer.Rewrite: a
 // qualified operand or an unresolved import reaching here is a bug upstream,
 // not something this package repairs.
+//
+// Function.Name and Global.Name are trusted as the final ABI symbol,
+// unconditionally — this package does no §6.3 namespace mangling of its
+// own. That mirrors the invariant vvm's own pipeline relies on (see
+// mangle_exports.go's doc comment: "lower/<arch> ... emit[s] whatever
+// Function.Name/Global.Name literally says as the real ABI symbol") and
+// which vvm.BuildModule/BuildModuleGraph both uphold by running
+// applyExportMangling before this package ever sees the module. Deriving
+// the mangled form a second time here — from a name that has already been
+// mangled once upstream — silently doubles the mangling and produces a
+// symbol nothing else in the build ever references, which is exactly the
+// bug this comment now documents rather than leaves latent: a namespaced
+// module's own exports would link fine standalone (nothing else defines a
+// competing symbol to disagree with) but corrupt against any real
+// multi-module vvm build, where a caller's already-correctly-mangled call
+// site (computed once, by importer.Rewrite, before mangling ran) stops
+// matching the doubly-mangled definition this package would otherwise
+// invent. A caller driving this package directly, outside vvm's pipeline,
+// against a namespaced module it has not itself mangled is responsible for
+// mangling Function.Name/Global.Name first if it wants §6.3 symbols out;
+// this package no longer does it implicitly.
 func Lower(m *vir.Module) (*Program, error) {
 	if m.Target == nil {
 		return nil, fmt.Errorf("module %q declares no target", m.Name)
